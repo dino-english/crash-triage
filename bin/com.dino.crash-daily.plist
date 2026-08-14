@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.dino.crash-daily</string>
+
+    <!-- L1 每日数据日报：BigQuery → 飞书。改时间只改这里的 Hour/Minute。 -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>7</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <!-- 安装时把 USER 替换成实际用户名 -->
+        <string>/Users/USER/crash-triage/bin/crash-daily.sh</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>CRASH_REPORT_ROOT</key>
+        <string>/Users/USER/crash-triage</string>
+        <key>CRASH_REPORT_CHAT_ID</key>
+        <string>oc_655033f1f85fa04f9eac25d56f056fc9</string>
+    </dict>
+
+    <!-- 机器休眠错过触发时，唤醒后补跑一次。日报不能因为机器睡着就断档。 -->
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/USER/crash-triage/logs/launchd-daily.out</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/USER/crash-triage/logs/launchd-daily.err</string>
+</dict>
+</plist>

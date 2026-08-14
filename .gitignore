@@ -1,0 +1,11 @@
+# 运行时数据（每次运行重新生成，不提交）
+state/
+logs/
+reports/
+
+# 机器特定配置（含本机 PATH，不提交；模板见 bin/config.env.example 若有）
+bin/config.env
+
+# 临时文件
+*.tmp
+*.log
