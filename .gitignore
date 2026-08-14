@@ -1,9 +1,12 @@
 # 运行时数据（每次运行重新生成，不提交）
 state/
 logs/
-reports/
 
-# 机器特定配置（含本机 PATH，不提交；模板见 bin/config.env.example 若有）
+# reports/ 下：台账真相源 LEDGER.md + 快照要提交；每日生成的日报/周报不提交
+reports/*-daily.md
+reports/*-weekly.md
+
+# 机器特定配置（含本机 PATH，不提交）
 bin/config.env
 
 # 临时文件
