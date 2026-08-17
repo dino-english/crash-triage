@@ -18,6 +18,8 @@ if [ "$SRC_DIR" != "$ROOT/bin" ]; then
   echo "--- 安装脚本 $SRC_DIR → $ROOT/bin ---"
   cp "$SRC_DIR"/*.sh "$ROOT/bin/"
   chmod +x "$ROOT/bin"/*.sh
+  # 同步 plist 模板（含 /Users/USER 占位符，末尾 sed 替换）
+  for p in "$SRC_DIR"/*.plist; do [ -e "$p" ] && cp "$p" "$ROOT/bin/"; done 2>/dev/null || true
 fi
 
 # ── 1. 探测二进制真实路径，写 config.env ──────────────
@@ -89,6 +91,11 @@ echo "=== 安装完成 ==="
 echo "先 DRY RUN 验一次（不发消息）："
 echo "  CRASH_REPORT_ROOT=$ROOT CRASH_REPORT_CHAT_ID=<你的 ou_xxx> CRASH_REPORT_DRY_RUN=1 $ROOT/bin/crash-weekly.sh"
 echo
-echo "确认无误后装定时（每周一 06:30）："
+# plist 里的 /Users/USER 占位符替换成实际用户（否则 launchd 指向不存在的路径，装机即坑）
+if ls "$ROOT"/bin/*.plist >/dev/null 2>&1; then
+  sed -i '' "s|/Users/USER|$HOME|g" "$ROOT"/bin/*.plist
+  echo "--- 已把 plist 的 /Users/USER 替换为 $HOME ---"
+fi
+echo "确认无误后装定时（每周一 05:30）："
 echo "  cp $ROOT/bin/com.dino.crash-weekly.plist ~/Library/LaunchAgents/"
 echo "  launchctl load ~/Library/LaunchAgents/com.dino.crash-weekly.plist"

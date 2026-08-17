@@ -4,6 +4,11 @@
 # 两种模式，别混：
 #   light（默认，L1 每天）—— 只抓 snapshot.json，不做根因不给方案。日报每天跑完整 triage
 #                            既贵又违背「日报轻量」的设计。
+#                            自 2026-08-14 起 light 模式从「日报崩溃主数据源」降级为「对照/回退」：
+#                            日报崩溃段与卡片计数已改走 BigQuery firebase_crashlytics 事件级，
+#                            此处 MCP topIssues 只用于 ①首验期对照两套数值 ②索引页「跟踪中的 issue」
+#                            ③修复状态反查（fix_commit）。确认一致后移除（见 change
+#                            crash-source-bigquery-migration D4）。
 #   full （L2 每周）      —— 跑完整 firebase-crash-triage skill，额外产出 report.md
 #                            （含根因与修复方案，标注未经人工复核）。
 set -euo pipefail
@@ -32,7 +37,7 @@ appId：
 - Android: ${AND_REPO}
 
 **取数口径必须与日报一致**（否则同一天日报说 8 个、周报说 31 个，看的人会失去信任）：
-`crashlytics_get_report{report:'topIssues', filter:{issueErrorTypes:['FATAL']}, pageSize:20}`，
+\`crashlytics_get_report{report:'topIssues', filter:{issueErrorTypes:['FATAL']}, pageSize:20}\`，
 用 Firebase 默认 7 天窗，不要自行扩大窗口或条数。需要更多上下文时在报告正文里说明，
 但 snapshot.json 只放这个口径下的结果。
 

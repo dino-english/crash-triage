@@ -72,13 +72,13 @@ OUT_DIR="$ROOT/state/weekly-$TS"
 # 完整 triage 实测跑 12 分钟以上；给 30 分钟上限防挂死（挂死会导致下周又起一个）。
 # 超时不整跑失败——只要 snapshot.json 落了盘就能发变化摘要，报告是加分项。
 TRIAGE_TIMEOUT="${TRIAGE_TIMEOUT:-1800}"
-run_with_timeout "$TRIAGE_TIMEOUT" "$ROOT/bin/fetch-snapshot.sh" "$OUT_DIR" full
-TRIAGE_RC=$?
-[ "$TRIAGE_RC" -eq 124 ] && echo "  ⚠️ triage 超时（${TRIAGE_TIMEOUT}s），降级为只发变化摘要"
+# set -e 下 run_with_timeout 超时返回 124 会直接杀死脚本；用 || 捕获退出码让降级路径存活。
+run_with_timeout "$TRIAGE_TIMEOUT" "$ROOT/bin/fetch-snapshot.sh" "$OUT_DIR" full || TRIAGE_RC=$?
+[ "${TRIAGE_RC:-0}" -eq 124 ] && echo "  ⚠️ triage 超时（${TRIAGE_TIMEOUT}s），降级为只发变化摘要"
 SNAP_NEW="$OUT_DIR/snapshot.json"
 TRIAGE_REPORT="$OUT_DIR/report.md"
 # 快照是核心产出，缺了才算真失败；report.md 缺失只降级（prompt 已要求先写快照再写报告）
-[ -s "$SNAP_NEW" ] || fail "快照文件为空（triage 退出码 $TRIAGE_RC）"
+[ -s "$SNAP_NEW" ] || fail "快照文件为空（triage 退出码 ${TRIAGE_RC:-?}）"
 [ -s "$TRIAGE_REPORT" ] || echo "  ⚠️ 未产出 report.md，本周只发变化摘要"
 jq -e '.ios and .android' "$SNAP_NEW" >/dev/null || fail "快照 JSON 结构不符（缺 ios/android）"
 
@@ -187,7 +187,7 @@ jq -n \
     index_append:(if $report != "" then {jsonl_file:$idx, day:$day, ios:$ios, android:$and} else null end)}' \
   > "$PUBLISH_DIR/manifest.json"
 
-echo "  ✅ 投递清单 $PUBLISH_DIR/manifest.json（发送=$SEND_FLAG）"
+echo "  ✅ 投递清单 $PUBLISH_DIR/manifest.json（发送=${SEND_FLAG}）"
 
 # ── 7. 收尾 ───────────────────────────────────────────
 cp "$SNAP_NEW" "$SNAP_LAST"

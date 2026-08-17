@@ -8,8 +8,8 @@
 
 - **WHEN** 到达每日触发时刻（默认本地时区 07:00）
 - **THEN** L1 查询 BigQuery 性能数据与 Crashlytics 崩溃数据，生成日报并发送到飞书群
-- **AND** 日报覆盖式更新同一份飞书文档（快照性质之外的可变数据，固定链接每天覆盖）
-- **AND** 重建索引页、同步台账镜像
+- **AND** 日报 v1 每次新建一份飞书文档（`docx_builtin_import`，非固定 ID 覆盖）
+- **AND** 重建索引页、同步台账镜像 v1 暂未实现（待办，见「索引页与台账镜像过渡」）
 
 #### Scenario: 每周变化播报
 
@@ -38,18 +38,19 @@
 #### Scenario: 台账更新
 
 - **WHEN** 需要更新崩溃台账（LEDGER）
-- **THEN** 由开发者在修复提交时顺手更新仓库 `reports/crash-triage/LEDGER.md`
-- **AND** 自动链路 MUST NOT 修改该文件，只把它镜像到飞书
+- **THEN** 由开发者在修复提交时顺手更新仓库 `reports/LEDGER.md`
+- **AND** 自动链路 MUST NOT 修改该文件
 
 ### Requirement: 台账真相源是仓库文件
 
-崩溃专项台账（LEDGER）的真相源 SHALL 是仓库文件 `reports/crash-triage/LEDGER.md`；飞书上的在线版 MUST 是只读镜像，且 MUST 带「请勿在此编辑」警告。
+崩溃专项台账（LEDGER）的真相源 SHALL 是仓库文件 `reports/LEDGER.md`；飞书上的在线版（v1 落地后）MUST 是只读镜像，且 MUST 带「请勿在此编辑」警告。
 
 #### Scenario: 台账镜像同步
 
-- **WHEN** L1 每日运行
-- **THEN** 把仓库 `reports/crash-triage/LEDGER.md` 同步（overwrite）到飞书台账文档
+- **WHEN** L1 每日运行（v1 落地后）
+- **THEN** 把仓库 `reports/LEDGER.md` 同步（overwrite）到飞书台账文档
 - **AND** 镜像顶部 MUST 标注「请勿在此编辑」
+- **AND** v1 现状：台账镜像（与索引页的「固定 ID 覆盖」）尚未实现，此 Scenario 属过渡态待办（见「索引页与台账镜像过渡」）
 
 #### Scenario: 冲突仲裁
 
@@ -113,6 +114,7 @@ L2 周报 SHALL 在无任何变化时静默跳过发送，避免播报噪音化�
 
 - **WHEN** 对 iOS issue 做 `git log --grep=<issueId>`
 - **THEN** 无结果判「🔴 未修」；找到 commit 但线上无该版本事件判「🛠️ 代码已修·未发版」；含修复版本已上线判「📦 已发版·观察中」；发版后事件归零判「✅ 已消失」
+- **AND** v1 现状：自动判定只落地前两态（「🔴 未修」/「🛠️ 代码已修·未发版」，渲染 `fix_commit`）；「📦 已发版·观察中」「✅ 已消失」需版本-事件对照，尚未实现，留人工 triage
 
 #### Scenario: Android 修复状态不可判定
 
@@ -154,6 +156,22 @@ L2 周报 SHALL 在无任何变化时静默跳过发送，避免播报噪音化�
 - **WHEN** BigQuery `firebase_crashlytics` 表就绪
 - **THEN** 崩溃统计 MUST 改为事件级（BigQuery），消除「误关 issue 即从统计消失」的问题
 - **AND** 崩溃率 SQL 分母用 `firebase_sessions`、分子用 `firebase_crashlytics`
+
+### Requirement: 索引页与台账镜像过渡
+
+索引页重建与台账镜像的「固定 ID 覆盖」SHALL 作为过渡态待办：v1 日报/周报文档每次新建（`docx_builtin_import`），不覆盖同一份固定 ID 文档；在固定 ID 覆盖能力落地前，MUST NOT 声称已重建索引页或已同步台账镜像。
+
+#### Scenario: v1 每次新建文档
+
+- **WHEN** 固定 ID 覆盖能力尚未落地（lark 块 API 不支持表格，`docx_builtin_import` 每次新建）
+- **THEN** 日报/周报文档每次新建，卡片链接到当天新文档
+- **AND** 重建索引页、同步台账镜像标记为待办，不产出「已同步」的假状态
+
+#### Scenario: 固定 ID 覆盖落地后
+
+- **WHEN** 固定 ID 覆盖能力就绪
+- **THEN** L1 重建索引页、同步台账镜像（覆盖同一份固定 ID 文档）
+- **AND** 镜像顶部标注「请勿在此编辑」
 
 ### Requirement: NON_FATAL 维度展示
 

@@ -1,6 +1,6 @@
 ## Context
 
-**当前状态（2026-08-14）**：`scripts/crash-report/` 已实现并跑通两条链路，产出发到飞书群「Dino 崩溃 & 性能日/周报」（`oc_655033f1f85fa04f9eac25d56f056fc9`）。实现完整（`INSTALL.md` 344 行装机清单 + 两个主脚本 + 快照抓取 + SQL 片段 + launchd plist），但从未沉淀成 openspec change，`ios-nonfatal-reporting` 里的「崩溃日报（change 待建）」引用悬空至今。
+**当前状态（2026-08-14）**：`bin/`（运行时）已实现并跑通两条链路，产出发到飞书群「Dino 崩溃 & 性能日/周报」（`oc_655033f1f85fa04f9eac25d56f056fc9`）。实现完整（`INSTALL.md` 344 行装机清单 + 两个主脚本 + 快照抓取 + SQL 片段 + launchd plist），但从未沉淀成 openspec change，`ios-nonfatal-reporting` 里的「崩溃日报（change 待建）」引用悬空至今。`scripts/crash-report/` 是 git 管理的源副本，`setup.sh` 自装到 `$ROOT/bin/`。
 
 **数据源现状**：
 
@@ -64,11 +64,11 @@
 
 **代价**：过渡期日报有口径限制，必须显式标注（见 spec）。
 
-### D5. 台账真相源 = 仓库文件，飞书是只读镜像
+### D5. 台账真相源 = 仓库文件，飞书是只读镜像（v1 待办）
 
-**选择**：`reports/crash-triage/LEDGER.md` 为真相源，L1 每日 overwrite 同步到飞书，镜像顶部带「请勿在此编辑」。
+**选择**：`reports/LEDGER.md` 为真相源；飞书台账镜像 + 索引页的「固定 ID 覆盖」v1 暂未实现（lark 块 API 不支持表格，`docx_builtin_import` 每次新建），落地后由 L1 每日 overwrite 同步到飞书，镜像顶部带「请勿在此编辑」。
 
-**理由**：台账需要 git 历史、code review、跨端共享；飞书文档无版本控制。让仓库为源，飞书只为「不看仓库的人也能读」。
+**理由**：台账需要 git 历史、code review、跨端共享；飞书文档无版本控制。让仓库为源，飞书只为「不看仓库的人也能读」。v1 未落地固定 ID 覆盖，故 spec 以「索引页与台账镜像过渡」标注待办态，不声称已同步。
 
 ### D6. 定时时间：L1 07:00，L2 周一 05:30
 
@@ -125,7 +125,7 @@
 
 本 change 是**登记已实现的系统**，无迁移步骤：
 
-1. **已实现**：`scripts/crash-report/` 完整跑通（见 Context）
+1. **已实现**：`bin/` 完整跑通（见 Context）
 2. **本 change**：登记契约（proposal + design + spec）+ 收编缺口（tasks）
 3. **待办**（见 tasks 待办组）：部署 Mac mini、崩溃表出表后换数据源、L2 超时保护、Android 约定对齐
 4. **归档**：本 change 归档后 spec 落入 `openspec/specs/crash-perf-daily-weekly-report/spec.md`

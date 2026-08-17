@@ -23,6 +23,8 @@ sed -e "s|{{TABLE}}|$TBL|g" -e "s|{{DAYS}}|1|g" sql/perf-screens.sql | bq query 
 | `perf-network.sql` | 自家 API 的 P50/P95 延迟与错误率 | `firebase_performance` |
 | `perf-traces.sql` | 启动耗时等自定义 trace | `firebase_performance` |
 | `sessions-by-version.sql` | 各版本会话数 / 设备数（**修复验证的分母**） | `firebase_sessions` |
+| `crash-issues.sql` | 致命崩溃 issue 聚合（issue_id / title / 事件数 / 最新时间戳） | `firebase_crashlytics` |
+| `crash-rate.sql` | 崩溃率（分子 `firebase_crashlytics` 事件数 / 分母 `firebase_sessions` 会话数） | 双表 |
 
 ## 阈值说明（Firebase 定义，非我们设的）
 
@@ -31,4 +33,5 @@ sed -e "s|{{TABLE}}|$TBL|g" -e "s|{{DAYS}}|1|g" sql/perf-screens.sql | bq query 
 
 ## 待补
 
-崩溃率的 SQL 等 `firebase_crashlytics` 出表后补（分母 `firebase_sessions` 已就绪，分子还缺）。
+- 崩溃率最终口径是否升级为 crash-free（需 `firebase_crashlytics.firebase_session_id` ↔ `firebase_sessions.session_id` 关联），当前为「事件数/会话数」近似口径。
+- `firebase_crashlytics` 目前只有 REALTIME 表（行数少，可能仍在回填），若后续出每日批表需复评 D3。
