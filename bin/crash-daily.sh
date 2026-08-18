@@ -259,21 +259,48 @@ cell_color() { # $1=判定值 $2=红 $3=黄 $4=单元格内容
   esac
 }
 # 告警行：只由**最新版**触发（design D8）。$1=指标名 $2=iOS最新版值 $3=Android最新版值 $4=红 $5=黄 $6=单位
+#
+# 摘要行必须标版本、且区分「没超阈值」与「没算出来」：
+# 卡片表格里缺数有三态（样本不足 / 该版本无数据 / 表未同步），压进摘要行就只剩一个「—」，
+# 看起来像故障；再顶着 🔴 更糟——**没有数据不该告警**（2026-08-18 Sir 指出：
+# 「🔴 慢帧最差页 iOS — · Android 94.6%」里 iOS 的 — 是新版样本不足，不是出事）。
+# 故：有值的端标 `<版本> <值>`，无值的端降级成灰字括注，不参与红黄判定。
+alert_side() { # $1=平台名 $2=版本 $3=值 $4=单位 → "iOS 1.5.4 425ms" 或 ""
+  [ -n "$3" ] && [ "$3" != "无法计算" ] || { printf ''; return 0; }
+  printf '%s %s %s%s' "$1" "${2:-—}" "$3" "$4"
+}
+# 缺数端的括注：说明为什么没有值，而不是甩一个「—」
+alert_missing() { # $1=平台名 $2=版本 $3=值 → "iOS 1.5.4 无数据" 或 ""
+  [ -n "$3" ] && [ "$3" != "无法计算" ] && { printf ''; return 0; }
+  printf '%s %s %s' "$1" "${2:-—}" "$([ "$3" = "无法计算" ] && echo '无法计算' || echo '无数据')"
+}
+_alert_body() { # $1=指标名 $2=iOS版本 $3=iOS值 $4=And版本 $5=And值 $6=单位
+  local si sa miss="" vals note="" sep
+  si="$(alert_side iOS "$2" "$3" "$6")"; sa="$(alert_side Android "$4" "$5" "$6")"
+  for m in "$(alert_missing iOS "$2" "$3")" "$(alert_missing Android "$4" "$5")"; do
+    [ -n "$m" ] || continue
+    if [ -n "$miss" ]; then miss="$miss · $m"; else miss="$m"; fi
+  done
+  sep=""; { [ -n "$si" ] && [ -n "$sa" ]; } && sep=" · "
+  vals="${si}${sep}${sa}"
+  # 全角括号与 · 一律用条件赋值拼接，不写 ${var:+（...）}：
+  # 多字节字符紧跟变量展开时，bash 在 set -u 下会把后续字节并进变量名（实测 "miss?: unbound variable"）
+  [ -n "$miss" ] && note="（${miss}）"
+  printf '%s %s%s' "$1" "$vals" "$note"
+}
 red_line() {
-  local li la d2 d3
+  local li la
   li="$(traffic_light "$2" "$4" "$5")"; la="$(traffic_light "$3" "$4" "$5")"
   if [ "$li" = "red" ] || [ "$la" = "red" ]; then
-    d2="${2:+$2$6}"; d3="${3:+$3$6}"
-    printf '🔴 %s iOS %s · Android %s' "$1" "${d2:-—}" "${d3:-—}"
+    printf '🔴 %s' "$(_alert_body "$1" "${IOS_V1:-—}" "$2" "${AND_V1:-—}" "$3" "$6")"
   fi
 }
 yellow_line() {
-  local li la d2 d3
+  local li la
   li="$(traffic_light "$2" "$4" "$5")"; la="$(traffic_light "$3" "$4" "$5")"
   { [ "$li" = "red" ] || [ "$la" = "red" ]; } && return 0
   if [ "$li" = "yellow" ] || [ "$la" = "yellow" ]; then
-    d2="${2:+$2$6}"; d3="${3:+$3$6}"
-    printf '🟡 %s iOS %s · Android %s' "$1" "${d2:-—}" "${d3:-—}"
+    printf '🟡 %s' "$(_alert_body "$1" "${IOS_V1:-—}" "$2" "${AND_V1:-—}" "$3" "$6")"
   fi
 }
 # 非空才追加（避免空行）；恒返回 0（否则 set -e 在空输入时误炸）
