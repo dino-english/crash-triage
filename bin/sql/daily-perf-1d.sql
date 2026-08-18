@@ -11,16 +11,21 @@
 SELECT
   (SELECT ROUND(APPROX_QUANTILES(trace_info.duration_us, 100)[OFFSET(50)] / 1000, 0)
      FROM `{{TABLE}}` WHERE event_type = 'DURATION_TRACE' AND event_name = '_app_start'
+       AND app_display_version IN ({{VERSIONS}})
        AND DATE(event_timestamp) = DATE_SUB(CURRENT_DATE(), INTERVAL {{DAYS}} DAY)) AS start_p50_1d,
   (SELECT ROUND(APPROX_QUANTILES(trace_info.duration_us, 100)[OFFSET(95)] / 1000, 0)
      FROM `{{TABLE}}` WHERE event_type = 'DURATION_TRACE' AND event_name = '_app_start'
+       AND app_display_version IN ({{VERSIONS}})
        AND DATE(event_timestamp) = DATE_SUB(CURRENT_DATE(), INTERVAL {{DAYS}} DAY)) AS start_p95_1d,
   (SELECT ROUND(AVG(trace_info.screen_info.slow_frame_ratio) * 100, 1)
      FROM `{{TABLE}}` WHERE event_type = 'SCREEN_TRACE'
+       AND app_display_version IN ({{VERSIONS}})
        AND DATE(event_timestamp) = DATE_SUB(CURRENT_DATE(), INTERVAL {{DAYS}} DAY)) AS slow_pct_1d,
   (SELECT ROUND(AVG(trace_info.screen_info.frozen_frame_ratio) * 100, 2)
      FROM `{{TABLE}}` WHERE event_type = 'SCREEN_TRACE'
+       AND app_display_version IN ({{VERSIONS}})
        AND DATE(event_timestamp) = DATE_SUB(CURRENT_DATE(), INTERVAL {{DAYS}} DAY)) AS frozen_pct_1d,
   (SELECT ROUND(SAFE_DIVIDE(COUNTIF(network_info.response_code >= 400), COUNT(*)) * 100, 2)
      FROM `{{TABLE}}` WHERE event_type = 'NETWORK_REQUEST' AND event_name LIKE '%dinoenglish%'
+       AND app_display_version IN ({{VERSIONS}})
        AND DATE(event_timestamp) = DATE_SUB(CURRENT_DATE(), INTERVAL {{DAYS}} DAY)) AS net_err_pct_1d

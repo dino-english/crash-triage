@@ -10,10 +10,26 @@ L1 日报用的 BigQuery 查询，每个文件一个指标块。
 |---|---|---|
 | `{{TABLE}}` | 完整表名 | `dino-english-497507.firebase_performance.com_prime_dino_english_IOS` |
 | `{{DAYS}}` | 回看天数 | `1`（日报）/ `7`（周报） |
+| `{{VERSIONS}}` | 版本白名单（**带引号的逗号列表**，非裸值） | `"1.5.4"` / `"1.5.4","1.5.3"` |
+| `{{MIN_SESSIONS}}` | 版本候选门槛（仅 `latest-versions.sql`） | `5` |
 
 ```bash
-sed -e "s|{{TABLE}}|$TBL|g" -e "s|{{DAYS}}|1|g" sql/perf-screens.sql | bq query --use_legacy_sql=false --format=csv
+sed -e "s|{{TABLE}}|$TBL|g" -e "s|{{DAYS}}|1|g" -e 's|{{VERSIONS}}|"1.5.4"|g' \
+    sql/perf-screens.sql | bq query --use_legacy_sql=false --format=csv
 ```
+
+## 版本过滤：两套字段路径，谓词写在 SQL 文件里
+
+版本字段在三个数据集里路径不同，**不可共用一套谓词模板**（bq 实测 schema）：
+
+| 数据集 | 字段路径 |
+|---|---|
+| `firebase_performance` | `app_display_version`（顶层 STRING） |
+| `firebase_crashlytics` | `application.display_version`（RECORD 嵌套） |
+| `firebase_sessions` | `application.display_version`（RECORD 嵌套） |
+
+因此脚本只替换 `{{VERSIONS}}` 的**值**，`IN (...)` 谓词与字段路径由各 SQL 文件自己写——
+让「哪张表的版本字段叫什么」这个知识留在知道表结构的地方。
 
 ## 文件
 
@@ -25,6 +41,7 @@ sed -e "s|{{TABLE}}|$TBL|g" -e "s|{{DAYS}}|1|g" sql/perf-screens.sql | bq query 
 | `sessions-by-version.sql` | 各版本会话数 / 设备数（**修复验证的分母**） | `firebase_sessions` |
 | `crash-issues.sql` | 致命崩溃 issue 聚合（issue_id / title / 事件数 / 最新时间戳） | `firebase_crashlytics` |
 | `crash-rate.sql` | 崩溃率（分子 `firebase_crashlytics` 事件数 / 分母 `firebase_sessions` 会话数） | 双表 |
+| `latest-versions.sql` | 版本清单解析（**日报唯一版本源**，返回候选版本 + 会话/设备数） | `firebase_sessions` |
 
 ## 阈值说明（Firebase 定义，非我们设的）
 

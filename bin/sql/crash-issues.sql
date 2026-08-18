@@ -11,6 +11,7 @@ SELECT
   FORMAT_TIMESTAMP('%Y-%m-%d %H:%M UTC', MAX(event_timestamp))   AS latest
 FROM `{{TABLE}}`
 WHERE is_fatal = TRUE
+  AND application.display_version IN ({{VERSIONS}})
   AND event_timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {{DAYS}} DAY)
 GROUP BY issue_id, issue_title
 ORDER BY n DESC

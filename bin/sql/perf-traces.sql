@@ -8,6 +8,7 @@ SELECT
 FROM `{{TABLE}}`
 WHERE event_type = 'DURATION_TRACE'
   AND event_name NOT IN ('_app_in_foreground', '_app_in_background')
+  AND app_display_version IN ({{VERSIONS}})
   AND event_timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {{DAYS}} DAY)
 GROUP BY trace
 ORDER BY n DESC

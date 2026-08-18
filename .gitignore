@@ -1,13 +1,7 @@
-# 运行时数据（每次运行重新生成，不提交）
-state/
-logs/
-
-# reports/ 下：台账真相源 LEDGER.md + 快照要提交；每日生成的日报/周报不提交
-reports/*-daily.md
-reports/*-weekly.md
-
-# 机器特定配置（含本机 PATH，不提交）
-bin/config.env
+# 运行数据不在仓库里（见 bin/crash-daily.sh 顶部「代码与状态分离」）：
+# logs / 快照 / 历史 / 每日报告 / config.env 全部落在 $CRASH_REPORT_STATE_DIR
+# （默认 ${XDG_STATE_HOME:-~/.local/state}/crash-triage）。
+# reports/ 下只留需要留痕的：LEDGER.md（人工真相源）、weekly-index.jsonl（周报文档 URL 归档）、专项快照。
 
 # 临时文件
 *.tmp

@@ -11,6 +11,7 @@ SELECT
 FROM `{{TABLE}}`
 WHERE event_type = 'NETWORK_REQUEST'
   AND event_name LIKE '%dinoenglish%'
+  AND app_display_version IN ({{VERSIONS}})
   AND event_timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {{DAYS}} DAY)
 GROUP BY endpoint
 HAVING n >= 50

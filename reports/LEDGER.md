@@ -36,9 +36,45 @@
 
 ## Issue 台账
 
-| Issue ID | 标题 | 类型 | 首次纳入 | 处置状态 | 本次状态 | 事件量趋势 | 备注 |
-|---|---|---|---|---|---|---|---|
-| 3fd09886 | [aosl] aosl_shrink_resources NSGenericException（NSHashTable mutated while enumerated） | FATAL | 2026-07-24 / 首建 | **已修复（合入 dev-1.5.1，2026-08-06）· 1.5.1 已上架 App Store** | 📦 已发版·观察中 | 近 90 天 1（v1.3.2）→ 08-06 上午 **5** → 08-06 **8** → 08-07 **12** → 08-10 **16**（全部 v1.5.0(1.5.0.1)，即修复前的包） | ✅钻取确认（5 条事件全读）。**根因（2026-08-06 定位）**：`DCAgoraConvoAIAdapter.swift:84` 的 `client.login` completion **在 Agora 回调线程执行且无主线程切换**，其内 `setupConvoAI` → `ConversationalAIAPIImpl.init` 连做 3 次 `addDelegate`（`:35` rtc / `:36` rtm / `TranscriptController:526` rtm），与 `AgoraEvent` 线程遍历 `NSConcreteHashTable` 撞车。breadcrumb 全部为 `rtc_joined→rtc_connected` 后 14ms 内崩，5 例签名 100% 一致、全落 variant `766e5ef5b5d0311ea258ed38c136f1b3`。**既有三个修复 `6510080d`(6-30) / `e2a96f24`(7-3) / `ed37c562`(7-9) 全在 HEAD 祖先链且早于两个崩溃版本，但全部只动 teardown 侧，join 侧从未覆盖**。内存是放大器非根因（5 例 free 36~126MB，2 例 `mem_tier: low`）。**已落地修复（2026-08-06，dev-1.5.1）**：`setupConvoAI` 拆为 `makeConvoAI`（建连前同步调，完成全部 delegate 注册）+ `subscribeConvoAI`（login 成功后调，订阅依赖登录态）。**注意排除的错误方向**：切主线程无效——`AgoraEvent` 是 SDK 自有线程，换哪个线程写都仍是并发；逐点加锁会漏 `ConversationalAIAPIImpl.init` / `TranscriptController.setupWithConfig` 内部的后续注册。编译已过（`BUILD SUCCEEDED`）。**真机回归已做**（2026-08-06，iPhone 17 Pro Max / iPhone18,2，Debug 包）：进→用→退 ×2 轮全通，14638 行控制台日志零 `NSGenericException` / `mutated while` / `NSFastEnumerationMutationHandler`；RTM 双向通（`sendRTMMessage` 成功 = login + subscribe + delegate 注册均生效）；teardown 干净、退-进循环无残留。**时序为结构性保证非时序保证**：`DCAgoraRTCManager.m:578` 同步调 setup（内含 `makeConvoAI`）→ 方法返回 → `:600` 才 `joinChannel`，同线程直线调用，不存在先后不定。**残留风险**：2 轮不足以证伪窄竞态，发版后须看 Crashlytics 复核。**📦 2026-08-10 追加：1.5.1 已上架 App Store，进入观察期。**
+> 表只放定位与判定所需的 5 列；每条 issue 的根因、交叉核对与判定标准见下方同名小节（点 Issue 跳转）。
+> **2026-08-18 重排**：原表 8 列且备注列内含长文与嵌套表格，markdown 表格已被撑破、需横向拖动才能读。
+> 本次**只重排版式、未改动任何结论文字**。
+
+| Issue | 标题 | 类型 | 首次纳入 | 本次状态 |
+|---|---|---|---|---|
+| [3fd09886](#3fd09886) | [aosl] aosl_shrink_resources NSGenericException（NSHashTable mutated while enumerated） | FATAL | 2026-07-24 / 首建 | 📦 已发版·观察中 |
+| [680260c4](#680260c4) | InterfaceOrientationRestorer.enforceCurrentSupportedOrientation 闭包 EXC_BREAKPOINT | FATAL | 2026-07-24 / 首建 | ✅Firebase已关闭（2026-08-06） |
+
+### 3fd09886 · [aosl] aosl_shrink_resources NSGenericException（NSHashTable mutated while enumerated）
+
+**完整 ID** `3fd098868d1760e0238997f19e65e9e5` · **类型** FATAL · **首次纳入** 2026-07-24 / 首建
+
+**处置状态**：**已修复（合入 dev-1.5.1，2026-08-06）· 1.5.1 已上架 App Store**
+
+**本次状态**：📦 已发版·观察中
+
+**事件量趋势**：近 90 天 1（v1.3.2）→ 08-06 上午 **5** → 08-06 **8** → 08-07 **12** → 08-10 **16**（全部 v1.5.0(1.5.0.1)，即修复前的包）
+
+✅钻取确认（5 条事件全读）。
+
+**根因（2026-08-06 定位）**：`DCAgoraConvoAIAdapter.swift:84` 的 `client.login` completion **在 Agora 回调线程执行且无主线程切换**，其内 `setupConvoAI` → `ConversationalAIAPIImpl.init` 连做 3 次 `addDelegate`（`:35` rtc / `:36` rtm / `TranscriptController:526` rtm），与 `AgoraEvent` 线程遍历 `NSConcreteHashTable` 撞车。breadcrumb 全部为 `rtc_joined→rtc_connected` 后 14ms 内崩，5 例签名 100% 一致、全落 variant `766e5ef5b5d0311ea258ed38c136f1b3`。
+
+**既有三个修复 `6510080d`(6-30) / `e2a96f24`(7-3) / `ed37c562`(7-9) 全在 HEAD 祖先链且早于两个崩溃版本，但全部只动 teardown 侧，join 侧从未覆盖**。内存是放大器非根因（5 例 free 36~126MB，2 例 `mem_tier: low`）。
+
+**已落地修复（2026-08-06，dev-1.5.1）**：`setupConvoAI` 拆为 `makeConvoAI`（建连前同步调，完成全部 delegate 注册）+ `subscribeConvoAI`（login 成功后调，订阅依赖登录态）。
+
+**注意排除的错误方向**：切主线程无效——`AgoraEvent` 是 SDK 自有线程，换哪个线程写都仍是并发；逐点加锁会漏 `ConversationalAIAPIImpl.init` / `TranscriptController.setupWithConfig` 内部的后续注册。编译已过（`BUILD SUCCEEDED`）。
+
+**真机回归已做**（2026-08-06，iPhone 17 Pro Max / iPhone18,2，Debug 包）：进→用→退 ×2 轮全通，14638 行控制台日志零 `NSGenericException` / `mutated while` / `NSFastEnumerationMutationHandler`；RTM 双向通（`sendRTMMessage` 成功 = login + subscribe + delegate 注册均生效）；teardown 干净、退-进循环无残留。
+
+**时序为结构性保证非时序保证**：`DCAgoraRTCManager.m:578` 同步调 setup（内含 `makeConvoAI`）→ 方法返回 → `:600` 才 `joinChannel`，同线程直线调用，不存在先后不定。
+
+**残留风险**：2 轮不足以证伪窄竞态，发版后须看 Crashlytics 复核。
+
+**📦 2026-08-10 追加：1.5.1 已上架 App Store，进入观察期。
+
+**
+
 BigQuery sessions 表交叉核对（Crashlytics 单独给不出这个视角）：
 
 | 版本 | 会话 | 设备 | 崩溃 |
@@ -51,10 +87,29 @@ BigQuery sessions 表交叉核对（Crashlytics 单独给不出这个视角）�
 **判定标准**：1.5.1 累计 **300+ 会话仍 0 崩溃** → 判修复生效；**出现哪怕 1 次** → 立刻回落「⚠️ 修了仍在」并重查根因。
 注：BigQuery 批量同步滞后约一天（上表数据截至 08-09 06:51），今日放量未计入。
 
-**⚠️ 2026-08-10 修正前述「内存是放大器」的表述**：08-09 那次崩溃发生在 **iPhone 16 Plus / `mem_tier: high` / free 111MB**，而此前样本清一色 `mem_tier: low`。**内存压力不是必要条件**——join 侧 delegate 并发注册本身即足以触发，内存紧张只是让 `aosl_shrink_resources` 更频繁遍历该集合、提高命中概率。崩溃面同期扩大到 **iPad 6th Gen（iPadOS 15.5）** 与 **iOS 26.6**，不再局限于旧 iPhone。
+**⚠️ 2026-08-10 修正前述「内存是放大器」的表述**：08-09 那次崩溃发生在 **iPhone 16 Plus / `mem_tier: high` / free 111MB**，而此前样本清一色 `mem_tier: low`。
 
-**2026-08-07：事件量 12，100% 落在修复前的包。** ⚠️ 2026-08-06 下午：当日新增 3 例全在 v1.5.0（07:30:45Z / 07:29:59Z / 03:40:20Z UTC），v1.5.0 累计 5 例、事件量加速中。修复只在 dev-1.5.1 未发版，线上用户仍在崩——发版优先级应上调。** 完整 ID `3fd098868d1760e0238997f19e65e9e5` |
-| 680260c4 | InterfaceOrientationRestorer.enforceCurrentSupportedOrientation 闭包 EXC_BREAKPOINT | FATAL | 2026-07-24 / 首建 | **已修复（合入 `a0863cbe`，2026-06-19）** | ✅Firebase已关闭（2026-08-06） | 近 90 天 6/5（全 v1.1.0）→ 近 7 天 **0** | ✅钻取确认：2026-08-06 单独复核 `get_issue` 仍 `state=OPEN` 但 `list_events` **0 事件**，非「掉出 pageSize」误报。修复生效，v1.2.0 后绝迹。**2026-08-06 已调 `update_issue{state:"CLOSED"}` 关闭并复核 `VERIFY=CLOSED`**（软关闭，回归会自动 regressed 重开，正好作修复验证）。完整 ID `680260c45391451e58c8ad1c51e136d9` |
+**内存压力不是必要条件**——join 侧 delegate 并发注册本身即足以触发，内存紧张只是让 `aosl_shrink_resources` 更频繁遍历该集合、提高命中概率。崩溃面同期扩大到 **iPad 6th Gen（iPadOS 15.5）** 与 **iOS 26.6**，不再局限于旧 iPhone。
+
+**2026-08-07：事件量 12，100% 落在修复前的包。
+
+** ⚠️ 2026-08-06 下午：当日新增 3 例全在 v1.5.0（07:30:45Z / 07:29:59Z / 03:40:20Z UTC），v1.5.0 累计 5 例、事件量加速中。修复只在 dev-1.5.1 未发版，线上用户仍在崩——发版优先级应上调。
+
+**
+
+### 680260c4 · InterfaceOrientationRestorer.enforceCurrentSupportedOrientation 闭包 EXC_BREAKPOINT
+
+**完整 ID** `680260c45391451e58c8ad1c51e136d9` · **类型** FATAL · **首次纳入** 2026-07-24 / 首建
+
+**处置状态**：**已修复（合入 `a0863cbe`，2026-06-19）**
+
+**本次状态**：✅Firebase已关闭（2026-08-06）
+
+**事件量趋势**：近 90 天 6/5（全 v1.1.0）→ 近 7 天 **0**
+
+✅钻取确认：2026-08-06 单独复核 `get_issue` 仍 `state=OPEN` 但 `list_events` **0 事件**，非「掉出 pageSize」误报。修复生效，v1.2.0 后绝迹。
+
+**2026-08-06 已调 `update_issue{state:"CLOSED"}` 关闭并复核 `VERIFY=CLOSED`**（软关闭，回归会自动 regressed 重开，正好作修复验证）。
 
 ## 勘误记录
 

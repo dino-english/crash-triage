@@ -12,9 +12,11 @@
 |---|---|---|
 | 定时 | 每天 07:00 | 每周一 06:30 |
 | 数据源 | BigQuery（crashlytics / sessions / performance） | Firebase MCP（topIssues 等） |
-| 用不用模型 | **否**，纯 `bq` + `jq` + shell | 是，仅用于取数与 git 反查 |
+| 用不用模型 | **否**，纯 `bq` + `jq` + `lark-cli` | 是，仅用于取数与 git 反查 |
 | 碰不碰仓库 | 只读 clone（git 反查修复状态） | 只读 clone |
 | 产出 | 群卡片 + **刷新索引页** + **同步台账镜像** | 新建报告文档 + 群卡片 + 索引页追加一行 |
+| 投递 | `bin/deliver.sh`（`lark-cli`，确定性、幂等） | 同左 |
+| 版本口径 | **只统计最新 2 个版本**，按版本分列 + 版本间对比 | **主力版本**（近 7 天会话量 top2） |
 
 **两条都不写业务仓库、不 commit、不 push。**
 
@@ -109,28 +111,28 @@ lark-cli im +chat-list --as bot --page-size 1 | jq '.ok'    # true 即通过
 
 ## 4. 安装脚本
 
-脚本源在 iOS 仓库 `scripts/crash-report/`。两种取法：
+**代码就地跑在仓库里，不复制到别处**；可变的运行数据单独放一处：
+
+| | 路径 | 谁管 |
+|---|---|---|
+| 代码 `ROOT` | 本仓库 clone 目录（脚本按自身位置解析，无需配置） | git |
+| 运行数据 `STATE` | `${XDG_STATE_HOME:-~/.local/state}/crash-triage` | 本机，不入库 |
+
+分开的理由：`git clean -xfd` 或重新 clone 会连同被忽略的文件一起抹掉，而 `last-snapshot.json` 丢了会把下周所有 issue 报成新增（2026-08-07 那类事故）。
 
 ```bash
-# 方式 A：已有仓库 clone（推荐）
-cd /path/to/dino-english-ios && git pull
-export CRASH_REPORT_ROOT="$HOME/crash-triage"
-bash scripts/crash-report/setup.sh
-
-# 方式 B：只 scp 脚本目录过来
-scp -r <你的机器>:/path/to/dino-english-ios/scripts/crash-report ~/
-export CRASH_REPORT_ROOT="$HOME/crash-triage"
-bash ~/crash-report/setup.sh
+git clone <本仓库> ~/crash-triage-repo   # 目录名随意，脚本不依赖
+cd ~/crash-triage-repo
+bash bin/setup.sh                        # 两个路径都不用设，setup 自己解析
 ```
-
-`setup.sh` 会把同目录的 `*.sh` 自装到 `$CRASH_REPORT_ROOT/bin/`。**源（仓库）与运行副本（`$ROOT/bin`）分离**：仓库版本随 git 管理，脚本有更新时重跑 `setup.sh` 即覆盖运行副本。
 
 `setup.sh` 会做：
 
-1. **探测二进制真实路径写入 `bin/config.env`** —— 不硬编码 PATH。launchd 只给最小 env，各机器 node/brew 路径不同，硬编码必挂
+1. **探测二进制真实路径写入 `$STATE/config.env`** —— 不硬编码 PATH。cron / launchd 都只给最小 env，各机器 node/brew 路径不同，硬编码必挂
 2. 写 `bin/mcp.json`（Firebase MCP 配置，**不含任何密钥**，复用本机 firebase login 凭证）
-3. clone 两个只读仓库到 `repos/`（已存在则只 fetch）
-4. 跑一遍探活
+3. 业务仓库：**运行根的同级目录**里有就直接用（只读 fetch），没有才 clone 到 `$ROOT/repos`
+4. 按本机实际路径生成 launchd plist 到 `$STATE/`（备选调度方案，见 §7.6；主调度是 Hermes cron）
+5. 跑一遍探活
 
 **验收**：`setup.sh` 末尾打印「安装完成」且两个 ✅ 全绿。
 
@@ -138,23 +140,37 @@ bash ~/crash-report/setup.sh
 
 ## 5. 配置项
 
-全部通过环境变量传入，写在 launchd plist 的 `EnvironmentVariables` 里。
+全部通过环境变量传入，写在 `~/.hermes/scripts/crash-{daily,weekly}.sh` 包装脚本里（由 `install.sh` 生成）；用 launchd 时则写在 plist 的 `EnvironmentVariables` 里。
 
 | 变量 | 必填 | 说明 |
 |---|---|---|
-| `CRASH_REPORT_ROOT` | 是 | 根目录，建议 `$HOME/crash-triage` |
+| `CRASH_REPORT_ROOT` | 否 | 代码根。**默认 = 本仓库 clone 目录**（脚本按自身位置解析，不写死路径） |
+| `CRASH_REPORT_STATE_DIR` | 否 | 运行数据目录。默认 `${XDG_STATE_HOME:-~/.local/state}/crash-triage` |
 | `CRASH_REPORT_CHAT_ID` | 是 | 目标群 `oc_655033f1f85fa04f9eac25d56f056fc9`；**首次部署建议先填自己的 `ou_xxx` 私聊验证几轮再换群** |
 | `CRASH_REPORT_DRY_RUN` | 否 | `1` = 只打印不发送。首次务必用它跑 |
 | `AGENT_CMD` | 否 | L2 用的 agent 命令，默认 `claude`；可换 cursor / codex |
-| `DOC_INDEX_ID` | 是（L1） | 索引页文档 ID，L1 每天 overwrite 重建 |
-| `DOC_LEDGER_ID` | 是（L1） | 台账镜像文档 ID，L1 每天从仓库 `LEDGER.md` 同步 |
+| `CRASH_REPORT_VERSION_COUNT` | 否 | 日报统计的**最新版本个数**，默认 `2` |
+| `CRASH_REPORT_MIN_SESSIONS` | 否 | 版本候选门槛（低于此会话数的版本不进清单），默认 `5` |
+| `CRASH_REPORT_MAX_VERSION_COLS` | 否 | 卡片版本列上限（最新 N 版 ∪ 主力 2 版），默认 `4` |
+| `DOC_INDEX_ID` | 否 | 索引页文档 **URL**（或 token）。设了就每天原地覆盖、URL 固定；不设则每天新建一份 |
+| `DOC_LEDGER_ID` | 否 | 台账镜像文档 URL（同上） |
+| `CRASH_REPORT_DOC_URL_BASE` | 否 | 上两项传裸 token 时用它拼回 URL；直接传完整 URL 则不需要 |
+| `CRASH_REPORT_FOLDER` | 否 | 云文档父文件夹名，默认 `Dino 崩溃 & 性能日/周报` |
+| `CRASH_REPORT_FOLDER_DAILY` / `_WEEKLY` | 否 | 子文件夹名，默认 `L1 日报` / `L2 周报` |
 
-**当前文档 ID**（2026-08-07 建立）：
+**文档组织**（`deliver.sh` 自动建目录，按名字幂等复用）：
 
 ```
-DOC_INDEX_ID=V1I3di1YQo29v6xNZoGjbZCDppe    # Dino 崩溃跟踪 · 索引
-DOC_LEDGER_ID=FvmTdArLyoOydQxdAo8jRNSUpAg   # 崩溃专项台账 LEDGER · iOS
+Dino 崩溃 & 性能日/周报          ← 父文件夹
+  ├─ L1 日报/                    ← 日报文档（每天新建一份，全部收在这里）
+  ├─ L2 周报/                    ← 周报文档（每周新建一份）
+  ├─ Dino 崩溃跟踪 · 索引         ← 设了 DOC_INDEX_ID 则原地覆盖，URL 固定
+  └─ 崩溃专项台账 LEDGER（镜像）  ← 设了 DOC_LEDGER_ID 则原地覆盖，URL 固定
 ```
+
+日报与周报**统一归档在索引页**（`reports/report-index.jsonl` → 索引页的「报告归档」两张表）。
+首次运行时索引与台账是新建的，把它们的 URL 填进 `DOC_INDEX_ID` / `DOC_LEDGER_ID` 即可钉成固定文档
+（`deliver.sh` 新建时会把 URL 打印出来）。
 
 **项目常量已硬编码在脚本里，无需配置**：
 
@@ -171,7 +187,7 @@ BigQuery 表名       com_prime_dino_english_IOS / _ANDROID
 ## 6. 首次验证（**不要跳过**）
 
 ```bash
-export CRASH_REPORT_ROOT="$HOME/crash-triage"
+# CRASH_REPORT_ROOT 不用设：默认就是本仓库 clone 目录（state/ logs/ 已在 .gitignore 里）
 export CRASH_REPORT_CHAT_ID="<你自己的 ou_xxx>"     # 先发私聊
 export CRASH_REPORT_DRY_RUN=1
 
@@ -190,35 +206,21 @@ bash "$CRASH_REPORT_ROOT/bin/crash-daily.sh"         # L1（BigQuery 表就绪�
 
 ---
 
-## 7. 装定时
+## 7. 装定时（Hermes cron）
 
 ### 7.1 时间配置
 
-| | 任务 | 默认时间 | plist |
-|---|---|---|---|
-| **L1** | 每日数据日报 | **每天 07:00** | `com.dino.crash-daily.plist` |
-| **L2** | 每周变化播报 | **每周一 05:30** | `com.dino.crash-weekly.plist` |
+| | 任务 | 默认时间 | cron 表达式 | job 名 |
+|---|---|---|---|---|
+| **L1** | 每日数据日报 | **每天 07:00** | `0 7 * * *` | `crash-daily` |
+| **L2** | 每周变化播报 | **每周一 05:30** | `30 5 * * 1` | `crash-weekly` |
 
-时间写在 plist 的 `StartCalendarInterval` 里，**改时间只改这一段**：
+时间是**本机时区**（Asia/Kuala_Lumpur），不是 UTC。改时间：
 
-```xml
-<!-- L1：每天 07:00 -->
-<key>StartCalendarInterval</key>
-<dict>
-    <key>Hour</key><integer>7</integer>
-    <key>Minute</key><integer>0</integer>
-</dict>
-
-<!-- L2：每周一 05:30。Weekday 1=周一，0 或 7=周日 -->
-<key>StartCalendarInterval</key>
-<dict>
-    <key>Weekday</key><integer>1</integer>
-    <key>Hour</key><integer>5</integer>
-    <key>Minute</key><integer>30</integer>
-</dict>
+```bash
+hermes cron list                                        # 拿 job id
+hermes cron edit <job_id> --schedule '0 10 * * *'       # 改完立即生效，无需重载
 ```
-
-时间是**本机时区**（Asia/Kuala_Lumpur），不是 UTC——跟 cron 一致，不用换算。
 
 ### 7.2 为什么选这两个时间
 
@@ -228,85 +230,161 @@ bash "$CRASH_REPORT_ROOT/bin/crash-daily.sh"         # L1（BigQuery 表就绪�
 
 ### 7.3 安装
 
-```bash
-# plist 里的 USER 占位符要替换成实际用户名
-sed -i '' "s|/Users/USER|$HOME|g" "$CRASH_REPORT_ROOT/bin/"*.plist 2>/dev/null || \
-  sed -i '' "s|/Users/USER|$HOME|g" scripts/crash-report/*.plist
+`bin/install.sh` 的第 6 步已自动生成 wrapper 并提示注册命令。手工注册：
 
-cp scripts/crash-report/*.plist ~/Library/LaunchAgents/
-launchctl load ~/Library/LaunchAgents/com.dino.crash-weekly.plist
-launchctl load ~/Library/LaunchAgents/com.dino.crash-daily.plist
+```bash
+hermes cron create '0 7 * * *'  --name crash-daily  --no-agent --script crash-daily.sh
+hermes cron create '30 5 * * 1' --name crash-weekly --no-agent --script crash-weekly.sh
 ```
+
+`--script` 是相对 `~/.hermes/scripts/` 的路径，wrapper 由 `install.sh` 生成（写死 `ROOT` / `STATE` / `CHAT_ID` / `LARK_PROFILE`）。`--no-agent` 表示不起 LLM，脚本 stdout 直接投递——所以 wrapper 把 stdout 重定向到 `/dev/null`（卡片由脚本自己用 lark-cli 发）。
 
 **验收**：
 
 ```bash
-launchctl list | grep com.dino.crash
-# 期望两行，第二列（上次退出码）为 0；从未跑过时为 0 或 -
+hermes cron list | grep -A3 crash
+# 期望两个 job，enabled=True，next_run_at 是下一个预定时刻
 ```
 
-**改完时间要重新加载**（改 plist 不会自动生效）：
+**确认真的跑得起来**（推荐在首次部署时做一次）：把调度临时改到几分钟后，等 ticker 自行触发，再改回来——这是唯一能验证「调度器 → wrapper → 主脚本 → 投递」整条链路的方式。
 
 ```bash
-launchctl unload ~/Library/LaunchAgents/com.dino.crash-daily.plist
-launchctl load   ~/Library/LaunchAgents/com.dino.crash-daily.plist
+hermes cron edit <job_id> --schedule '55 16 * * *'      # 改到 5 分钟后
+sleep 300 && sqlite3 ~/.hermes/cron/executions.db \
+  "SELECT status,claimed_at,finished_at,error FROM executions ORDER BY claimed_at DESC LIMIT 1;"
+hermes cron edit <job_id> --schedule '0 7 * * *'        # 还原
 ```
+
+> ⚠️ **不要用 `hermes cron run <id>` 判断成败**：它**总是打印 `Ran now: failed`**，与实际结果无关（Hermes 后台派发路径漏设 `execution_success`，见 `tools/cronjob_tools.py:1347` vs `hermes_cli/cron.py:476`）。以 `executions.db` 的 status 与 `$STATE/logs/` 的脚本日志为准。
+
+**停止**：`hermes cron pause <job_id>`
 
 ### 7.4 ⚠️ 关于 BigQuery 数据延迟（影响 L1 时间选择）
 
 Crashlytics 导出 BigQuery 是**每日批量同步**，官方未承诺具体时点。07:00 本地 = 前一天 23:00 UTC，**不保证昨天的数据一定已经同步完**。
 
-因此 L1 脚本会在卡片里打印**实际查到的最新事件时间**，而不是假设「数据截至昨天」。上线后头几天核对这个时间戳：
+因此 L1/L2 的卡片与文档都打印**每段的取数区间**（`起 → 止`，双时区）：起点是本次跑批时刻减去窗口天数（SQL 的 `TIMESTAMP_SUB(CURRENT_TIMESTAMP(), …)` 下界），终点是该表实际查到的最新事件时间。**两者之差就是数据滞后**，一眼可见。
 
-- 若稳定滞后一天以上 → 把 L1 往后推（如 10:00），或改为报「截至 N 日」
+上线后头几天核对这个区间：
+
+- 性能段常态只覆盖窗口第 1 天（批量表滞后 ~2 天）——**正常，不是故障**
+- 放量段终点应几乎等于跑批时刻（sessions REALTIME 活表）；若明显落后，查 sessions 表是否回退到批量表
+- 若崩溃段稳定滞后一天以上 → 把 L1 往后推（如 10:00）
 - 若需要准实时 → 需在 Firebase 控制台额外开 streaming export（要 Blaze 计划）
-
-**不要**在没核对过时间戳前就相信卡片上的日期。
 
 ### 7.5 机器休眠的影响
 
-`StartCalendarInterval` 在机器休眠错过触发时，**唤醒后会补跑一次**（launchd 行为，与 cron 不同——cron 会直接跳过）。所以这台机器如果会休眠，日报不会因此断档，但可能延迟到唤醒时刻才发。
+**Hermes cron 错过的触发不会补跑**（与 launchd 的 `StartCalendarInterval` 不同——后者唤醒后会补跑一次）。若 Mac 在 07:00 处于休眠，**当天日报就不会出**。
 
-若需要严格准点，在系统设置里关闭休眠，或用 `caffeinate` 保持唤醒。
+若需要严格准点：在系统设置里关闭休眠，或用 `caffeinate` 保持唤醒；也可改用 `bin/*.plist`（launchd 备选方案，见 §7.6）。
+
+### 7.6 备选：launchd（当前未装载）
+
+`bin/com.dino.crash-{daily,weekly}.plist` 是带 `__ROOT__` / `__STATE__` 占位符的模板，`setup.sh` 会按本机实际路径生成到 `$STATE/`。保留它的理由：launchd 不依赖 Hermes 进程，是 gateway 挂掉时的兜底，且有休眠补跑能力。
+
+```bash
+STATE="${XDG_STATE_HOME:-$HOME/.local/state}/crash-triage"
+cp "$STATE"/com.dino.crash-*.plist ~/Library/LaunchAgents/
+launchctl load ~/Library/LaunchAgents/com.dino.crash-daily.plist
+launchctl list | grep com.dino.crash    # 第二列 = 上次退出码
+```
+
+> ⛔ **切换前必须先停掉另一个调度器**（`hermes cron pause`）。两者同时跑会双跑：卡片有幂等键不会重复，但**并发写 `docs.json` / 归档 JSONL 会互相覆盖**（脚本假设单写者）。
 
 ---
 
 ## 8. 日常运维
 
-**日志**：`$CRASH_REPORT_ROOT/logs/`，保留 60 天自动清理。
+**日志**：`$STATE/logs/`（默认 `~/.local/state/crash-triage/logs/`），保留 60 天自动清理。
 
 **健康状态**：
 
 ```bash
-cat "$CRASH_REPORT_ROOT/state/health.json"
+cat "${XDG_STATE_HOME:-$HOME/.local/state}/crash-triage/health.json"      # L2
+cat "${XDG_STATE_HOME:-$HOME/.local/state}/crash-triage/health-daily.json" # L1
 # {"last_run":"...","ok":true,"changes":N}   ok=false 时含 error 字段
 ```
 
 **排查「报告没出现」**：
 
-1. `launchctl list | grep com.dino.crash` 看退出码
+1. `hermes cron list` 看两个 job 的 enabled / next_run_at；`sqlite3 ~/.hermes/cron/executions.db "SELECT job_id,status,claimed_at,error FROM executions ORDER BY claimed_at DESC LIMIT 5;"` 看实际执行结果
 2. 看 `logs/` 最新一份日志
 3. 最常见原因按概率排序：① PATH 问题（换过 node/brew 位置后没重跑 `setup.sh`）② gcloud/firebase 凭证失效 ③ BigQuery 当日数据未同步
 
 **停止**：
 
 ```bash
-launchctl unload ~/Library/LaunchAgents/com.dino.crash-daily.plist
+hermes cron pause <job_id>          # job id 从 hermes cron list 拿
 ```
 
 ---
+
+## 8.5 搬到 Hermes / 其它 Agent 运行时执行
+
+脚本本身不挑运行环境，但**凭证与状态全部挂在 `$HOME` 上**，换一个执行主体就会踩下面这些。按「不做会怎样」排序：
+
+| # | 事项 | 不做的后果 |
+|---|---|---|
+| 1 | **`lark-cli` 主密钥落地**：先在交互式终端跑一次 `lark-cli config keychain-downgrade` | appSecret 存在 macOS Keychain（`{"source":"keychain"}`），无 TTY / 无解锁登录钥匙串的守护进程读不到，**所有 lark-cli 调用直接失败** |
+| 2 | **显式设 `CRASH_REPORT_STATE_DIR`** | Hermes 若以不同 `$HOME` 运行，`docs.json` / `folders.json` 读不到 → 判定为「没建过」→ **每次运行都新建一套目录和文档**，云空间迅速变垃圾场 |
+| 3 | **显式设 `REPOS_ROOT`** | 同级探测依赖仓库位置，探不到会回落 `$ROOT/repos` 并 clone 一份 175M 的副本 |
+| 4 | **绑定应用用 `lark-cli config bind --source hermes --app-id cli_xxx`**，不是 `config init` | Agent 上下文（`HERMES_HOME` / `OPENCLAW_HOME` 已设）下 `config init` 会**直接拒绝**，提示改用 bind |
+| 5 | **`unset PYTHONPATH`**（脚本已内置） | Hermes 会注入自己的 `PYTHONPATH`，`bq` 的 `from utils import bq_error` 误抓 hermes-agent 的 `utils.py` 而崩（2026-08-14 实测） |
+| 6 | **`AGENT_CMD` 指向可用的 agent CLI** | `fetch-snapshot.sh` 默认调 `claude -p`；Hermes 环境里未必有，或指向坏的安装 → 周报根因段与日报 MCP 对照段静默降级 |
+| 7 | **确认只有一个调度器在跑** | launchd 与 Hermes cron 同时触发会双跑：卡片有幂等键不会重复，但**并发写 `docs.json` / 归档 JSONL 会互相覆盖**（脚本假设单写者） |
+
+| 8 | **确认 `HOME` 传给了子进程** | `lark-cli` 靠 `$HOME` 找 `~/.lark-cli` 与钥匙串。用 `env -i` 之类的干净环境起进程会让它读不到凭证——**连故障告警都发不出去**（实测） |
+| 9 | **`node` 必须在 PATH 上** | `lark-cli` 是 node 脚本不是独立二进制，缺 node 直接 `env: node: No such file or directory`。告警的最小依赖是 `node + lark-cli + jq` |
+
+**故障告警（`bin/alert.sh`）不依赖 agent**：纯 shell + `jq` + `lark-cli`，`claude` 不在 PATH 上也能发。这是刻意的——agent 挂掉恰恰是最该收到告警的场景。它的 PATH 兜底会自动补 `~/.npm-global/bin` / `/opt/homebrew/bin` / `/usr/local/bin`，因为「PATH 配错」本身就是最常见的故障原因，告警器不能和被监控对象共享故障源。
+
+其余仍依赖 `$HOME` 的东西，换主体前逐个确认可达：`~/.lark-cli`（应用与 token）、`~/.config/gcloud`（bq 的 ADC）、`~/.config/configstore`（firebase-tools 登录态）、`~/.npm-global`（`lark-cli` / `claude` 可执行文件）。
+
+### 把 `AGENT_CMD` 换成 hermes：结论是「暂缓」（2026-08-18 实测）
+
+接口大体对得上：`claude -p` ↔ `hermes -z`（one-shot，只输出最终文本）、`--add-dir` ↔ `--in DIR`、MCP 已全局配好 `firebase` + `lark`。
+
+**卡在工具白名单上**。当前调用靠 `--allowedTools` 逐个列出只读工具，这是 2026-08-06 误关线上 issue 后立的硬规则。hermes 侧：
+
+```
+$ hermes -z "..." -t firebase:crashlytics_get_report
+hermes -z: ignoring unknown --toolsets entries: firebase:crashlytics_get_report
+hermes -z: --toolsets did not contain any valid toolsets.
+```
+
+`-t` 只认内置 toolset 名（`web` / `terminal` / `file` / `memory` 等），**不支持 `server:tool` 粒度**；而 `hermes mcp list` 显示 firebase 是 **all tools enabled**，含写操作 `crashlytics_update_issue`。切过去就丢掉了调用级白名单。
+
+三个选项：
+
+| 方案 | 代价 |
+|---|---|
+| **A. 保持 `claude -p`**（当前） | 无。`--allowedTools` 每次调用生效，粒度最细 |
+| **B. `hermes tools disable firebase:crashlytics_update_issue`** | 全局配置，影响所有 hermes 用法；且是「默认允许、逐个禁止」，将来新增写工具会漏 |
+| **C. 单独配只读 firebase MCP server** | `firebase-tools --only crashlytics` 只到分组级，仍含 `update_issue`，不成立 |
+
+**当前采用 A。** 切换前置条件：hermes 支持调用级工具白名单，或确认 B 的黑名单足够覆盖。
+
+**授权类操作必须提前在交互式终端做完**：设备流登录、`gcloud auth login`、`firebase login` 都要浏览器和 TTY，Agent 运行时里做不了。
 
 ## 9. 已知约束与坑（都是实测踩过的）
 
 | 坑 | 说明 |
 |---|---|
-| **launchd 最小 env** | 不继承登录 shell 的 PATH。`config.env` 由 `setup.sh` 探测生成，**换过 node/brew 路径后必须重跑 `setup.sh`** |
+| **cron / launchd 最小 env** | 都不继承登录 shell 的 PATH。`config.env` 由 `setup.sh` 探测生成，**换过 node/brew 路径后必须重跑 `setup.sh`** |
+| **`PYTHONPATH` 会毒死 gcloud/bq** | Hermes 注入的 `PYTHONPATH` 指向其 py3.12 site-packages，而 gcloud 用 3.14 启动 → `apitools` ABI 不匹配、导入即崩，报错却写「gcloud installation corruption，请重装」。**两个入口脚本开头都有 `unset PYTHONPATH`**，生产路径免疫；手工排查时用 `~/.local/bin/{bq,gcloud,gsutil}` wrapper（内含 `env -u PYTHONPATH`） |
+| **`hermes cron run` 的成败提示不可信** | 后台派发路径漏设 `execution_success`，**永远打印 `Ran now: failed`**。以 `executions.db` 的 status + 脚本日志为准 |
 | **`claude -p` 需 `< /dev/null`** | 否则等 stdin 3 秒并打警告 |
 | **`.mcp.json` 按 cwd 加载** | `claude -p` 必须从含该文件的目录执行，或显式传 `--mcp-config` |
 | **`--allowedTools` 禁用前缀通配** | 写 `"mcp__firebase"` 会放行写操作 `update_issue`，已因此误关过线上 issue。必须逐个列只读工具 |
 | **跨仓库读取需 `--add-dir`** | 否则 git 反查被权限边界拦下，**静默产出未验证的 null** |
 | **`git reset --hard` 只对 `repos/` 下的 clone** | 绝不能把 `repos/` 指向任何人的工作仓库 |
-| **BigQuery 是每日批量同步** | 日报看到的是「截至昨天」，不是实时。卡片上须写清楚 |
+| **BigQuery 是每日批量同步** | 数据滞后，不是实时。卡片与文档都标注每段的取数区间（`起 → 止`，双时区），**滞后一眼可见**——不要假设「截至昨天」 |
+| **版本清单只从 sessions 解析** | crashlytics / performance 的「最新版本」各不相同（性能批量表滞后 ~2 天、crashlytics 新版常为空）。各段各自解析必然错位，故统一以 `firebase_sessions` 活表为唯一源 |
+| **最新版在性能段常态无数据** | 性能表滞后，新版列显示「该版本无数据」是**正常状态**，不是故障。判定序：表不存在 → 表整体无数据（数据未同步）→ 该版本无数据 |
+| **崩溃段没有「该版本无数据」态** | 有会话就有分母，`0 类 0 次` 是「这版没崩过」的结论本身。把它渲染成缺数会让最该被看见的好消息消失 |
+| **投递不要交给 LLM** | 建文档→拿 URL→回填占位符→发卡片全是确定性调用，交给 agent 会出现「文档建了卡片没发」的重复投递且系统不自知。`deliver.sh` 用 `lark-cli --idempotency-key` 根治（2026-08-18 改） |
+| **陈旧 manifest 会投出昨天的卡片** | 脚本失败时不会重写 manifest。`deliver.sh` 校验 `day` 必须等于今天，否则拒投并报错 |
+| **同一位置的导入必须串行** | 并发导入到同一文件夹会撞 `232140101`/`232140100`/`233523001`。`deliver.sh` 天然串行，勿改成并行 |
 | **`bq show` 要冒号格式** | `project:dataset.table`，而查询里用的是 `project.dataset.table`。传全点号给 `bq show` 会**永远返回「表不存在」**，导致整块数据被静默跳过 |
 | **`drive +delete` 输出前有非 JSON 行** | 输出首行是 `Deleting docx ...`，直接管道进 `jq` 会 parse error——**看起来失败其实已删成功**。用 `--json` 或 `tail -n +2` 再解析，否则会误判并重复操作 |
 | **`docs +update --content @文件` 只认相对路径** | 绝对路径被拒（`--file must be a relative path within the current directory`）。脚本里一律用 `--content -` 走 stdin |

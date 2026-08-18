@@ -17,14 +17,16 @@
     <key>ProgramArguments</key>
     <array>
         <string>/bin/bash</string>
-        <!-- 安装时把 USER 替换成实际用户名 -->
-        <string>/Users/USER/crash-triage/bin/crash-daily.sh</string>
+        <!-- 占位符由 setup.sh 按本机实际路径替换，勿手改 -->
+        <string>__ROOT__/bin/crash-daily.sh</string>
     </array>
 
     <key>EnvironmentVariables</key>
     <dict>
         <key>CRASH_REPORT_ROOT</key>
-        <string>/Users/USER/crash-triage</string>
+        <string>__ROOT__</string>
+        <key>CRASH_REPORT_STATE_DIR</key>
+        <string>__STATE__</string>
         <key>CRASH_REPORT_CHAT_ID</key>
         <string>oc_655033f1f85fa04f9eac25d56f056fc9</string>
     </dict>
@@ -34,8 +36,8 @@
     <false/>
 
     <key>StandardOutPath</key>
-    <string>/Users/USER/crash-triage/logs/launchd-daily.out</string>
+    <string>__STATE__/logs/launchd-daily.out</string>
     <key>StandardErrorPath</key>
-    <string>/Users/USER/crash-triage/logs/launchd-daily.err</string>
+    <string>__STATE__/logs/launchd-daily.err</string>
 </dict>
 </plist>

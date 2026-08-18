@@ -8,6 +8,7 @@ SELECT
   ROUND(APPROX_QUANTILES(trace_info.duration_us, 100)[OFFSET(50)] / 1e6, 1)    AS p50_dwell_s
 FROM `{{TABLE}}`
 WHERE event_type = 'SCREEN_TRACE'
+  AND app_display_version IN ({{VERSIONS}})
   AND event_timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {{DAYS}} DAY)
 GROUP BY screen
 HAVING samples >= 20

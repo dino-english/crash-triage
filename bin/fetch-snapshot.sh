@@ -20,7 +20,16 @@ OUT_DIR="$1"
 MODE="${2:-light}"
 mkdir -p "$OUT_DIR"
 
-REPOS_ROOT="${REPOS_ROOT:-$ROOT/repos}"
+# 业务仓库：优先运行根的同级目录（与 crash-daily/weekly 同一套探测逻辑）。
+# 独立调用本脚本时也要能自己解析，不能只依赖调用方传——调用方漏 export 就会 cd 到不存在的路径
+# （2026-08-18 实测：周报整跑失败、日报 MCP 对照段被误判成超时）。
+if [ -z "${REPOS_ROOT:-}" ]; then
+  if [ -d "$(dirname "$ROOT")/dino-english-ios/.git" ]; then
+    REPOS_ROOT="$(dirname "$ROOT")"
+  else
+    REPOS_ROOT="$ROOT/repos"
+  fi
+fi
 IOS_REPO="$REPOS_ROOT/dino-english-ios"
 AND_REPO="$REPOS_ROOT/dino-english-android"
 

@@ -6,3 +6,4 @@ SELECT
   COUNT(DISTINCT session_id) AS sessions_1d
 FROM `{{TABLE}}`
 WHERE DATE(event_timestamp) = DATE_SUB(CURRENT_DATE(), INTERVAL {{DAYS}} DAY)
+  AND application.display_version IN ({{VERSIONS}})

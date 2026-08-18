@@ -8,4 +8,5 @@ SELECT
   COUNT(DISTINCT installation_uuid)          AS affected_installs_1d
 FROM `{{TABLE}}`
 WHERE is_fatal = TRUE
+  AND application.display_version IN ({{VERSIONS}})
   AND DATE(event_timestamp) = DATE_SUB(CURRENT_DATE(), INTERVAL {{DAYS}} DAY)

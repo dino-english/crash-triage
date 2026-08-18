@@ -10,11 +10,14 @@ SELECT
   (SELECT COUNT(*)
      FROM `{{TABLE}}`
     WHERE is_fatal = TRUE
+      AND application.display_version IN ({{VERSIONS}})
       AND event_timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {{DAYS}} DAY)) AS crash_events,
   (SELECT COUNT(DISTINCT session_id)
      FROM `{{SESSIONS_TABLE}}`
-    WHERE event_timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {{DAYS}} DAY)) AS sessions,
+    WHERE application.display_version IN ({{VERSIONS}})
+      AND event_timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {{DAYS}} DAY)) AS sessions,
   (SELECT COUNT(DISTINCT installation_uuid)
      FROM `{{TABLE}}`
     WHERE is_fatal = TRUE
+      AND application.display_version IN ({{VERSIONS}})
       AND event_timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {{DAYS}} DAY)) AS affected_installs
