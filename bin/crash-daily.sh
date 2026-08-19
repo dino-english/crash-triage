@@ -123,10 +123,45 @@ set -o errtrace
 trap 'on_err $LINENO' ERR
 fail() { echo "❌ $*"; jq -n --arg t "$TS" --arg e "$*" '{last_run:$t,ok:false,error:$e}' > "$STATE/health-daily.json"; alert_once "$CURRENT_STEP" "$*" 1; exit 1; }
 
+# ── bq 超时护栏（2026-08-19 事故修复）─────────────────
+# 事故：07:00 那次 L1 卡在「逐版本取数」，日志 07:06 起再无输出，3600s 后被 cron 判超时，
+# 群里当天没有收到日报。当时 8 处 bq 调用一处都没有超时保护——一条查询挂住就吊死整个 job。
+#
+# ⚠️ 三条铁律（都是实测踩出来的）：
+# ① **SQL 不能作为位置参数传给 bq**。SQL 文件以 `--` 注释开头，bq 的 flag 解析器会把它当
+#    命令行开关，直接 `FATAL Flags parsing error`；`--` 分隔符与 `--query=` 都无效。只能走 stdin。
+# ② **重定向必须写在子 shell 内部**。run_with_timeout 以 `&` 起后台任务，POSIX 规定异步列表的
+#    stdin 在显式重定向之前被指定为 /dev/null——`run_with_timeout N bq ... < f` 会读到空。
+#    故包一层 `bash -c 'exec bq ... < "$1"'`，让重定向在子进程里生效。
+# ③ **stderr 不能丢给 /dev/null**。今早正是因为 `2>/dev/null` 连 bq 报错一起吞了，
+#    事后无法回溯「哪条查询卡住」。改为落盘到 ${BQ_ERRLOG}，超时另打一行可见提示。
+if [ -f "$ROOT/bin/lib.sh" ]; then
+  # shellcheck disable=SC1091
+  . "$ROOT/bin/lib.sh"
+else
+  run_with_timeout() { local s="$1"; shift; "$@"; }   # 无 lib.sh 时退化为直接执行
+fi
+BQ_TIMEOUT="${BQ_TIMEOUT:-180}"      # 单条查询上限；正常查询 3s 内返回，180s 已是极宽松
+mkdir -p "$STATE/logs"
+BQ_ERRLOG="$STATE/logs/bq-stderr-$TS.log"
+BQ_SQLTMP="$STATE/.bq-sql-$$.sql"
+bqq() { # $1=csv|json  $2=SQL文本 → stdout；超时返回 124，失败返回 bq 退出码
+  local rc=0
+  printf '%s\n' "$2" > "$BQ_SQLTMP"
+  run_with_timeout "$BQ_TIMEOUT" \
+    bash -c 'exec bq query --use_legacy_sql=false --format="$1" < "$2"' \
+    _ "$1" "$BQ_SQLTMP" 2>>"$BQ_ERRLOG" || rc=$?
+  if [ "$rc" -eq 124 ]; then
+    echo "  ⏱️ bq 查询超时 ${BQ_TIMEOUT}s，按缺数降级（详见 $(basename "${BQ_ERRLOG}")）" >&2
+  fi
+  return "$rc"
+}
+trap 'rm -f "$BQ_SQLTMP"' EXIT
+
 # ── 探活 ──────────────────────────────────────────────
 # 飞书投递已改由 Hermes agent 经 lark-mcp 完成（脚本只产出内容、不再直连飞书），此处只探数据源。
-bq query --use_legacy_sql=false --format=csv 'SELECT 1' >/dev/null 2>&1 \
-  || fail "bq 不可用，检查 gcloud auth 与项目设置"
+bqq csv 'SELECT 1' >/dev/null 2>&1 \
+  || fail "bq 不可用或超时，检查 gcloud auth 与项目设置"
 
 TMP="$STATE/metrics-$TS"
 mkdir -p "$TMP"
@@ -135,18 +170,17 @@ mkdir -p "$TMP"
 vlist() { printf '"%s"' "$1"; }   # 单版本 → "1.5.4"（多版本形式保留给未来 N>1 的合并查询）
 
 q() { # $1=sql文件 $2=表名 $3=窗口天数 $4=版本 → CSV（无表头）
-  sed -e "s|{{TABLE}}|$2|g" -e "s|{{DAYS}}|$3|g" -e "s|{{VERSIONS}}|$(vlist "$4")|g" "$SQL_DIR/$1" \
-    | bq query --use_legacy_sql=false --format=csv 2>/dev/null | tail -n +2
+  bqq csv "$(sed -e "s|{{TABLE}}|$2|g" -e "s|{{DAYS}}|$3|g" -e "s|{{VERSIONS}}|$(vlist "$4")|g" "$SQL_DIR/$1")" \
+    | tail -n +2 || true
 }
 qc() { # $1=sql文件 $2=crashlytics表 $3=sessions表 $4=窗口天数 $5=版本 → JSON
   # 崩溃查询用 --format=json + jq 渲染：issue 标题是自由文本可能含逗号，CSV+awk 会错列。
-  sed -e "s|{{TABLE}}|$2|g" -e "s|{{SESSIONS_TABLE}}|$3|g" -e "s|{{DAYS}}|$4|g" \
-      -e "s|{{VERSIONS}}|$(vlist "$5")|g" "$SQL_DIR/$1" \
-    | bq query --use_legacy_sql=false --format=json 2>/dev/null
+  bqq json "$(sed -e "s|{{TABLE}}|$2|g" -e "s|{{SESSIONS_TABLE}}|$3|g" -e "s|{{DAYS}}|$4|g" \
+                  -e "s|{{VERSIONS}}|$(vlist "$5")|g" "$SQL_DIR/$1")" || true
 }
-q1d() { # $1=sql文件 $2=表名 $3=距今天数 $4=版本 → 单行 JSON 对象（无数据 → {}）
-  sed -e "s|{{TABLE}}|$2|g" -e "s|{{DAYS}}|$3|g" -e "s|{{VERSIONS}}|$(vlist "$4")|g" "$SQL_DIR/$1" \
-    | bq query --use_legacy_sql=false --format=json 2>/dev/null | jq -c '.[0] // {}' 2>/dev/null || echo '{}'
+q1d() { # $1=sql文件 $2=表名 $3=距今天数 $4=版本 → 单行 JSON 对象（无数据/超时 → {}）
+  bqq json "$(sed -e "s|{{TABLE}}|$2|g" -e "s|{{DAYS}}|$3|g" -e "s|{{VERSIONS}}|$(vlist "$4")|g" "$SQL_DIR/$1")" \
+    | jq -c '.[0] // {}' 2>/dev/null || echo '{}'
 }
 m1() { printf '%s' "${1:-}" | jq -r --arg k "$2" '.[$k] // empty' 2>/dev/null || echo ""; }
 
@@ -157,9 +191,11 @@ m1() { printf '%s' "${1:-}" | jq -r --arg k "$2" '.[$k] // empty' 2>/dev/null ||
 # 让后续查询自行失败并触发既有「数据未同步」告警，而不是误回退到停更批量表。
 # 注意：bq show 的「Not found」错误信息写 stdout 而非 stderr（实测），须 2>&1 合并捕获，不能只捕 stderr。
 table_exists() { # $1=project.dataset.table → 0=存在 / 1=确证不存在
-  local tbl="${1/./:}" attempt out
+  local tbl="${1/./:}" attempt out rc
   for attempt in 1 2 3; do
-    out="$(bq show --format=none "$tbl" 2>&1)" && return 0
+    rc=0
+    out="$(run_with_timeout "$BQ_TIMEOUT" bq show --format=none "$tbl" 2>&1)" || rc=$?
+    [ "$rc" -eq 0 ] && return 0
     if printf '%s' "$out" | grep -qi 'not found'; then
       return 1
     fi
@@ -170,13 +206,11 @@ table_exists() { # $1=project.dataset.table → 0=存在 / 1=确证不存在
 # 表最新 event_timestamp。**刻意不带版本过滤**：它服务于「表整体是否停更」的判定（data_state 第 2 态），
 # 带上版本过滤会把「新版还没产生数据」误判成「数据源故障」，天天误报（design D6）。
 table_max() { [ -n "$1" ] || { echo ""; return 0; }
-  bq query --use_legacy_sql=false --format=csv \
-    "SELECT FORMAT_TIMESTAMP('%Y-%m-%d %H:%M UTC', MAX(event_timestamp)) AS ts FROM \`$1\`" 2>/dev/null \
+  bqq csv "SELECT FORMAT_TIMESTAMP('%Y-%m-%d %H:%M UTC', MAX(event_timestamp)) AS ts FROM \`$1\`" \
     | tail -n +2 | tail -1 || true; }
 # 性能表「该版本最新可用单日」距今天数（1=昨日）；无数据 → 空。带版本过滤：不同版本的最新可用日不同。
 perf_day_offset() { [ -n "$1" ] && [ -n "$2" ] || { echo ""; return 0; }
-  bq query --use_legacy_sql=false --format=csv \
-    "SELECT DATE_DIFF(CURRENT_DATE(), MAX(DATE(event_timestamp)), DAY) AS off FROM \`$1\` WHERE app_display_version = '$2'" 2>/dev/null \
+  bqq csv "SELECT DATE_DIFF(CURRENT_DATE(), MAX(DATE(event_timestamp)), DAY) AS off FROM \`$1\` WHERE app_display_version = '$2'" \
     | tail -n +2 | tail -1 || true; }
 
 # ── 三态数据判定（design D6，顺序不可颠倒）────────────────────────
@@ -417,8 +451,8 @@ ADOPTION_UNTIL="$(newest_ts "$IOS_SESS_MAX" "$AND_SESS_MAX")"; [ -n "$ADOPTION_U
 echo "--- 解析版本清单 ---"
 resolve_versions() { # $1=sessions表 → CSV「version,sessions,devices」（无表头，未排序）
   [ -n "$1" ] || return 0
-  sed -e "s|{{TABLE}}|$1|g" -e "s|{{DAYS}}|$DAYS|g" -e "s|{{MIN_SESSIONS}}|$MIN_SESSIONS|g" \
-    "$SQL_DIR/latest-versions.sql" | bq query --use_legacy_sql=false --format=csv 2>/dev/null | tail -n +2 || true
+  bqq csv "$(sed -e "s|{{TABLE}}|$1|g" -e "s|{{DAYS}}|$DAYS|g" -e "s|{{MIN_SESSIONS}}|$MIN_SESSIONS|g" \
+    "$SQL_DIR/latest-versions.sql")" | tail -n +2 || true
 }
 # 最新 N 个版本（新→旧）。版本号语义排序交给 sort -V（BigQuery 无原生支持，design D3）。
 pick_newest() { printf '%s\n' "$1" | grep -v '^$' | cut -d, -f1 | sort -rV -u | head -"$2" || true; }
@@ -590,12 +624,7 @@ spark_rate() { jq -r --arg p "$1" --arg v "$2" --argjson n "$SPARK_DAYS" \
 echo "--- 抓取 MCP 崩溃对照数据（全版本口径）---"
 CRASH_DIR="$STATE/crash-daily-$TS"
 CRASH_JSON="$CRASH_DIR/snapshot.json"
-if [ -f "$ROOT/bin/lib.sh" ]; then
-  # shellcheck disable=SC1091
-  . "$ROOT/bin/lib.sh"
-else
-  run_with_timeout() { local s="$1"; shift; "$@"; }   # 隔离部署/测试环境无 lib.sh 时退化为直接执行
-fi
+# lib.sh 已在脚本开头（bq 超时护栏处）source，run_with_timeout 此处可直接用。
 FETCH_TIMEOUT="${FETCH_TIMEOUT:-600}"   # light 模式只取数，10 分钟足够
 MCP_OK=0
 if [ -x "$ROOT/bin/fetch-snapshot.sh" ] \
@@ -1067,8 +1096,8 @@ REPORT="$STATE/reports/$DAY-daily.md"
     pn="${ps%%:*}"; tbl="${ps##*:}"
     printf '**%s**\n\n' "$pn"
     if [ -z "$tbl" ]; then printf '（sessions 表尚未同步）\n\n'; continue; fi
-    rows="$(sed -e "s|{{TABLE}}|$tbl|g" -e "s|{{DAYS}}|$DAYS|g" "$SQL_DIR/sessions-by-version.sql" \
-      | bq query --use_legacy_sql=false --format=csv 2>/dev/null | tail -n +2)" || true
+    rows="$(bqq csv "$(sed -e "s|{{TABLE}}|$tbl|g" -e "s|{{DAYS}}|$DAYS|g" "$SQL_DIR/sessions-by-version.sql")" \
+      | tail -n +2)" || true
     if [ -z "$rows" ]; then printf '（⚠️ 数据未同步）\n\n'; else
       printf '| 版本 | 会话 | 设备 | 最新数据 |\n|---|---|---|---|\n'
       printf '%s\n' "$rows" | awk -F, '{printf "| %s | %s | %s | %s |\n",$1,$2,$3,$4}'

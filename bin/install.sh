@@ -101,7 +101,7 @@ export CRASH_REPORT_ROOT="$ROOT"
 export CRASH_REPORT_STATE_DIR="$STATE"
 export CRASH_REPORT_CHAT_ID="$CHAT_ID"
 export CRASH_REPORT_LARK_PROFILE="$PROFILE"
-exec bash "$ROOT/bin/crash-$job.sh" >/dev/null 2>&1
+exec bash "$ROOT/bin/crash-$job.sh" >/dev/null 2>&1 < /dev/null
 WRAP
   chmod +x "$w"
   ok "wrapper $w"
