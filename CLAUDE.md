@@ -12,8 +12,10 @@ Dino（iOS + Android）崩溃 & 性能日报/周报流水线的**部署运行时
 |---|---|---|
 | 定时 | 每天 07:00（Hermes cron） | 每周一 05:30（Hermes cron） |
 | 数据源 | BigQuery（crashlytics / sessions / performance） | Firebase MCP `topIssues` + git 反查 |
-| 用不用模型 | 否（`fetch-snapshot.sh` light 对照除外） | 是，仅取数与 git 反查 |
-| 产出 | 群卡片 + 日报/索引页/台账镜像三份文档 | 报告文档 + 群卡片 + 索引页追加一行 |
+| 用不用模型 | 否（`fetch-snapshot.sh` light 对照除外） | 是，取数 + git 反查 + 分析 |
+| 职责 | **高频数据呈现**，不做分析、不碰结论 | **分析与结论沉淀** |
+| 产出 | 群卡片 + 日报 + 索引页（**不含台账**，change `crash-ledger-l2-ownership`） | 周报文档 + 群卡片 + 索引页归档 + **台账同步** |
+| 性能 | 日维度当期值 | 周维度趋势 + WoW（不出根因） |
 | 版本口径 | **只统计最新 2 个版本**（按版本号），按版本分列 + 版本间对比 | **主力版本**（近 7 天会话量 top2） |
 
 **两条链路都只读业务仓库，不 commit / 不 push / 不改业务代码。**
@@ -192,7 +194,23 @@ CardKit v2 的 `table` 组件字段只有 `rows` / `page_size` / `row_height` / 
 
 卡片是每端一张 CardKit v2 表（列 = 指标 | 版本列 2–4 个 | 对比），行标签带窗口天数（`崩溃率 7d` / `会话数 1d`）——不标窗口必被读成同一口径。对比列 = 最新版 − 上一版：**箭头跟数值方向，颜色跟好坏**（合并会让「会话数 -51 ↑」这类越大越好的指标自相矛盾）；会话数用 `neutral` 不着色。同版本 DoD/WoW 只进日报文档，不进卡片。
 
-### 状态文件（`$STATE/`，均不入库）
+### 运行数据布局（`$STATE/`，均不入库）
+
+> ⚠️ **以下是 change `crash-ledger-l2-ownership` 定稿的目标布局，实施中。** 当前代码仍按时间戳平铺（`metrics-<TS>/` / `crash-daily-<TS>/` / `weekly-<TS>/`）。
+
+```
+$STATE/                          # ${XDG_STATE_HOME:-~/.local/state}/crash-triage
+├── issues/<32位id>.json         事实层：崩溃事件详情，一次抓永久留，不参与清理
+├── ledger/LEDGER.md             台账本地源（L2 产出，同步飞书）
+│   └── snapshots/               历史专项快照 md（从仓库移入）
+├── runs/<日期>/{L1,L2}/<时刻>/  跑批产物，保留 30 天，附 latest 软链
+├── backup/                      台账等不可再生内容的手工备份
+├── logs/                        日志保留 60 天；bq stderr 落 bq-stderr-<TS>.log
+├── publish/                     每次运行 rm -rf 重建的投递目录
+└── *.json                       基准文件，**保持顶层不动**（见下表）
+```
+
+**为什么基准文件不进子目录**：它们是跨跑批的累积状态，丢失后果严重（`docs.json` 丢 → 新建整套重复飞书文档，2026-08-19 实际发生；`last-snapshot.json` 丢 → 全部 issue 报成新增，2026-08-07 事故）。保持原位 = 零迁移风险，46 处 `$STATE/xxx.json` 引用一处不改。
 
 | 文件 | 作用 |
 |---|---|
@@ -201,8 +219,9 @@ CardKit v2 的 `table` 组件字段只有 `rows` / `page_size` / `row_height` / 
 | `docs.json` | 文档台账：决定覆盖还是新建。带日期后缀的键保留 90 天（`DOC_KEEP_DAYS`），`index` / `ledger` 无日期后缀、永不清理 |
 | `folders.json` | 目录 token 缓存，按 profile 隔离 |
 | `last-snapshot.json` | L2 变化检测基准；**首跑无基准时只建基线不报新增**（否则刷一屏「新增」） |
-| `reports/report-index.jsonl` | 日报 + 周报统一归档（飞书文档 URL），索引页据此渲染两张表——**唯一入库的运行产物**。旧 `weekly-index.jsonl` 读取时兼容合并 |
-| `publish/` | 每次运行 `rm -rf` 重建的投递目录 |
+| `health-daily.json` / `health.json` | L1 / L2 的健康状态 |
+
+**仓库内保留判据 = 可再生性。** `reports/report-index.jsonl` 是**唯一入库的运行产物**——它存历次日报/周报的飞书文档 URL，而飞书端无法枚举本 bot 的文档，删了就永久断链。其余（台账、专项快照、`weekly-index.jsonl`）都移入 `$STATE`。
 
 ## 部署实例：飞书侧固定资源
 
@@ -274,7 +293,11 @@ Dino 崩溃 & 性能日/周报   ExuPfsz3Rl1x7kdIQRojxeFVpue
 
 - **`--allowedTools` 禁止前缀通配**：写 `"mcp__firebase"` 会放行写操作 `crashlytics_update_issue`，2026-08-06 已因此误关线上 issue（见 `reports/LEDGER.md` 事故记录）。必须逐个列只读工具。
 - **跨仓库 git 反查必须带 `--add-dir`**，否则被权限边界拦下、静默产出未验证的 `null`。prompt 里已要求「不得让 null 冒充查过没有」。
-- **L2 自动档不出根因与修复方案**（硬约束）：自动生成的方案可能看似合理实则错误，且会被下一轮 `git log --grep` 误判为「已修复」，错误自我强化。要定位跑 `firebase-crash-triage` skill。
+- **L2 的根因与方案边界**（2026-08-19 按实测修正）：原表述「L2 自动档不出根因与修复方案」与实际不符——`full` 模式的 `report.md` 实测会产出七章 226 行，含风险分级、钻取确认的根因、修复方案（且自述「未经人工复核，落地前须验证」），甚至会主动标注「为什么本轮不给根因」（栈未符号化时）。真正的边界是：
+  - **崩溃段**：可出根因与方案，但**必须标注未经复核**，且必须区分「✅钻取确认」与「⚠️聚合推断」。
+  - **性能段**：**不出根因与方案**（硬约束）——性能是连续指标，无堆栈可钻取，推断无从证伪；只给趋势、可定位对象与下一步取证方向。
+  - **台账**：只收结论，深度分析留在周报并以链接引用。自动生成的错误结论会被下一轮反扫误判为「已修复」而自我强化——这是该约束的原始理由，对**写入台账的结论**依然成立。
+  - 要人工深度定位跑 `firebase-crash-triage` skill。
 - **`claude -p` 必须 `< /dev/null`**，`--mcp-config` 显式传（`.mcp.json` 按 cwd 加载）。
 - **`repos/` 只 fetch 不 checkout / reset**：`REPOS_ROOT` 自动探测时会指向同级的**工作仓库**（不是隔离 clone），绝不能破坏未提交状态。
 - **`REPOS_ROOT` 必须 export**：`fetch-snapshot.sh` 是子进程且有自己的默认值 `$ROOT/repos`，不 export 就会 `cd` 到不存在的路径——周报整跑失败、日报 MCP 对照段被误判成「超时」。
@@ -288,4 +311,10 @@ Dino 崩溃 & 性能日/周报   ExuPfsz3Rl1x7kdIQRojxeFVpue
 
 - **OpenSpec 驱动**（`openspec/`，schema `spec-driven`，CLI 已装）。进行中的 change 在 `openspec/changes/<name>/`（proposal / design / tasks / specs delta），归档在 `changes/archive/`，已归档能力落在 `openspec/specs/`。工作流走 `.hermes/skills/openspec-{explore,propose,apply-change,archive-change}`——propose 阶段**只写规划产物不写代码**。
 - 动手改脚本前先看对应 change 的 `design.md`/`tasks.md`：多数当前行为（阈值、卡片表格结构、staleness 兜底、审计日志）都有对应 change 记录了理由与取舍。
-- `reports/LEDGER.md` 是崩溃处置结论的**人工真相源**，飞书上的是只读镜像（L1 每天同步）。索引页与镜像冲突时以仓库为准。
+- ⚠️ **台账口径已变（change `crash-ledger-l2-ownership`，实施中）**。旧表述「`reports/LEDGER.md` 是崩溃处置结论的人工真相源，飞书上是只读镜像（L1 每天同步）」**已被证伪**：2026-08-19 实测发现三份台账并存且分叉——`crash-triage/reports/LEDGER.md`（153 行，只含 iOS）、`dino-english-ios/reports/crash-triage/LEDGER.md`（98 行，iOS 团队仍在更新）、`dino-english-android/reports/crash-triage/LEDGER.md`（70 行，从未进过飞书）。根因是 `ab6748b`（08-14）复制 iOS 台账进本仓库却未删原件，本仓库那份成了孤儿副本，L1 每天镜像的是过期内容。
+  - **新口径**：台账由 **L2 独占产出**，本地源 `$STATE/ledger/LEDGER.md`，同步到飞书文档 `TtpwdhgKroMH1DxJumojTflrppz`。**L1 不再读写台账**。
+  - **结构**（对齐 Android 那份的四段式）：项目常量 / 崩溃收口点登记 / **Issue 现状表**（单表双端，含「平台」列）/ **变更时间线**（挂周报链接）。
+  - **同步方式**：现状表走 `docs +update --command block_replace` 定点替换，时间线走 `--command append` 追加，**绝不 `overwrite`**（会丢时间线历史）。
+  - **初始内容**：Issue 现状表从零建立，不迁移历史结论（旧台账留在两个业务仓库供查阅）；「项目常量」与「收口点登记」两段例外迁移——它们是项目事实而非处置结论。
+  - **修复状态由代码提交驱动**：commit message 约定 `[crash:<8位id>]`，跑批时反扫两个业务仓库 `git log --all --grep='\[crash:' --since='14 days'` 自动更新「处置状态」列。**不在业务仓库装任何 hook**——反扫幂等可补漏，hook 漏一次就永久没记录，且要在团队共用仓库里配飞书凭证。
+  - **性能不进台账**：性能是连续指标、无追踪 ID，只在 L2 周报做趋势与页面定位，且不出根因。
