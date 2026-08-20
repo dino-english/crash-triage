@@ -39,18 +39,31 @@ export REPOS_ROOT   # fetch-snapshot.sh 是子进程，不 export 它会退回�
 
 # ── 代码与状态分离 ────────────────────────────────────
 # ${ROOT}（仓库）只放代码与需要留痕的产物：bin/ · sql/ · reports/report-index.jsonl，全部由 git 管。
-# $STATE 放可变运行数据：logs/ · 每日生成的报告 · 快照 · 历史 · 投递中间产物 · 本机 config.env。
+# $STATE 放可变运行数据：logs/ · 每日生成的报告 · 快照 · 历史 · 投递中间产物 · 本机 path.env / local.env。
 # 分开的理由不是洁癖：`git clean -xfd` / 重新 clone 会连同被忽略的文件一起抹掉，
 # 而 last-snapshot.json 丢了会把下周所有 issue 报成新增（2026-08-07 那类事故）。
 # 默认走 XDG 约定；cron / plist 可用 CRASH_REPORT_STATE_DIR 指到别处。
 STATE="${CRASH_REPORT_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/crash-triage}"
 
-if [ -f "$STATE/config.env" ]; then
+# PATH 由 setup.sh 探测后写入 path.env——launchd / cron 只给最小 env，硬编码路径在别的机器上必挂。
+# 2026-08-20 前这个文件叫 config.env，名字误导（它不是配置、是探测结果，且每次 setup.sh 都被覆写，
+# 真正的机器配置在 local.env）。回落分支是为了让「只 git pull 没跑 setup.sh」的机器不至于丢 PATH，
+# 等所有机器都跑过一次 setup.sh / update.sh 后可以删掉。
+if [ -f "$STATE/path.env" ]; then
+  # shellcheck disable=SC1091
+  . "$STATE/path.env"
+elif [ -f "$STATE/config.env" ]; then
   # shellcheck disable=SC1091
   . "$STATE/config.env"
 else
   PATH="/opt/homebrew/bin:/opt/homebrew/share/google-cloud-sdk/bin:/usr/local/bin:$HOME/.npm-global/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 fi
+
+# 机器本地配置（CRASH_REPORT_CHAT_ID 等）。与 path.env 分家的理由：setup.sh 每次重跑都用 `>`
+# 整个覆写 path.env（只留探测出的 PATH 一行），配置写那儿会被 install.sh / update.sh 抹掉。
+# local.env 由人手写、setup.sh 永不触碰，且**在此处 source 会盖掉命令行传入的同名环境变量**——
+# 这正是要的：本机身份由机器决定，不由手打的命令决定（2026-08-20 测试差点把卡片发进正式群）。
+[ -f "$STATE/local.env" ] && . "$STATE/local.env"   # shellcheck disable=SC1091
 export PATH
 
 TS="$(date +%Y%m%d-%H%M%S)"
@@ -1142,13 +1155,15 @@ fi
 # 日报 URL 由 agent 建完文档后回填（__DAILY_URL__ 占位符）；台账入口是固定 URL 直链（${LEDGER_URL}），
 # 周报归档 URL 来自 $STATE/ledger/weekly-index.jsonl（L2 每次追加一行，本页倒序渲染）。
 build_index() {
-  local f="$STATE/index-render.md"
+  # 索引页渲染中间产物落跑批目录（不落 $STATE 顶层）：manifest 把这个路径交给 deliver.sh，
+  # 而 $STATE/publish 下次跑批即被 rm -rf，runs/<日期>/ 留 30 天——补投时文件还在。
+  local f="$TMP/index-render.md"
   # 报告归档：日报与周报统一记在一份 JSONL 里（{type,day,url,...}），由 deliver.sh 在文档建成后追加。
   # 不可再生（存的是飞书文档 URL，飞书端无法枚举本 bot 文档），所以放仓库里由 git 兜底。
   # ARCHIVE_LEGACY 是改成统一格式前的周报归档，读时合并进来，避免历史断链
   # （2.8 起本地源移入 $STATE/ledger/，与 LEDGER.md 同批迁移，仓库内不再保留）。
   local ARCH="$ARCHIVE_FILE" LEGACY="$STATE/ledger/weekly-index.jsonl"
-  local ALL="$STATE/archive-merged.jsonl"
+  local ALL="$TMP/archive-merged.jsonl"
   : > "$ALL"
   [ -s "$LEGACY" ] && jq -c '. + {type:"weekly"}' "$LEGACY" >> "$ALL" 2>/dev/null
   [ -s "$ARCH" ] && cat "$ARCH" >> "$ALL"
@@ -1395,5 +1410,11 @@ ln -sfn "$TS" "$STATE/runs/$DAY/L1/latest"
 
 # 中间产物保留 30 天（每个卡片数字最直接的审计物证），按 $STATE/runs/<日期>/ 整目录清理（design D7）
 cleanup_old_runs "$STATE"
-find "$STATE/logs" -name 'daily-*.log' -mtime +60 -delete 2>/dev/null || true
+# 日志按文件名前缀分别删，正是漏网的成因：bq-stderr-*.log 既不叫 daily-* 也不叫 weekly-*，
+# 从 L1/L2 两张网中间漏过去，永不清理（2026-08-20 盘出 20 个陈年文件）。改成整目录按 mtime 清。
+find "$STATE/logs" -type f -mtime +60 -delete 2>/dev/null || true
+# 日报/周报 markdown 本地副本与文档台账同寿（deliver.sh 的 DOC_KEEP_DAYS 默认 90 天）
+find "$STATE/reports" -type f -name '*.md' -mtime +90 -delete 2>/dev/null || true
+# 被 kill 的跑批留下的 SQL 临时文件：第 165 行的 EXIT trap 对 SIGKILL / cron 超时杀进程不生效
+find "$STATE" -maxdepth 1 -type f -name '.bq-sql-*.sql' -mtime +1 -delete 2>/dev/null || true
 echo "=== 完成 ==="

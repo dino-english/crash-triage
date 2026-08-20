@@ -31,20 +31,25 @@ export REPOS_ROOT   # fetch-snapshot.sh 是子进程，不 export 它会退回�
 
 # ── 代码与状态分离 ────────────────────────────────────
 # ${ROOT}（仓库）只放代码与需要留痕的产物：bin/ · sql/ · reports/report-index.jsonl，全部由 git 管。
-# $STATE 放可变运行数据：logs/ · 每日生成的报告 · 快照 · 历史 · 投递中间产物 · 本机 config.env。
+# $STATE 放可变运行数据：logs/ · 每日生成的报告 · 快照 · 历史 · 投递中间产物 · 本机 path.env / local.env。
 # 分开的理由不是洁癖：`git clean -xfd` / 重新 clone 会连同被忽略的文件一起抹掉，
 # 而 last-snapshot.json 丢了会把下周所有 issue 报成新增（2026-08-07 那类事故）。
 # 默认走 XDG 约定；cron / plist 可用 CRASH_REPORT_STATE_DIR 指到别处。
 STATE="${CRASH_REPORT_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/crash-triage}"
 
-# PATH 由 setup.sh 探测后写入 config.env——launchd 只给最小 env，硬编码路径在别的机器上必挂。
+# PATH 由 setup.sh 探测后写入 path.env——launchd 只给最小 env，硬编码路径在别的机器上必挂。
 # 实测教训（2026-08-06）：node 在 /usr/local/bin 而非 /opt/homebrew/bin，漏了它 npx/claude 直接起不来。
-if [ -f "$STATE/config.env" ]; then
+if [ -f "$STATE/path.env" ]; then
   # shellcheck disable=SC1091
-  . "$STATE/config.env"
+  . "$STATE/path.env"
+elif [ -f "$STATE/config.env" ]; then
+  # shellcheck disable=SC1091
+  . "$STATE/config.env"          # 2026-08-20 前的旧名，兼容一轮，见 crash-daily.sh 同处注释
 else
   PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.npm-global/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 fi
+# 机器本地配置，见 crash-daily.sh 同处注释：setup.sh 会覆写 path.env，配置只能放 local.env
+[ -f "$STATE/local.env" ] && . "$STATE/local.env"   # shellcheck disable=SC1091
 export PATH
 
 TS="$(date +%Y%m%d-%H%M%S)"
@@ -668,7 +673,9 @@ jq -n --arg t "$TS" --argjson c "$CHANGED" '{last_run:$t,ok:true,changes:$c}' > 
 # latest 软链指向本次跑批产物，供 2.4/2.5 回归对比与人工排查使用（ln -sfn 覆盖式，指向相对路径避免机器间路径漂移）
 ln -sfn "$TS" "$STATE/runs/$DAY/L2/latest"
 
-find "$STATE/logs" -name 'weekly-*.log' -mtime +60 -delete 2>/dev/null || true
-find "$STATE" -name 'snapshot-*.json' -mtime +60 -delete 2>/dev/null || true
+# 同 L1：按前缀删会漏掉 bq-stderr-*.log，改整目录按 mtime 清（两边各清一次，幂等）
+find "$STATE/logs" -type f -mtime +60 -delete 2>/dev/null || true
+# -maxdepth 1 限定顶层：这是旧平铺布局的遗留清理，不带深度会递归进 runs/ 与 backup/ 误删同名文件
+find "$STATE" -maxdepth 1 -name 'snapshot-*.json' -mtime +60 -delete 2>/dev/null || true
 cleanup_old_runs "$STATE"
 echo "=== 完成，报告：$REPORT ==="
