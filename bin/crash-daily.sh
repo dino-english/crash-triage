@@ -46,15 +46,9 @@ export REPOS_ROOT   # fetch-snapshot.sh 是子进程，不 export 它会退回�
 STATE="${CRASH_REPORT_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/crash-triage}"
 
 # PATH 由 setup.sh 探测后写入 path.env——launchd / cron 只给最小 env，硬编码路径在别的机器上必挂。
-# 2026-08-20 前这个文件叫 config.env，名字误导（它不是配置、是探测结果，且每次 setup.sh 都被覆写，
-# 真正的机器配置在 local.env）。回落分支是为了让「只 git pull 没跑 setup.sh」的机器不至于丢 PATH，
-# 等所有机器都跑过一次 setup.sh / update.sh 后可以删掉。
 if [ -f "$STATE/path.env" ]; then
   # shellcheck disable=SC1091
   . "$STATE/path.env"
-elif [ -f "$STATE/config.env" ]; then
-  # shellcheck disable=SC1091
-  . "$STATE/config.env"
 else
   PATH="/opt/homebrew/bin:/opt/homebrew/share/google-cloud-sdk/bin:/usr/local/bin:$HOME/.npm-global/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 fi
@@ -144,10 +138,23 @@ alert_once() { # $1=step $2=message $3=rc
   "$ROOT/bin/alert.sh" --source daily --severity error --step "$1" \
     --message "$2" --rc "${3:-1}" --run-id "$RUN_ID" --log "$LOG" 2>&1 || true
 }
+# 失败位置：脚本实际跑在 bash 3.2（macOS 系统 bash，`#!/usr/bin/env bash` → /bin/bash）。
+# **3.2 下没有任何一种取行号的路子是准的**（2026-08-20 逐个实测）：
+#   $LINENO 在函数内给的是函数定义行（第 12 行的失败报成第 8 行，也是「第 532 行」那条告警指错的原因）；
+#   顶层的 $LINENO 在 case/if 等复合命令下给的是语句首行（真实 17 报成 15）；
+#   BASH_LINENO 的调用点在简单调用下准，但在 for 循环里也偏（真实 586 报成 581）。
+# 所以不再输出行号假装精确，只报**函数调用链**——函数名本身就足以定位，且它是准的。
+err_stack() {
+  local i out
+  if [ "${#FUNCNAME[@]}" -le 3 ]; then printf 'main()'; return 0; fi
+  out="${FUNCNAME[2]}()"
+  for ((i=3; i<${#FUNCNAME[@]}; i++)); do out="${out} ← ${FUNCNAME[$i]}()"; done
+  printf '%s' "$out"
+}
 on_err() { local rc=$?; [ "$rc" -eq 0 ] && return 0
-  alert_once "$CURRENT_STEP" "脚本在第 ${1:-?} 行以退出码 $rc 终止（未预期的失败）" "$rc"; }
+  alert_once "$CURRENT_STEP" "以退出码 $rc 终止（未预期的失败）· 位置 $(err_stack)" "$rc"; }
 set -o errtrace
-trap 'on_err $LINENO' ERR
+trap 'on_err' ERR   # 不传 ${LINENO}：bash 3.2 下它不准，位置改由 err_stack 的函数链给
 fail() { echo "❌ $*"; jq -n --arg t "$TS" --arg e "$*" '{last_run:$t,ok:false,error:$e}' > "$STATE/health-daily.json"; alert_once "$CURRENT_STEP" "$*" 1; exit 1; }
 
 # ── bq 超时护栏（2026-08-19 事故修复）─────────────────

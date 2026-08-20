@@ -43,11 +43,9 @@ fi
 UNIQ="$(printf '%s\n' "${DIRS[@]}" | awk '!seen[$0]++' | paste -sd: -)"
 printf 'PATH="%s:/usr/bin:/bin:/usr/sbin:/sbin"\n' "$UNIQ" > "$STATE/path.env"
 echo "  → 写入 $STATE/path.env"
-# 旧名遗留清理：读取端还有一轮 config.env 回落分支，留着它会让「跑过 setup.sh 的机器」
-# 仍旧读到陈旧副本。写成功后就删，读取端的回落只服务于「只 git pull 没跑 setup.sh」那种机器。
-if [ -f "$STATE/config.env" ]; then
-  rm -f "$STATE/config.env" && echo "  → 清理旧名 $STATE/config.env（2026-08-20 改名为 path.env）"
-fi
+# 旧名遗留清理（config.env → path.env，2026-08-20 改名）。读取端的回落分支已移除，
+# 留着旧文件只会让人误以为它还有用。保留这行清理，供还没迁过的机器首次 setup 时扫尾。
+rm -f "$STATE/config.env" 2>/dev/null || true
 
 # ── 2. MCP 配置（复用本机 firebase login 凭证，不含密钥）──
 cat > "$ROOT/bin/mcp.json" <<'JSON'

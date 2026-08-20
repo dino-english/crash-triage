@@ -15,10 +15,7 @@ set -uo pipefail
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export CRASH_REPORT_ROOT="${CRASH_REPORT_ROOT:-$(dirname "$SELF_DIR")}"
 STATE="${CRASH_REPORT_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/crash-triage}"
-# if/elif 不是两条 && ：并列写法下旧的 config.env 会盖掉 path.env，迁移后那份是陈旧的
-if [ -f "$STATE/path.env" ]; then . "$STATE/path.env" 2>/dev/null
-elif [ -f "$STATE/config.env" ]; then . "$STATE/config.env" 2>/dev/null   # 旧名，兼容一轮
-fi
+[ -f "$STATE/path.env" ] && . "$STATE/path.env" 2>/dev/null
 # 告警器是独立入口（也可被人手工调用），自己 source 一次机器本地配置，
 # 不依赖调用方有没有 export CRASH_REPORT_CHAT_ID。
 [ -f "$STATE/local.env" ] && . "$STATE/local.env" 2>/dev/null

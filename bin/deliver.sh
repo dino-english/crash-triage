@@ -15,15 +15,12 @@ SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export CRASH_REPORT_ROOT="${CRASH_REPORT_ROOT:-$(dirname "$SELF_DIR")}"
 ROOT="$CRASH_REPORT_ROOT"
 STATE="${CRASH_REPORT_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/crash-triage}"
-# PATH 来源，见 crash-daily.sh 同处注释（path.env 是 2026-08-20 起的新名，config.env 是旧名）。
+# PATH 来源，见 crash-daily.sh 同处注释。
 # else 兜底是随改名一起补的：本脚本原本只有 if、没有 else，文件缺失时就直接吃 cron 的最小 env，
 # 而 lark-cli 装在 npm 全局目录里——PATH 一缺，投递整条链路挂掉且报错指向 lark-cli 而非 PATH。
 if [ -f "$STATE/path.env" ]; then
   # shellcheck disable=SC1091
   . "$STATE/path.env"
-elif [ -f "$STATE/config.env" ]; then
-  # shellcheck disable=SC1091
-  . "$STATE/config.env"
 else
   PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.npm-global/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 fi
