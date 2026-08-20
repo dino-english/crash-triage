@@ -568,12 +568,19 @@ printf '%s\n' "$MSG" > "$PUBLISH_DIR/message.md"
 printf '%s\n' "$CARD_JSON" > "$PUBLISH_DIR/card.json"
 REPORT_XML=""
 REPORT_FILE=""
+# 文档投递条件：只要有周报正文就建文档。
+#
+# 这里曾有一条「平稳周且无根因报告 → 只发卡片不建文档（内容与卡片完全重复）」的分支，
+# 2026-08-20 实测删除：数据/分析分层（D12）之后前提不再成立。周报正文有三样卡片
+# 没有的东西——性能段趋势与 WoW、主力版本明细、取数区间双时区标注；卡片受 CardKit
+# 表格能力限制装不下。跳过建文档会让「本周平稳」的那几周**永久丢失性能趋势记录**，
+# 而平稳周恰恰是趋势最该被留档的时候（异常周反正有人盯）。
 if [ -s "$TRIAGE_REPORT" ]; then
+  # 有分析报告：用 triage 产出的完整版（含根因与修复方案）
   cp "$TRIAGE_REPORT" "$PUBLISH_DIR/docs/weekly.md"; REPORT_FILE="$PUBLISH_DIR/docs/weekly.md"
-elif [ "$WEEK_STATE" = quiet ]; then
-  echo "  平稳周且无根因报告：只发卡片不建文档（内容与卡片完全重复）"
 elif [ -s "$REPORT" ]; then
-  # triage 超时/失败时仍投递变化摘要 + 主力版本（周报本体），只是没有根因分析
+  # 无分析报告（额度耗尽 / 超时 / 显式跳过）：投递数据层周报本体，
+  # 正文里已由分析层标注说明缺的是什么。
   cp "$REPORT" "$PUBLISH_DIR/docs/weekly.md"; REPORT_FILE="$PUBLISH_DIR/docs/weekly.md"
 fi
 

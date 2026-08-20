@@ -489,29 +489,36 @@ case "$TYPE" in
     ;;
 
   weekly)
-    # 无变化不投（避免播报噪音化）：连文档也不建——文档存在的意义就是给卡片当链接
-    if [ "$(m send)" != "true" ]; then
-      echo "  本周无变化（send=false），不投递"; exit 0
-    fi
     CARD="$(m card_file)"
     REPORT_FILE="$(m create_doc.file)"; REPORT_TITLE="$(m create_doc.title)"
+    # 无变化不投卡片/不建文档（避免播报噪音化），但**台账照常同步**：
+    # 「不打扰群里」和「不记录数据」是两回事。平稳周的事件量趋势、修复状态同样会变，
+    # 跳过同步会让台账在平稳周停更，正是 2026-08-20 实测踩到的坑（同类错误还有
+    # crash-weekly.sh 那条 quiet 分支，把「内容与卡片重复」当成了「不必留档」）。
+    WEEKLY_QUIET=0
+    if [ "$(m send)" != "true" ]; then
+      echo "  本周无变化（send=false）：跳过卡片与文档，仅同步台账"
+      WEEKLY_QUIET=1
+    fi
     F_ROOT="$(ensure_folder "$FOLDER_ROOT_NAME" "")"
     F_WEEKLY=""
     [ -n "$F_ROOT" ] && F_WEEKLY="$(ensure_folder "$FOLDER_WEEKLY_NAME" "$F_ROOT")"
     URL_REPORT=""
-    REPORT_XML="$(m create_doc.xml_file)"
-    if [ -s "$REPORT_XML" ]; then
-      URL_REPORT="$(publish_doc "$REPORT_XML" "$REPORT_TITLE" "" "$F_WEEKLY" "weekly-$DAY" xml)"
-    elif [ -n "$REPORT_FILE" ]; then
-      URL_REPORT="$(publish_doc "$REPORT_FILE" "$REPORT_TITLE" "" "$F_WEEKLY" "weekly-$DAY")"
-    fi
-    FURL="$(folder_url "$F_ROOT" "$URL_REPORT")"
-    [ -n "$FURL" ] && doc_put "folder-root-url" "$FURL"
-    fill "$CARD" "__FOLDER_URL__" "${FURL:-$URL_REPORT}"
-    [ -n "$URL_REPORT" ] && fill "$CARD" "__REPORT_URL__" "$URL_REPORT"
-    send_card "$CARD"
+    if [ "$WEEKLY_QUIET" = "0" ]; then
+      REPORT_XML="$(m create_doc.xml_file)"
+      if [ -s "$REPORT_XML" ]; then
+        URL_REPORT="$(publish_doc "$REPORT_XML" "$REPORT_TITLE" "" "$F_WEEKLY" "weekly-$DAY" xml)"
+      elif [ -n "$REPORT_FILE" ]; then
+        URL_REPORT="$(publish_doc "$REPORT_FILE" "$REPORT_TITLE" "" "$F_WEEKLY" "weekly-$DAY")"
+      fi
+      FURL="$(folder_url "$F_ROOT" "$URL_REPORT")"
+      [ -n "$FURL" ] && doc_put "folder-root-url" "$FURL"
+      fill "$CARD" "__FOLDER_URL__" "${FURL:-$URL_REPORT}"
+      [ -n "$URL_REPORT" ] && fill "$CARD" "__REPORT_URL__" "$URL_REPORT"
+      send_card "$CARD"
 
-    archive_append "$URL_REPORT"
+      archive_append "$URL_REPORT"
+    fi
 
     # ── 台账同步（6.4-6.8）：只在卡片发送成功之后做，与归档同一时序理由——
     # 台账时间线的 __REPORT_URL__ 引用必须指向已投递成功的报告，失败半成品不能挂进台账（6.8）。
