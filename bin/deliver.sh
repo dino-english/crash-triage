@@ -383,18 +383,27 @@ sync_ledger() { # $1=doc_id(URL或token) $2=table内容文件(xml优先) $3=tabl
     return 0
   fi
 
-  # ── 1. 定位「Issue 现状表」标题的 block id（关键词命中即返回标题块本身，带 id）──
+  # ── 1. 定位「Issue 现状表」标题的 block id ──
+  # ⛔ 只认标题块（h1-h6）。2026-08-20 实测：keyword 检索会命中正文里**提到**这几个字的
+  # 引用块（文档开头那段说明就写着「同步到飞书文档…Issue 现状表」），而旧实现取的是
+  # 「第一个带 id 的对象」，于是拿到引用块 id → 找不到表格 → 误判「标题不存在」→
+  # 每轮都退回 bootstrap append，台账被追加了两份四段结构。
   local outline heading_id
-  outline="$("${LK[@]}" docs +fetch --doc "$doc" --scope keyword --keyword "$LEDGER_HEADING_TEXT" \
-              --detail with-ids --as "$LARK_AS" --format json 2>&1)" || outline=""
-  heading_id="$(printf '%s' "$outline" | json_only | jq -r \
-    '[.. | objects | select(.["block-id"]? or .id?) | (.["block-id"]? // .id?)] | first // empty' 2>/dev/null || true)"
-  # 兜底：keyword 命中的可能是标题下方内容而非标题本身，尝试从 outline 直接找同名标题
+  outline="$("${LK[@]}" docs +fetch --doc "$doc" --scope outline --max-depth 6 \
+              --as "$LARK_AS" --format json 2>&1)" || outline=""
+  # outline 返回 DocxXML 文本，直接按 <hN id="..."> 标签匹配同名标题，取最后一个——
+  # 旧结构（历史遗留的「Issue 台账」等）在文档上方，新结构在下方，取最后一个才是本流水线建的那份。
+  heading_id="$(printf '%s' "$outline" | json_only | jq -r '.data.document.content // ""' 2>/dev/null \
+    | grep -oE "<h[1-6] id=\"[^\"]*\">${LEDGER_HEADING_TEXT}<" \
+    | sed -E 's/^<h[1-6] id="([^"]*)">.*/\1/' | tail -1 || true)"
+  # 兜底：outline 拿不到（接口变更 / 文档结构异常）时退回 keyword 检索，
+  # 同样只认标题标签，不再接受任意带 id 的块。
   if [ -z "$heading_id" ]; then
-    outline="$("${LK[@]}" docs +fetch --doc "$doc" --scope outline --max-depth 6 \
-                --as "$LARK_AS" --format json 2>&1)" || outline=""
-    heading_id="$(printf '%s' "$outline" | json_only | jq -r --arg t "$LEDGER_HEADING_TEXT" \
-      '[.. | objects | select((.text? // .title? // "") | contains($t)) | (.["block-id"]? // .id?)] | first // empty' 2>/dev/null || true)"
+    outline="$("${LK[@]}" docs +fetch --doc "$doc" --scope keyword --keyword "$LEDGER_HEADING_TEXT" \
+                --detail with-ids --as "$LARK_AS" --format json 2>&1)" || outline=""
+    heading_id="$(printf '%s' "$outline" | json_only | jq -r '.data.document.content // ""' 2>/dev/null \
+      | grep -oE "<h[1-6] id=\"[^\"]*\">${LEDGER_HEADING_TEXT}<" \
+      | sed -E 's/^<h[1-6] id="([^"]*)">.*/\1/' | tail -1 || true)"
   fi
 
   if [ -z "$heading_id" ]; then
