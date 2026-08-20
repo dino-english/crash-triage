@@ -75,7 +75,8 @@ bash bin/setup.sh
 bash bin/install.sh
 bash bin/update.sh
 
-# 改脚本后的唯一自动检查（bash -n 语法自检，全绿才提交）
+# 改脚本后的唯一自动检查（两项：bash -n 语法 + $VAR 紧邻多字节字符；全绿才提交）
+# ⛔ 不能用 `bash -n` 代替：那只覆盖第一项，第二项才是反复踩的那个坑。
 bash bin/check-scripts.sh
 
 # 运维
@@ -91,7 +92,7 @@ sqlite3 ~/.hermes/cron/executions.db \
 
 > ⚠️ `hermes cron run <id>` 手工触发**总是打印 `Ran now: failed`**，与实际成败无关——Hermes 后台派发路径只设 `executed=True` 却漏设 `execution_success`（`tools/cronjob_tools.py:1347` vs `hermes_cli/cron.py:476`）。**以 `executions.db` 的 status 和脚本日志为准**，别追这个假故障（2026-08-18 踩过）。
 
-没有单元测试。改脚本后的验收链：`bash bin/check-scripts.sh`（语法自检，唯一的自动检查）→ DRY RUN → 抽查 2–3 个数值与 Firebase 控制台对得上（[bin/INSTALL.md](bin/INSTALL.md) §6）。
+没有单元测试。改脚本后的验收链：`bash bin/check-scripts.sh`（**两项**：`bash -n` 语法 + `$VAR` 紧邻多字节字符，唯一的自动检查，**写完立刻跑、不要等到提交前**）→ DRY RUN → 抽查 2–3 个数值与 Firebase 控制台对得上（[bin/INSTALL.md](bin/INSTALL.md) §6）。
 
 ## 架构要点
 
