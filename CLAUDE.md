@@ -11,8 +11,8 @@ Dino（iOS + Android）崩溃 & 性能日报/周报流水线的**部署运行时
 | | L1 日报 `crash-daily.sh` | L2 周报 `crash-weekly.sh` |
 |---|---|---|
 | 定时 | 每天 07:00（Hermes cron） | 每周一 05:30（Hermes cron） |
-| 数据源 | BigQuery（crashlytics / sessions / performance） | Firebase MCP `topIssues` + git 反查 |
-| 用不用模型 | 否（`fetch-snapshot.sh` light 对照除外） | 是，取数 + git 反查 + 分析 |
+| 数据源 | BigQuery（crashlytics / sessions / performance） | BigQuery（`fetch-snapshot-bq.sh`）+ git 反查 |
+| 用不用模型 | 否（`fetch-snapshot.sh` light 对照除外） | **数据层否**；仅分析层（`report.md` 根因/方案）用模型，失败只降级 |
 | 职责 | **高频数据呈现**，不做分析、不碰结论 | **分析与结论沉淀** |
 | 产出 | 群卡片 + 日报 + 索引页（**不含台账**，change `crash-ledger-l2-ownership`） | 周报文档 + 群卡片 + 索引页归档 + **台账同步** |
 | 性能 | 日维度当期值 | 周维度趋势 + WoW（不出根因） |
@@ -124,6 +124,24 @@ L2 的台账同步是 `deliver.sh` 里独立的 `sync_ledger()`，不走上面�
 - **覆盖优先于新建**：建过的文档记在 `$STATE/docs.json`，下次直接 `docs +update --command overwrite`。索引 / 台账永久固定 URL；日报周报每天（每周）一份新的，但**同日重跑覆盖当天那份**（键 `daily-<日期>`）。优先级 `环境变量 DOC_*_ID > docs.json 自动记忆 > 新建`。**台账是例外**：固定 URL 但绝不 `overwrite`，走 `sync_ledger()` 的 block_replace + append。
 - **清理挂在投递收尾**，不能挂在「新建」路径上——稳态下每天都是覆盖，新建路径根本不执行。
 - **归档统一**：日报与周报都写 `reports/report-index.jsonl`（进 git），索引页据此渲染两张归档表。归档在**卡片发送成功之后**追加——归档的语义是「已投递」不是「已生成」。今日条目次日才出现在归档表，当天的入口在页面顶部。
+
+### L2 数据层与分析层分离（2026-08-20 起，design D12）
+
+L2 拆两层，**数据不依赖模型**：
+
+| 层 | 手段 | 额度挂了 |
+|---|---|---|
+| **数据** | `fetch-snapshot-bq.sh`（BigQuery 事件级）→ `snapshot.json` → 变化检测（jq）/ 反扫（git）/ 台账渲染（bash）/ 同步（lark-cli）/ 卡片 | **照跑** |
+| **分析** | `fetch-snapshot.sh full`（`claude -p`）→ `report.md` 根因与方案 | 跳过，周报少一章 |
+
+起因是两次实测事故：2026-08-19 18:21 与 08-20 09:30 的 Anthropic 429 让 `crash-weekly.sh` 在 `[ -s "$SNAP_NEW" ] || fail` 处整跑退出，**群里什么都收不到**——而那些数字本就躺在 BigQuery 里。
+
+- **数据层用 `crash-issues-all.sql`，不是 L1 的 `crash-issues.sql`**：差别是**刻意不加版本过滤**。台账按 issue 跨版本追踪生命周期，加过滤会让「上一版修好、这版没复发」的 issue 从现状表凭空消失、时间线断档。L1 那份保持原样，零改动。
+- **反扫提前到取数之前**：`scan-fix-commits.sh` 纯 git、不依赖快照，跑完直接把 `fix_commit` 填进 `snapshot.json`。
+- **两端皆空 = 取数失败，必须非零退出**：把「bq 挂了」渲染成「本周零崩溃」是最坏的错误报告。
+- **缺分析必须在卡片上看得见**：周报与卡片口径行都标「⚠️ 本周无深度分析 — <原因>；数据与台账不受影响」。缺分析与无异常是两件事，读混了比缺失本身更糟。
+- **`CRASH_REPORT_SKIP_ANALYSIS=1`** 跳过分析层，用于验证降级路径（不必真等额度耗尽）。
+- **缓存判定在 shell 不在 prompt**：文件存在性 + `events_count_last_seen` 比较，`CRASH_REPORT_FORCE_REFETCH=1` 强制重写。bq 路径写的文件标 `source:"bigquery"` 存聚合事实，与模型路径的完整事件数组互不覆盖。
 
 ### 版本口径（2026-08-18 起，change `crash-perf-latest-2-versions`）
 
