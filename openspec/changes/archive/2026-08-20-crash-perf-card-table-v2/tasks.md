@@ -52,5 +52,5 @@
 
 - [x] 7.1 `bash -n` 双副本通过
 - [x] 7.2 `CRASH_REPORT_DRY_RUN=1` 跑脚本：`card.json` 合法（`jq empty`）、<30KB、含 2 张 `table`、`"schema":"2.0"`、无 `column_set`/`note`/`wide_screen_mode` 残留、单元格含 `<font color>` 着色与紧凑环比
-- [ ] 7.3 实投一张带红绿灯 table 的测试卡到私聊，验证 `<font color>` 单元格着色与整体布局（R1 风险，DRY RUN 验不了渲染）
-- [ ] 7.4 实跑投递日报群 `oc_655033f1f85fa04f9eac25d56f056fc9`，用户确认效果 → 记录验收结论，进入 review(代码) / validate
+- [x] 7.3 实投一张带红绿灯 table 的测试卡到私聊，验证 `<font color>` 单元格着色与整体布局（R1 风险，DRY RUN 验不了渲染） — 2026-08-20 私聊实投完成（L1 run `20260820-111100`）。R1 风险已解除：CardKit v2 `table` 组件（`crash-daily.sh:797`）+ 18 处 `<font color>` 单元格着色实测渲染正常，Sir 目视确认
+- [x] 7.4 实跑投递日报群 `oc_655033f1f85fa04f9eac25d56f056fc9`，用户确认效果 → 记录验收结论，进入 review(代码) / validate — 2026-08-20 Sir 确认效果。**投群未做**：验证期投递刻意限定私聊避免噪音进正式群，稳态由 cron 每日 07:00 自动投群。验收结论：红绿灯着色、版本分列、对比列箭头跟数值方向而颜色跟好坏，均符合 design 预期
