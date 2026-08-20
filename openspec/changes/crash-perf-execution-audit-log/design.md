@@ -1,3 +1,23 @@
+> ## ⚠️ 2026-08-20 范围收窄 — 先读这一段
+>
+> 本 design 写于 2026-08-17，其后多个 change 落地，**下列决策的前提已不成立**。
+> 原文全部保留（推理过程仍有参考价值），但**实施时只按仍生效的部分做**。
+>
+> | 决策 | 状态 | 说明 |
+> |---|---|---|
+> | D1 存储形态 | ✅ 生效 | 路径改为 `$STATE/audit/`（`state/` 布局已迁移） |
+> | D2 事件 schema | ✅ 生效 | 去掉 `attempt` 顶层字段，它只对 `table_exists` 有意义，移入 payload |
+> | D3 脚本/投递事件分文件 | ❌ 失效 | cron 已 `no_agent=true`，投递由确定性脚本完成，不存在 agent 投递事件 |
+> | D4 bq 汇聚点插桩 | ✅ 生效 | 汇聚点从 4 个增至 6 个（补 `table_max()` / `perf_day_offset()`） |
+> | D5 同日重复 run 检测 | ✅ 生效 | — |
+> | D6 投递幂等与补投语义 | ❌ 失效 | 已由 `deliver.sh` 的 `--idempotency-key` + 陈旧 manifest 闸门取代 |
+> | D7 metrics-history upsert | ❌ 已实现 | `crash-daily.sh:1365` |
+> | D8 L2 基线提升顺序 | ❌ 已实现 | `crash-weekly.sh:572` 先提升基线，`:653` 才写 manifest |
+> | D9 保留期 | ⚠️ 部分 | 审计 60d 保留生效；「中间产物 30d」那半已由 `$STATE/runs/<日期>/` 30 天保留承接 |
+>
+> 另：下文 Context 提到的 `bin/crash-daily.sh 954 行`、cron agent job id、`state/publish/`
+> 等路径均为 2026-08-17 时的事实，现已变化，以当前代码为准。
+
 ## Context
 
 崩溃&性能日/周报管线由 shell 脚本（`bin/crash-daily.sh` 954 行 + `bin/crash-weekly.sh` 197 行）产出内容，投递由 Hermes cron agent（L1 `4b0c7362063b` / L2 `1190a07e345c`）经 lark-mcp 完成。现状无任何执行审计痕迹：`state/publish/` 每 run `rm -rf` 重建（`crash-daily.sh:871`）、`docx_builtin_import` 每次新建文档（INSTALL.md §0.2）、`state/metrics-history.jsonl` append+tail-7 无同日去重（`:933-937`）、L2 先写 manifest（`crash-weekly.sh:188`）后提升基线（`:193`）。2026-08-17 当天 07:00 与 08:44 两次运行已实测暴露全部缺口：同日两行基准漂移 + 无法回答「是否重复投递」。约束：脚本已重度依赖 jq；`lib.sh` 注释明言不依赖非标准工具（不引入 sqlite3）；`state/` 已 `.gitignore`；`state/publish/` 每 run 重建，审计产物不得放其中。动因见 proposal.md - Why。
