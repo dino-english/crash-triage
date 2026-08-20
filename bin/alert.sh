@@ -19,6 +19,9 @@ STATE="${CRASH_REPORT_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/crash-tri
 if [ -f "$STATE/path.env" ]; then . "$STATE/path.env" 2>/dev/null
 elif [ -f "$STATE/config.env" ]; then . "$STATE/config.env" 2>/dev/null   # 旧名，兼容一轮
 fi
+# 告警器是独立入口（也可被人手工调用），自己 source 一次机器本地配置，
+# 不依赖调用方有没有 export CRASH_REPORT_CHAT_ID。
+[ -f "$STATE/local.env" ] && . "$STATE/local.env" 2>/dev/null
 # 告警器不能和被监控对象共享故障源：PATH 配错正是最常见的失败原因之一，
 # 而 path.env 恰好就是 PATH 的来源。找不到 lark-cli 就补上常见安装位置再试
 # （2026-08-18 实测：伪造坏 PATH 触发告警，告警自己也发不出去）。

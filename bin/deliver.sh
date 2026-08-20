@@ -30,6 +30,10 @@ fi
 # 机器本地配置，见 crash-daily.sh 同处注释。deliver.sh 是投递的唯一出口，这里再 source 一次，
 # 是为了拦住「拿别处产出的 manifest 在本机补投」——那份 manifest 里的 chat_id 可能是正式群。
 [ -f "$STATE/local.env" ] && . "$STATE/local.env"   # shellcheck disable=SC1091
+# 必须 export：alert.sh / deliver.sh 是**子进程**，local.env 里的普通赋值它们看不见。
+# 2026-08-20 实测：只靠 local.env 的机器，失败告警被 alert.sh 当成「未设置 CHAT_ID」静默跳过。
+# （生产机因 wrapper 里已 export、普通赋值保留 export 属性而侥幸没中招。）
+export CRASH_REPORT_CHAT_ID
 export PATH
 
 # 身份钉死 bot：user 身份的 refresh token 会过期（需人工重登），无人值守跑必挂；

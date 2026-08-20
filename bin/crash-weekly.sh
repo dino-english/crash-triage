@@ -50,6 +50,10 @@ else
 fi
 # 机器本地配置，见 crash-daily.sh 同处注释：setup.sh 会覆写 path.env，配置只能放 local.env
 [ -f "$STATE/local.env" ] && . "$STATE/local.env"   # shellcheck disable=SC1091
+# 必须 export：alert.sh / deliver.sh 是**子进程**，local.env 里的普通赋值它们看不见。
+# 2026-08-20 实测：只靠 local.env 的机器，失败告警被 alert.sh 当成「未设置 CHAT_ID」静默跳过。
+# （生产机因 wrapper 里已 export、普通赋值保留 export 属性而侥幸没中招。）
+export CRASH_REPORT_CHAT_ID
 export PATH
 
 TS="$(date +%Y%m%d-%H%M%S)"
@@ -83,7 +87,7 @@ alert_once() { # $1=step $2=message $3=rc
   ALERTED=1
   [ -x "$ROOT/bin/alert.sh" ] || return 0
   "$ROOT/bin/alert.sh" --source weekly --severity error --step "$1" \
-    --message "$2" --rc "${3:-1}" --run-id "$TS" --log "$LOG" >/dev/null 2>&1 || true
+    --message "$2" --rc "${3:-1}" --run-id "$TS" --log "$LOG" 2>&1 || true
 }
 on_err() { local rc=$?; [ "$rc" -eq 0 ] && return 0
   alert_once "$CURRENT_STEP" "脚本在第 ${1:-?} 行以退出码 $rc 终止（未预期的失败）" "$rc"; }

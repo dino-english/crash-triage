@@ -64,6 +64,10 @@ fi
 # local.env 由人手写、setup.sh 永不触碰，且**在此处 source 会盖掉命令行传入的同名环境变量**——
 # 这正是要的：本机身份由机器决定，不由手打的命令决定（2026-08-20 测试差点把卡片发进正式群）。
 [ -f "$STATE/local.env" ] && . "$STATE/local.env"   # shellcheck disable=SC1091
+# 必须 export：alert.sh / deliver.sh 是**子进程**，local.env 里的普通赋值它们看不见。
+# 2026-08-20 实测：只靠 local.env 的机器，失败告警被 alert.sh 当成「未设置 CHAT_ID」静默跳过。
+# （生产机因 wrapper 里已 export、普通赋值保留 export 属性而侥幸没中招。）
+export CRASH_REPORT_CHAT_ID
 export PATH
 
 TS="$(date +%Y%m%d-%H%M%S)"
@@ -138,7 +142,7 @@ alert_once() { # $1=step $2=message $3=rc
   ALERTED=1
   [ -x "$ROOT/bin/alert.sh" ] || return 0
   "$ROOT/bin/alert.sh" --source daily --severity error --step "$1" \
-    --message "$2" --rc "${3:-1}" --run-id "$RUN_ID" --log "$LOG" >/dev/null 2>&1 || true
+    --message "$2" --rc "${3:-1}" --run-id "$RUN_ID" --log "$LOG" 2>&1 || true
 }
 on_err() { local rc=$?; [ "$rc" -eq 0 ] && return 0
   alert_once "$CURRENT_STEP" "脚本在第 ${1:-?} 行以退出码 $rc 终止（未预期的失败）" "$rc"; }
