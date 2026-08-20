@@ -11,7 +11,7 @@
 ## What Changes
 
 - **BREAKING** L1 不再生成、投递、镜像台账：移除 `crash-daily.sh` 的 `build_ledger_xml` 段与 `LEDGER_SRC` 变量，`deliver.sh` 不再导入台账镜像、不再回填 `__LEDGER_URL__`。
-- 台账所有权移交 L2：新增台账渲染与同步能力，本地源 `$STATE/ledger/LEDGER.md`，同步到既有飞书文档 `TtpwdhgKroMH1DxJumojTflrppz`（复用，最新版直接覆盖既有内容以建立新结构）。
+- 台账所有权移交 L2：新增台账渲染与同步能力，本地源 `$STATE/ledger/LEDGER.md`，同步到既有飞书文档 `TtpwdhgKroMH1DxJumojTflrppz`（复用）。首次建立四段结构走 `append` 追加，既有内容原样保留、由人工确认后另行清理，**任何阶段都不使用 `overwrite`**。
 - 台账结构对齐 Android 仓库那份的四段式：项目常量 / 收口点登记 / **Issue 现状表**（单份双端，含「平台」列）/ **变更时间线**。现状表由 L2 用 `docs +update --command block_replace` 定点更新；时间线用 `--command append` 追加，绝不 `overwrite`。
 - 台账初始内容**从零生成**：不合并 iOS（98 行）与 Android（70 行）两份业务仓库台账。旧台账留在各自业务仓库供随时查阅，新台账只跟当前线上 issue 走——首次运行时以本轮 `topIssues` 结果建立现状表基线，历史结论不迁移。
 - 新增修复状态反扫：跑批时以 `git log --all --grep='\[crash:'` 扫两个业务仓库，解析 `[crash:<8位id>]` 约定，自动更新台账「处置状态」列并记录 commit hash。**不在业务仓库安装任何 hook**。
@@ -31,8 +31,8 @@
 - `crash-perf-state-layout`: `$STATE` 目录分层（`runs/` 按日期分组 + 顶层基准文件不动）、清理策略、以及仓库内产出物的保留判据。
 
 ### Modified Capabilities
-- `crash-perf-daily-weekly-report`: L1 产出物集合移除台账镜像；L2 产出物集合新增台账同步与性能段。两条链路的职责边界随之改写。
-- `crash-perf-deterministic-delivery`: 投递链路移除「导入台账镜像 → 回填 `__LEDGER_URL__`」两步；新增台账定点更新（非新建、非整份覆盖）路径。
+- `crash-perf-daily-weekly-report`: L1 产出物集合移除台账镜像；L2 产出物集合新增台账同步与性能段；新增 L1/L2 职责边界。同时废止三条前提已被证伪的既有需求 —— 「台账真相源是仓库文件」（三份台账已分叉，该前提在生产中从未成立）、「修复状态判定口径」（iOS 靠 32 位 ID 反查的前提不成立，移交 `crash-perf-fix-status-reconcile`）、「索引页与台账镜像过渡」（过渡态两端均已了结）。并按实测重划「L2 自动档不产出根因」的适用范围：崩溃段可出但须标注未复核，性能段不出。
+- `crash-perf-deterministic-delivery`: 投递链路移除「导入台账镜像 → 回填 `__LEDGER_URL__`」两步，台账同步排在周报卡片发送之后；新增台账定点更新（非新建、非整份覆盖）契约。
 
 ## Impact
 
@@ -49,7 +49,7 @@
 - `bin/INSTALL.md`：目录结构与验收链
 
 **外部依赖**
-- 飞书文档 `TtpwdhgKroMH1DxJumojTflrppz`（台账，复用并覆盖建立新结构）
+- 飞书文档 `TtpwdhgKroMH1DxJumojTflrppz`（台账，复用；新结构以 `append` 建立，不覆盖既有内容）
 - 飞书文档 `UPQNdbzGio2l3bxOleRjK1nOpHd`（索引页，移除台账旧语义行）
 - 两个业务仓库：只读 `git log`，**不安装 hook、不 commit、不 push**（既有只读约束不变）
 - `lark-cli` 的 `docs +update --command block_replace / append`（能力已实测存在）

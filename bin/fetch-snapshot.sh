@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 抓取 Crashlytics 数据 + git 反查修复状态，产出到指定目录。
+# 抓取 Crashlytics 数据 + git 反查修复状态，产出到指定目录；同步维护事实层缓存（$STATE/issues/）。
 #
 # 两种模式，别混：
 #   light（默认，L1 每天）—— 只抓 snapshot.json，不做根因不给方案。日报每天跑完整 triage
@@ -11,6 +11,11 @@
 #                            crash-source-bigquery-migration D4）。
 #   full （L2 每周）      —— 跑完整 firebase-crash-triage skill，额外产出 report.md
 #                            （含根因与修复方案，标注未经人工复核）。
+#
+# 事实层缓存（design D4，change crash-ledger-l2-ownership）：两种模式都维护 $STATE/issues/<32位id>.json——
+# 崩溃事件是不可变历史，一次抓取永久可用。命中判定 = 本地已存事件数 vs 线上 topIssues 返回的 events 计数：
+# 相等则跳过（0 次额外 MCP 调用），线上更多则只抓增量并追加，已有事件记录不改写。
+# CRASH_REPORT_FORCE_REFETCH=1 强制忽略缓存全量重抓。
 set -euo pipefail
 
 ROOT="${CRASH_REPORT_ROOT:?CRASH_REPORT_ROOT 未设置}"
@@ -19,6 +24,13 @@ AND_APP_ID="1:465344775452:android:2c546b57b0176325f466d9"
 OUT_DIR="$1"
 MODE="${2:-light}"
 mkdir -p "$OUT_DIR"
+
+# STATE 独立解析，与 crash-daily.sh / crash-weekly.sh 同一套公式——本脚本可能被独立调用，
+# 不能只依赖调用方 export（2026-08-18 对 REPOS_ROOT 已踩过同类坑，此处照抄该教训）。
+STATE="${CRASH_REPORT_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/crash-triage}"
+ISSUES_DIR="$STATE/issues"
+mkdir -p "$ISSUES_DIR"
+FORCE_REFETCH="${CRASH_REPORT_FORCE_REFETCH:-0}"
 
 # 业务仓库：优先运行根的同级目录（与 crash-daily/weekly 同一套探测逻辑）。
 # 独立调用本脚本时也要能自己解析，不能只依赖调用方传——调用方漏 export 就会 cd 到不存在的路径
@@ -32,6 +44,11 @@ if [ -z "${REPOS_ROOT:-}" ]; then
 fi
 IOS_REPO="$REPOS_ROOT/dino-english-ios"
 AND_REPO="$REPOS_ROOT/dino-english-android"
+
+# 事实层字段集（1.6 spike 实测确认，见 design.md D3 第 7 点）：
+# 堆栈（threads 纯文本 + blameFrame 结构化单帧）、device、operatingSystem、memory.free/used、
+# processState、breadcrumbs（含 firebase_screen_class）、issueVariant。current_screen 不可假设存在。
+FACT_FIELDS='threads, blameFrame, device, operatingSystem, memory, processState, breadcrumbs, issueVariant, customKeys'
 
 if [ "$MODE" = "full" ]; then
 read -r -d '' PROMPT <<PROMPT_END || true
@@ -50,7 +67,7 @@ appId：
 用 Firebase 默认 7 天窗，不要自行扩大窗口或条数。需要更多上下文时在报告正文里说明，
 但 snapshot.json 只放这个口径下的结果。
 
-产出两份文件。**必须先写完 ① 再写 ②**——完整流程耗时长，
+产出三类文件。**必须先写完 ① 再写 ②③**——完整流程耗时长，
 连接中断时至少保住快照，不至于全空（2026-08-07 实测断过一次，两份都没落盘）。
 
 ① ${OUT_DIR}/snapshot.json —— 结构严格如下，数字必须是 JSON 数字：
@@ -60,10 +77,28 @@ fix_commit 用 git -C 仓库 log --oneline --all --grep="完整id" 反查，找�
 ② ${OUT_DIR}/report.md —— 按 skill 报告模板写，含根因、版本流转、风险分级与修复方案。
 开头必须加一行：> 本报告由每周自动化流程生成，修复方案未经人工复核，落地前须验证。
 
+③ 事实层缓存（${ISSUES_DIR}/<32位id>.json，一 issue 一文件，永久保留不清理）——
+对 ① 中的**每一个** issue 执行命中判定：
+  - 强制重抓：若环境要求 CRASH_REPORT_FORCE_REFETCH=${FORCE_REFETCH} 为 1，跳过下面的判定，直接全量抓取。
+  - 先用 Read 工具尝试读 ${ISSUES_DIR}/<该 issue 完整 32 位 id>.json。
+    - 文件不存在 → **未命中**：调用 crashlytics_list_events 抓该 issue 全部事件，
+      写入新文件，结构：{"id":"<32位id>","platform":"ios"|"android","title":"...",
+      "events_count_last_seen":<本次 topIssues 返回的 events 计数>,
+      "events":[{每条事件保留 ${FACT_FIELDS} 等原始字段，尤其 threads 按原样存文本块，不要假设能拆成帧数组}],
+      "last_synced":"<ISO8601 时间戳>"}。
+    - 文件存在 → 比较文件里的 events_count_last_seen 与本次 topIssues 返回的 events 计数：
+      - 相等 → **命中**：跳过，不调用 crashlytics_list_events（这是本次判定的核心目的：0 次额外 MCP 调用）。
+      - 线上计数更大 → **部分命中**：调用 crashlytics_list_events 只抓这次返回的事件，
+        按事件唯一标识（无唯一 id 时用时间戳+blameFrame 组合去重）与已有 events 数组合并，
+        **已有事件记录原样保留、不改写**，只 append 新增的，然后更新 events_count_last_seen 与 last_synced。
+  - 抓取失败（MCP 调用报错/超时）：不中止整体流程，跳过该 issue 的事实层更新，
+    在 report.md 里标明该 issue 的事实层"抓取失败/不完整"（区分「已查证为空」与「未查」）。
+
 若某个仓库的 git 命令无法执行，必须在 report.md 顶部显式声明该平台反查未完成。
 不得让 null 冒充「查过没有」。
 
-不 commit、不 push、不改业务代码。两份文件都写完后只回复 OK。
+不 commit、不 push、不改业务代码。三类文件都处理完后只回复 OK，附一行统计：
+"事实层：命中 N 个（跳过）· 部分命中 M 个（增量抓取）· 未命中 K 个（全量抓取）· 失败 F 个"。
 PROMPT_END
 else
 read -r -d '' PROMPT <<PROMPT_END || true
@@ -86,17 +121,34 @@ filter.issueErrorTypes=["FATAL"]，pageSize=20：
 把结果写到 ${OUT_DIR}/snapshot.json，结构严格如下，数字必须是 JSON 数字：
 {"ios":[{"id":"32位hex","title":"...","events":N,"users":N,"fix_commit":null,"fix_branches":[]}],"android":[同上结构]}
 
-写完只回复 OK，不要输出别的。
+事实层缓存（${ISSUES_DIR}/<32位id>.json，一 issue 一文件，永久保留不清理）——
+对每一个 issue 执行命中判定：
+  - 强制重抓：若环境要求 CRASH_REPORT_FORCE_REFETCH=${FORCE_REFETCH} 为 1，跳过下面的判定，直接全量抓取。
+  - 先用 Read 工具尝试读 ${ISSUES_DIR}/<该 issue 完整 32 位 id>.json。
+    - 文件不存在 → 调用 crashlytics_list_events 抓全部事件，写入新文件，结构：
+      {"id":"<32位id>","platform":"ios"|"android","title":"...",
+      "events_count_last_seen":<本次 topIssues 返回的 events 计数>,
+      "events":[{每条事件保留 ${FACT_FIELDS} 等原始字段}],"last_synced":"<ISO8601>"}。
+    - 文件存在且 events_count_last_seen 等于本次 topIssues 返回的 events 计数 → 跳过，不调用
+      crashlytics_list_events（0 次额外 MCP 调用）。
+    - 文件存在但线上计数更大 → 只抓这次事件，按唯一标识与已有 events 数组合并去重，
+      已有记录不改写，只 append 新增，更新 events_count_last_seen 与 last_synced。
+  - 抓取失败不中止流程，跳过该 issue，不写入不完整的事实层文件。
+
+写完只回复 OK，附一行统计：
+"事实层：命中 N 个（跳过）· 部分命中 M 个（增量抓取）· 未命中 K 个（全量抓取）· 失败 F 个"。
 PROMPT_END
 fi
 
 # allowedTools 必须逐个列只读工具，禁止 "mcp__firebase" 前缀通配——
 # 前缀匹配会放行写操作 crashlytics_update_issue，2026-08-06 已因此误关过线上 issue
-# （见 reports/LEDGER.md「事故记录」）。
-# --add-dir 必须带 Android 仓库，否则 git 反查被权限边界拦下、静默产出未验证的 null。
+# （见 $STATE/ledger/LEDGER.md「事故记录」；change crash-ledger-l2-ownership 起本地源移出仓库）。
+# --add-dir 必须带 Android 仓库与 ${STATE}（事实层缓存读写落在 $STATE/issues/，不在两个业务仓库下），
+# 否则 git 反查 / 事实层文件访问被权限边界拦下、静默产出未验证的 null。
 cd "$IOS_REPO"
 "${AGENT_CMD:-claude}" -p "$PROMPT" \
   --add-dir "$AND_REPO" \
+  --add-dir "$STATE" \
   --allowedTools \
     "mcp__firebase__crashlytics_get_report" \
     "mcp__firebase__crashlytics_get_issue" \

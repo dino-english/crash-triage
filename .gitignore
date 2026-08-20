@@ -1,7 +1,9 @@
 # 运行数据不在仓库里（见 bin/crash-daily.sh 顶部「代码与状态分离」）：
 # logs / 快照 / 历史 / 每日报告 / config.env 全部落在 $CRASH_REPORT_STATE_DIR
 # （默认 ${XDG_STATE_HOME:-~/.local/state}/crash-triage）。
-# reports/ 下只留需要留痕的：LEDGER.md（人工真相源）、weekly-index.jsonl（周报文档 URL 归档）、专项快照。
+# reports/ 下只留唯一入库的运行产物：report-index.jsonl（历次日报/周报飞书文档 URL 归档，
+# 飞书端无法枚举本 bot 的文档，删了就永久断链）。台账、专项快照、weekly-index.jsonl
+# 已移入 $STATE/ledger/（change crash-ledger-l2-ownership），仓库内不再保留。
 
 # 临时文件
 *.tmp

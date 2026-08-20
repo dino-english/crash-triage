@@ -30,7 +30,7 @@ fi
 export REPOS_ROOT   # fetch-snapshot.sh 是子进程，不 export 它会退回自己的默认值
 
 # ── 代码与状态分离 ────────────────────────────────────
-# ${ROOT}（仓库）只放代码与需要留痕的产物：bin/ · sql/ · reports/LEDGER.md · reports/weekly-index.jsonl，全部由 git 管。
+# ${ROOT}（仓库）只放代码与需要留痕的产物：bin/ · sql/ · reports/report-index.jsonl，全部由 git 管。
 # $STATE 放可变运行数据：logs/ · 每日生成的报告 · 快照 · 历史 · 投递中间产物 · 本机 config.env。
 # 分开的理由不是洁癖：`git clean -xfd` / 重新 clone 会连同被忽略的文件一起抹掉，
 # 而 last-snapshot.json 丢了会把下周所有 issue 报成新增（2026-08-07 那类事故）。
@@ -104,7 +104,7 @@ done
 
 # ── 3. 抓快照 ─────────────────────────────────────────
 echo "--- 跑 firebase-crash-triage（完整流程）---"
-OUT_DIR="$STATE/weekly-$TS"
+OUT_DIR="$STATE/runs/$DAY/L2/$TS"
 # shellcheck disable=SC1091
 . "$ROOT/bin/lib.sh"
 # 完整 triage 实测跑 12 分钟以上；给 30 分钟上限防挂死（挂死会导致下周又起一个）。
@@ -154,6 +154,75 @@ else
   echo "  变化项：$CHANGED"
 fi
 
+# ── 4b. 台账渲染（design D1/D2/D11，L2 独占产出，L1 不再碰台账）──────────
+# 本地源 $STATE/ledger/LEDGER.md：Issue 现状表在跑批期全量重算，变更时间线只追加真正变化。
+# 修复状态由 5. 反扫驱动（bin/scan-fix-commits.sh），不依赖模型推断。
+echo "--- 台账渲染 ---"
+LEDGER_DIR="$STATE/ledger"
+LEDGER_LOCAL="$LEDGER_DIR/LEDGER.md"
+mkdir -p "$LEDGER_DIR"
+FIXMAP_FILE="$OUT_DIR/fixmap.json"
+if [ -x "$ROOT/bin/scan-fix-commits.sh" ]; then
+  "$ROOT/bin/scan-fix-commits.sh" "$STATE" "$REPOS_ROOT/dino-english-ios" "$REPOS_ROOT/dino-english-android" \
+    "${CRASH_REPORT_FIX_SCAN_DAYS:-14}" > "$FIXMAP_FILE" 2>"$OUT_DIR/fixmap-scan.log" \
+    || echo "  ⚠️ 修复状态反扫失败，台账现状表本轮不更新处置状态列（详见 fixmap-scan.log）"
+else
+  echo '{"mapped":{},"ambiguous":[],"platform_unavailable":["ios","android"]}' > "$FIXMAP_FILE"
+fi
+[ -s "$FIXMAP_FILE" ] || echo '{"mapped":{},"ambiguous":[],"platform_unavailable":["ios","android"]}' > "$FIXMAP_FILE"
+AMBIG_N="$(jq '.ambiguous | length' "$FIXMAP_FILE" 2>/dev/null || echo 0)"
+[ "$AMBIG_N" -gt 0 ] 2>/dev/null && echo "  ⚠️ 反扫发现 $AMBIG_N 个歧义短标识，未自动更新，详见 fixmap.json"
+
+# 从本地台账里抽出既有现状表（两个锚点之间的内容），供 render-ledger.sh 做「保留首次纳入/备注」的合并。
+PREV_TABLE_FILE="$OUT_DIR/prev-table.md"
+LEDGER_BOOTSTRAPPED=0
+if [ -s "$LEDGER_LOCAL" ] && grep -q '<!-- LEDGER:ISSUES:BEGIN -->' "$LEDGER_LOCAL"; then
+  LEDGER_BOOTSTRAPPED=1
+  awk '/<!-- LEDGER:ISSUES:BEGIN -->/{f=1;next}/<!-- LEDGER:ISSUES:END -->/{f=0}f' "$LEDGER_LOCAL" > "$PREV_TABLE_FILE"
+else
+  : > "$PREV_TABLE_FILE"
+fi
+
+LEDGER_TABLE_FILE="$OUT_DIR/ledger-table.md"
+LEDGER_TIMELINE_FILE="$OUT_DIR/ledger-timeline-delta.md"
+LEDGER_RENDER_OK=0
+if [ -x "$ROOT/bin/render-ledger.sh" ]; then
+  # 周报文档 URL 此刻还不存在（由 deliver.sh 建文档后才知道），时间线先写占位符
+  # __REPORT_URL__，deliver.sh 拿到 URL_REPORT 后统一回填（与卡片 __REPORT_URL__ 占位符同机制）。
+  # 8.8：周报投递失败则占位符永远不会被回填——deliver.sh 只在投递成功分支才 fill，
+  # 未回填的占位符不会被当成真链接展示（lark 侧就是一段普通文本），不会挂空链接。
+  RENDER_OUT="$("$ROOT/bin/render-ledger.sh" "$SNAP_NEW" "$FIXMAP_FILE" "$PREV_TABLE_FILE" \
+    <(echo "$DIFF") "$DAY" "__REPORT_URL__" 2>"$OUT_DIR/render-ledger.log")" \
+    && LEDGER_RENDER_OK=1 || echo "  ⚠️ 台账渲染失败，本轮跳过台账更新（详见 render-ledger.log）"
+  if [ "$LEDGER_RENDER_OK" = "1" ]; then
+    printf '%s' "$RENDER_OUT" | awk 'BEGIN{RS="\x1e"} NR==1' > "$LEDGER_TABLE_FILE"
+    printf '%s' "$RENDER_OUT" | awk 'BEGIN{RS="\x1e"} NR==2' > "$LEDGER_TIMELINE_FILE"
+  fi
+else
+  echo "  ⚠️ bin/render-ledger.sh 不存在，跳过台账渲染"
+fi
+
+if [ "$LEDGER_RENDER_OK" = "1" ]; then
+  # 更新本地源：现状表在两个锚点之间原地替换；时间线增量插到 END 锚点之前（只增不改历史）。
+  # 本地源里的 __REPORT_URL__ 占位符同样等 deliver.sh 投递成功后回填（8.8：失败则不追加/不回填）。
+  LEDGER_TMP="$(mktemp)"
+  awk -v tf="$LEDGER_TABLE_FILE" '
+    /<!-- LEDGER:ISSUES:BEGIN -->/ { print; while ((getline line < tf) > 0) print line; skip=1; next }
+    /<!-- LEDGER:ISSUES:END -->/ { skip=0 }
+    skip { next }
+    { print }
+  ' "$LEDGER_LOCAL" > "$LEDGER_TMP" 2>/dev/null || cp "$LEDGER_LOCAL" "$LEDGER_TMP"
+  if [ -s "$LEDGER_TIMELINE_FILE" ]; then
+    LEDGER_TMP2="$(mktemp)"
+    awk -v tlf="$LEDGER_TIMELINE_FILE" '
+      /<!-- LEDGER:TIMELINE:END -->/ { while ((getline line < tlf) > 0) print line }
+      { print }
+    ' "$LEDGER_TMP" > "$LEDGER_TMP2" 2>/dev/null && mv "$LEDGER_TMP2" "$LEDGER_TMP"
+  fi
+  mv "$LEDGER_TMP" "$LEDGER_LOCAL"
+  echo "  ✅ 本地台账已更新：${LEDGER_LOCAL}（__REPORT_URL__ 占位符待投递成功后回填）"
+fi
+
 # 收件人既可能是群（oc_）也可能是个人（ou_，首次部署验证用）——投递由 agent 读 manifest 的 chat_id 决定。
 
 # ── 5. 主力版本放量（与日报口径互补）────────────────────
@@ -181,11 +250,15 @@ if command -v bq >/dev/null 2>&1 && bq query --use_legacy_sql=false --format=csv
         -e "s|{{VERSIONS}}|\"$3\"|g" "$SQL_DIR/crash-rate.sql" \
       | bq query --use_legacy_sql=false --format=csv 2>/dev/null | tail -n +2 | head -1 || true
   }
+  IOS_TOP2_VERS=""; AND_TOP2_VERS=""   # 供 6. 性能段复用同一批主力版本（不重复解析）
   for entry in "iOS|$PROJECT.firebase_sessions.com_prime_dino_english_IOS_REALTIME|$PROJECT.firebase_crashlytics.com_prime_dino_english_IOS_REALTIME" \
                "Android|$PROJECT.firebase_sessions.com_prime_dino_english_ANDROID_REALTIME|$PROJECT.firebase_crashlytics.com_prime_dino_english_ANDROID_REALTIME"; do
     IFS='|' read -r pname stbl ctbl <<< "$entry"
     while IFS=, read -r ver sess dev; do
       [ -n "$ver" ] || continue
+      if [ "$pname" = "iOS" ]; then IOS_TOP2_VERS="${IOS_TOP2_VERS}${ver}
+"; else AND_TOP2_VERS="${AND_TOP2_VERS}${ver}
+"; fi
       cr="$(ver_crash "$ctbl" "$stbl" "$ver")"
       cev="$(printf '%s' "$cr" | cut -d, -f1)"; csess="$(printf '%s' "$cr" | cut -d, -f2)"
       rate="—"
@@ -199,6 +272,76 @@ if command -v bq >/dev/null 2>&1 && bq query --use_legacy_sql=false --format=csv
   done
 else
   echo "--- ⚠️ bq 不可用，跳过主力版本放量段（不影响变化摘要）---"
+fi
+
+# ── 5b. 性能段（design D8/D9，L2 独占，不进台账，不出根因）────────────────
+# 复用 5. 已解析出的主力版本（会话量 top2），复用 L1 现有 SQL（perf-traces/screens/network.sql），
+# 只改窗口天数为 WEEK_DAYS——同一份 SQL 两条链路各自套用不同窗口，口径一致（design D9）。
+# 只给趋势 / 可定位对象 / 下一步取证方向，不出根因与修复方案（硬约束，见 CLAUDE.md）。
+PERF_OK=0
+IOS_PERF_TBL="$PROJECT.firebase_performance.com_prime_dino_english_IOS"
+AND_PERF_TBL="$PROJECT.firebase_performance.com_prime_dino_english_ANDROID"
+PERF_ROWS=""    # TSV：平台/版本/启动P50/启动P95/慢帧最差页/慢帧率/冻结率/接口错误率（列以制表符分隔）
+# 周环比基准（7.4）：按 (平台,版本) 存最近几轮的性能快照，供 WoW 对比；无基准则显式标明而非显示零变化。
+PERF_HISTORY="$STATE/perf-history.jsonl"
+PERF_HISTORY_KEEP="${CRASH_REPORT_PERF_HISTORY_KEEP:-12}"   # 12 周，约一季度
+if [ "$ADOPT_OK" = "1" ]; then
+  echo "--- 性能段（bq，窗口 ${WEEK_DAYS}d）---"
+  perf_row() { # $1=平台标签 $2=perf表 $3=版本 → 一行 TSV（失败字段留空，由调用方判定缺数原因）
+    local pname="$1" tbl="$2" ver="$3" traces screens net p50 p95 wscreen wslow frozen neterr
+    traces="$(sed -e "s|{{TABLE}}|$tbl|g" -e "s|{{DAYS}}|$WEEK_DAYS|g" -e "s|{{VERSIONS}}|\"$ver\"|g" \
+      "$SQL_DIR/perf-traces.sql" | bq query --use_legacy_sql=false --format=csv 2>/dev/null | tail -n +2 || true)"
+    screens="$(sed -e "s|{{TABLE}}|$tbl|g" -e "s|{{DAYS}}|$WEEK_DAYS|g" -e "s|{{VERSIONS}}|\"$ver\"|g" \
+      "$SQL_DIR/perf-screens.sql" | bq query --use_legacy_sql=false --format=csv 2>/dev/null | tail -n +2 || true)"
+    net="$(sed -e "s|{{TABLE}}|$tbl|g" -e "s|{{DAYS}}|$WEEK_DAYS|g" -e "s|{{VERSIONS}}|\"$ver\"|g" \
+      "$SQL_DIR/perf-network.sql" | bq query --use_legacy_sql=false --format=csv 2>/dev/null | tail -n +2 || true)"
+    p50="$(printf '%s\n' "$traces" | grep '^_app_start,' | cut -d, -f3 | head -1)"
+    p95="$(printf '%s\n' "$traces" | grep '^_app_start,' | cut -d, -f4 | head -1)"
+    wscreen="$(printf '%s\n' "$screens" | head -1 | cut -d, -f1)"
+    wslow="$(printf '%s\n' "$screens" | head -1 | cut -d, -f3)"
+    frozen="$(printf '%s\n' "$screens" | head -1 | cut -d, -f4)"
+    neterr="$(printf '%s\n' "$net" | awk -F, '{e+=$5; n+=$2} END{if(n>0) printf "%.2f", e/n*100}')"
+    # 三态缺数判定（design 缺数三态，简化为周报够用的两态）：表不存在/查询失败 → 空值走「⚠️ 数据未同步」；
+    # 表存在但该版本无样本（HAVING 阈值过滤掉）→ 空值走「该版本无数据」。两者在渲染时统一显示 —，
+    # 性能段不做告警判定（design D8：只给趋势，不触发红黄绿），故不需要像 L1 那样细分三态文案。
+    PERF_ROWS="${PERF_ROWS}${pname}	${ver}	${p50:-—}	${p95:-—}	${wscreen:-—}	${wslow:-—}	${frozen:-—}	${neterr:-—}
+"
+    # WoW（7.4）：查上周同 (平台,版本) 的 P95 基准，有则标变化方向（箭头跟数值、颜色跟好坏，
+    # 启动耗时越小越好故数值增大标↑变差），无基准则显式标「本轮建立」而非显示零变化。
+    local prev_p95 wow=""
+    if [ -s "$PERF_HISTORY" ]; then
+      prev_p95="$(jq -rs --arg p "$pname" --arg v "$ver" \
+        '[.[] | select(.platform==$p and .version==$v)] | last | .p95 // empty' "$PERF_HISTORY" 2>/dev/null || true)"
+    fi
+    if [ -n "${prev_p95:-}" ] && [ -n "$p95" ]; then
+      local delta; delta="$(awk -v a="$p95" -v b="$prev_p95" 'BEGIN{printf "%.0f", a-b}' 2>/dev/null || true)"
+      if [ -n "$delta" ]; then
+        if [ "$delta" -gt 0 ] 2>/dev/null; then wow="（WoW P95 +${delta}ms↑ 变差）"
+        elif [ "$delta" -lt 0 ] 2>/dev/null; then wow="（WoW P95 ${delta}ms↓ 变好）"
+        else wow="（WoW P95 持平）"; fi
+      fi
+    else
+      wow="（无上周基准，本轮建立）"
+    fi
+    echo "  ${pname} ${ver}：启动 P50 ${p50:-—}ms / P95 ${p95:-—}ms ${wow} · 慢帧最差页 ${wscreen:-—} ${wslow:-—}% · 冻结 ${frozen:-—}% · 接口错误率 ${neterr:-—}%"
+    # 落一行到历史（本轮快照，供下周环比），只在拿到值时写，避免用空值污染基准
+    if [ -n "$p95" ] || [ -n "$p50" ]; then
+      jq -nc --arg p "$pname" --arg v "$ver" --arg d "$DAY" --arg p50 "${p50:-}" --arg p95 "${p95:-}" \
+        '{platform:$p, version:$v, day:$d, p50:($p50|tonumber? // null), p95:($p95|tonumber? // null)}' >> "$PERF_HISTORY"
+    fi
+  }
+  PERF_OK=1
+  while IFS= read -r v; do [ -n "$v" ] && perf_row "iOS" "$IOS_PERF_TBL" "$v"; done <<< "$IOS_TOP2_VERS"
+  while IFS= read -r v; do [ -n "$v" ] && perf_row "Android" "$AND_PERF_TBL" "$v"; done <<< "$AND_TOP2_VERS"
+  # 保留最近 N 条同 (platform,version) 记录：避免无限增长
+  if [ -s "$PERF_HISTORY" ]; then
+    PERF_HIST_TMP="$(mktemp)"
+    jq -sc --argjson keep "$PERF_HISTORY_KEEP" \
+      'group_by(.platform + "|" + .version) | map(.[-$keep:]) | flatten | .[] ' \
+      "$PERF_HISTORY" 2>/dev/null > "$PERF_HIST_TMP" && mv "$PERF_HIST_TMP" "$PERF_HISTORY" || rm -f "$PERF_HIST_TMP"
+  fi
+else
+  echo "--- ⚠️ bq 不可用，跳过性能段（崩溃段变化摘要不受影响，design 缺数不告警）---"
 fi
 
 # ── 取数区间（双时区）─────────────────────────────────
@@ -287,6 +430,16 @@ adopt_md() {
   printf '%s' "$ADOPT_ROWS" | awk -F'\t' 'NF>=6{printf "| %s | %s | %s | %s | %s | %s |\n",$1,$2,$3,$4,$5,$6}'
 }
 
+# 性能段表（design D8/D9：只给趋势与对象，不出根因；不进台账，只在周报文档呈现）
+perf_md() {
+  if [ "$PERF_OK" != "1" ]; then
+    printf '（性能数据源不可用，跳过本段；崩溃段变化摘要不受影响）\n'; return 0
+  fi
+  [ -n "$PERF_ROWS" ] || { printf '（本次未取到性能数据）\n'; return 0; }
+  printf '| 平台 | 版本 | 启动 P50 | 启动 P95 | 慢帧最差页 | 慢帧率 | 冻结率 | 接口错误率 |\n|---|---|---|---|---|---|---|---|\n'
+  printf '%s' "$PERF_ROWS" | awk -F'\t' 'NF>=8{printf "| %s | %s | %sms | %sms | %s | %s%% | %s%% | %s%% |\n",$1,$2,$3,$4,$5,$6,$7,$8}'
+}
+
 MSG="$(cat <<MSG_END
 **📊 崩溃周报 · ${DAY}${WEEK_TAG:+ $WEEK_TAG}**
 
@@ -340,7 +493,13 @@ REPORT="$STATE/reports/$DAY-weekly.md"
   adopt_md
   printf '\n> 日报盯的是「版本号最新的 2 个版本」（新版发得怎么样），本段盯的是「承载用户最多的版本」（盘子里的大头）。\n'
   printf '> 两段版本集常常不同，各自回答不同的问题，**不可混比**。\n\n'
-  printf '## 三、口径\n\n%s\n' "$NOTE_MD"
+  printf '## 三、性能（近 %s 天，主力版本，双端分列）\n\n' "$WEEK_DAYS"
+  printf '> 取数区间 %sd：**%s**（与本文档同一套跑批时刻锚定，与一/二段共用）。\n' "$WEEK_DAYS" "$WIN_FULL"
+  printf '> 性能是连续指标、无追踪 ID，**只给趋势、可定位对象与下一步取证方向，不出根因与修复方案**（硬约束）。\n'
+  printf '> **本段不写入台账**（design D8：台账只收有唯一标识、可跨周追踪的崩溃 issue）。\n\n'
+  perf_md
+  printf '\n> 与日报口径互补但不可混比：日报是日维度当期值，本段是周维度趋势快照，窗口天数不同。\n\n'
+  printf '## 四、口径\n\n%s\n' "$NOTE_MD"
 } > "$REPORT"
 
 # ── 7. 产出投递清单（发消息/建文档由 Hermes agent 经 lark-mcp 执行）──
@@ -384,6 +543,19 @@ fi
 # 周报每次新建独立文档（快照性质，要留痕可跨版本 diff），不像日报覆盖同一份；
 # 报告文档的 URL 由 agent 用 docx.builtin.import 创建后回填到卡片 __REPORT_URL__ 再发送；
 # index_append 由 agent 在文档创建成功后追加一行（url = 刚创建的文档 URL）。
+#
+# 台账同步产物：现状表 + 时间线增量拷进 publish 目录，供 deliver.sh 走 sync_ledger()
+# 定点更新飞书文档（block_replace 现状表 + append 时间线，绝不 overwrite，见 deliver.sh D2/D3）。
+LEDGER_TABLE_PUB=""; LEDGER_TIMELINE_PUB=""
+if [ "${LEDGER_RENDER_OK:-0}" = "1" ] && [ -s "$LEDGER_TABLE_FILE" ]; then
+  cp "$LEDGER_TABLE_FILE" "$PUBLISH_DIR/docs/ledger-table.md"
+  LEDGER_TABLE_PUB="$PUBLISH_DIR/docs/ledger-table.md"
+  if [ -s "$LEDGER_TIMELINE_FILE" ]; then
+    cp "$LEDGER_TIMELINE_FILE" "$PUBLISH_DIR/docs/ledger-timeline-delta.md"
+    LEDGER_TIMELINE_PUB="$PUBLISH_DIR/docs/ledger-timeline-delta.md"
+  fi
+fi
+
 jq -n \
   --arg chat "$CHAT_ID" \
   --arg day2 "$DAY" \
@@ -398,10 +570,14 @@ jq -n \
   --arg day "$DAY" \
   --argjson ios "$(echo "$DIFF" | jq '.ios.total')" \
   --argjson and "$(echo "$DIFF" | jq '.android.total')" \
+  --arg ledger_table "$LEDGER_TABLE_PUB" \
+  --arg ledger_timeline "$LEDGER_TIMELINE_PUB" \
+  --arg ledger_local "$LEDGER_LOCAL" \
   '{type:"weekly", day:$day2, run_id:$run, chat_id:$chat, send:($send=="true"),
     message_file:$msg, card_file:$card,
     create_doc:(if $report != "" then {file:$report, xml_file:$reportxml, title:$title, label:"周报"} else null end),
-    archive_append:(if $report != "" then {jsonl_file:$idx, type:"weekly", day:$day, ios:$ios, android:$and} else null end)}' \
+    archive_append:(if $report != "" then {jsonl_file:$idx, type:"weekly", day:$day, ios:$ios, android:$and} else null end),
+    ledger_sync:(if $ledger_table != "" then {table_file:$ledger_table, timeline_file:$ledger_timeline, local_file:$ledger_local} else null end)}' \
   > "$PUBLISH_DIR/manifest.json"
 
 echo "  ✅ 投递清单 $PUBLISH_DIR/manifest.json（发送=${SEND_FLAG}）"
@@ -416,6 +592,11 @@ fi
 
 # ── 8. 收尾 ───────────────────────────────────────────
 jq -n --arg t "$TS" --argjson c "$CHANGED" '{last_run:$t,ok:true,changes:$c}' > "$HEALTH"
+
+# latest 软链指向本次跑批产物，供 2.4/2.5 回归对比与人工排查使用（ln -sfn 覆盖式，指向相对路径避免机器间路径漂移）
+ln -sfn "$TS" "$STATE/runs/$DAY/L2/latest"
+
 find "$STATE/logs" -name 'weekly-*.log' -mtime +60 -delete 2>/dev/null || true
 find "$STATE" -name 'snapshot-*.json' -mtime +60 -delete 2>/dev/null || true
+cleanup_old_runs "$STATE"
 echo "=== 完成，报告：$REPORT ==="

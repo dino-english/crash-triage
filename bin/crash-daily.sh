@@ -38,7 +38,7 @@ fi
 export REPOS_ROOT   # fetch-snapshot.sh 是子进程，不 export 它会退回自己的默认值
 
 # ── 代码与状态分离 ────────────────────────────────────
-# ${ROOT}（仓库）只放代码与需要留痕的产物：bin/ · sql/ · reports/LEDGER.md · reports/weekly-index.jsonl，全部由 git 管。
+# ${ROOT}（仓库）只放代码与需要留痕的产物：bin/ · sql/ · reports/report-index.jsonl，全部由 git 管。
 # $STATE 放可变运行数据：logs/ · 每日生成的报告 · 快照 · 历史 · 投递中间产物 · 本机 config.env。
 # 分开的理由不是洁癖：`git clean -xfd` / 重新 clone 会连同被忽略的文件一起抹掉，
 # 而 last-snapshot.json 丢了会把下周所有 issue 报成新增（2026-08-07 那类事故）。
@@ -66,8 +66,9 @@ PROJECT="dino-english-497507"
 CHAT_ID="${CRASH_REPORT_CHAT_ID:?未设置 CRASH_REPORT_CHAT_ID}"
 DOC_DAILY_ID="${DOC_DAILY_ID:-}"        # 日报文档；固定一份每天 overwrite
 DOC_INDEX_ID="${DOC_INDEX_ID:-}"        # 索引页
-DOC_LEDGER_ID="${DOC_LEDGER_ID:-}"      # 台账镜像
-LEDGER_SRC="${LEDGER_SRC:-$ROOT/reports/LEDGER.md}"
+# 台账移交 L2 独占产出（change crash-ledger-l2-ownership D1），L1 不再持有 LEDGER_SRC / DOC_LEDGER_ID，
+# 索引页台账入口改为固定 URL 直链，见 build_index() 与下方 CLAUDE.md 固定文档表。
+LEDGER_URL="${LEDGER_URL:-https://qjphu5vphyf4.jp.larksuite.com/docx/TtpwdhgKroMH1DxJumojTflrppz}"
 # 报告归档（日报 + 周报统一一份，进 git）：deliver.sh 在文档建成后追加 {type,day,url,...}
 ARCHIVE_FILE="${CRASH_REPORT_ARCHIVE:-$ROOT/reports/report-index.jsonl}"
 ARCHIVE_DAILY_KEEP="${CRASH_REPORT_ARCHIVE_DAILY_KEEP:-30}"   # 索引页里日报归档表渲染多少行（文件本身不截断）
@@ -140,6 +141,7 @@ if [ -f "$ROOT/bin/lib.sh" ]; then
   . "$ROOT/bin/lib.sh"
 else
   run_with_timeout() { local s="$1"; shift; "$@"; }   # 无 lib.sh 时退化为直接执行
+  cleanup_old_runs() { :; }                            # 无 lib.sh 时跳过清理，不阻塞主流程
 fi
 BQ_TIMEOUT="${BQ_TIMEOUT:-180}"      # 单条查询上限；正常查询 3s 内返回，180s 已是极宽松
 mkdir -p "$STATE/logs"
@@ -163,7 +165,7 @@ trap 'rm -f "$BQ_SQLTMP"' EXIT
 bqq csv 'SELECT 1' >/dev/null 2>&1 \
   || fail "bq 不可用或超时，检查 gcloud auth 与项目设置"
 
-TMP="$STATE/metrics-$TS"
+TMP="$STATE/runs/$DAY/L1/$TS"
 mkdir -p "$TMP"
 
 # ── 查询助手（全部带版本过滤；{{VERSIONS}} 的值是带引号的逗号列表，谓词写在 SQL 文件里）──
@@ -622,7 +624,7 @@ spark_rate() { jq -r --arg p "$1" --arg v "$2" --argjson n "$SPARK_DAYS" \
 # 它不驱动卡片任何数字（已由 BigQuery 版本级接管），只用于：
 #   ① 索引页「跟踪中的 issue」与 fix_commit 修复状态反查；② 新增/已修待验告警（全版本口径，已在文案标注）。
 echo "--- 抓取 MCP 崩溃对照数据（全版本口径）---"
-CRASH_DIR="$STATE/crash-daily-$TS"
+CRASH_DIR="$TMP"
 CRASH_JSON="$CRASH_DIR/snapshot.json"
 # lib.sh 已在脚本开头（bq 超时护栏处）source，run_with_timeout 此处可直接用。
 FETCH_TIMEOUT="${FETCH_TIMEOUT:-600}"   # light 模式只取数，10 分钟足够
@@ -1133,14 +1135,15 @@ if [ "$DRY_RUN" = "1" ]; then
 fi
 
 # ── 索引页：跟踪表随每日数据变化，整份重建而非局部改块（局部改易错且难回滚）──
-# 日报/台账 URL 由 agent 建完文档后回填（__DAILY_URL__ / __LEDGER_URL__ 占位符），
-# 周报归档 URL 来自 state/weekly-index.jsonl（L2 每次追加一行，本页倒序渲染）。
+# 日报 URL 由 agent 建完文档后回填（__DAILY_URL__ 占位符）；台账入口是固定 URL 直链（${LEDGER_URL}），
+# 周报归档 URL 来自 $STATE/ledger/weekly-index.jsonl（L2 每次追加一行，本页倒序渲染）。
 build_index() {
   local f="$STATE/index-render.md"
   # 报告归档：日报与周报统一记在一份 JSONL 里（{type,day,url,...}），由 deliver.sh 在文档建成后追加。
   # 不可再生（存的是飞书文档 URL，飞书端无法枚举本 bot 文档），所以放仓库里由 git 兜底。
-  # ARCHIVE_LEGACY 是改成统一格式前的周报归档，读时合并进来，避免历史断链。
-  local ARCH="$ARCHIVE_FILE" LEGACY="$ROOT/reports/weekly-index.jsonl"
+  # ARCHIVE_LEGACY 是改成统一格式前的周报归档，读时合并进来，避免历史断链
+  # （2.8 起本地源移入 $STATE/ledger/，与 LEDGER.md 同批迁移，仓库内不再保留）。
+  local ARCH="$ARCHIVE_FILE" LEGACY="$STATE/ledger/weekly-index.jsonl"
   local ALL="$STATE/archive-merged.jsonl"
   : > "$ALL"
   [ -s "$LEGACY" ] && jq -c '. + {type:"weekly"}' "$LEGACY" >> "$ALL" 2>/dev/null
@@ -1153,17 +1156,20 @@ build_index() {
   {
     printf '# Dino 崩溃跟踪 · 索引\n\n'
     printf '> 本页自动生成，请勿手工编辑（每日 L1 运行时整份重建）。\n'
-    printf '> 判断与处置结论沉淀在仓库 `reports/LEDGER.md`，两者冲突以仓库为准。\n'
+    printf '> 崩溃处置结论沉淀在台账（见下方文档入口），台账由 L2 周报独占产出，本页不再同步镜像。\n'
     printf '> 最后更新：%s · 日报口径：最新 %s 个版本（iOS %s · Android %s）\n' "$DAY" "$VERSION_COUNT" "$IOS_VER_SUM" "$AND_VER_SUM"
     printf '> iOS %s · Android %s\n\n' "$IOS_TOP_NOTE" "$AND_TOP_NOTE"
     printf '## 📍 文档入口\n\n| 文档 | 说明 | 维护 |\n|---|---|---|\n'
-    printf '| 📄 [崩溃 & 性能日报（今日）](__DAILY_URL__) | 每日数据快照（最新 %s 版：崩溃/性能/放量） | 自动 |\n' "$VERSION_COUNT"
+    printf '| 📄 [崩溃 & 性能日报（今日）](__DAILY_URL__) | 每日数据快照（最新 %s 版：崩溃/性能/放量） | 自动（L1） |\n' "$VERSION_COUNT"
     if [ -n "$LATEST_WEEKLY_URL" ]; then
-      printf '| 📊 [崩溃周报（%s）](%s) | 每周变化播报 + 主力版本放量 | 自动 |\n' "$LATEST_WEEKLY_DAY" "$LATEST_WEEKLY_URL"
+      printf '| 📊 [崩溃周报（%s）](%s) | 每周变化播报 + 主力版本放量 | 自动（L2） |\n' "$LATEST_WEEKLY_DAY" "$LATEST_WEEKLY_URL"
     else
-      printf '| 📊 崩溃周报 | 每周变化播报（暂无，L2 首跑后出现） | 自动 |\n'
+      printf '| 📊 崩溃周报 | 每周变化播报（暂无，L2 首跑后出现） | 自动（L2） |\n'
     fi
-    printf '| 📒 [崩溃专项台账 LEDGER](__LEDGER_URL__) | 处置结论、风险分级、事故记录 | **人**（仓库为源，L1 每日同步镜像） |\n\n'
+    printf '| 📒 [崩溃专项台账 LEDGER](%s) | 处置结论、风险分级、变更时间线 | 自动（L2 独占产出） |\n\n' "$LEDGER_URL"
+    printf '## 🧭 导航\n\n'
+    printf '本页所在父目录下有 `L1 日报` / `L2 周报` 两个子目录：按日期查找某天的历史报告去对应子目录翻，\n'
+    printf '本页与台账固定在父目录根部（原地覆盖，链接永久不变）。\n\n'
     printf '## 🔥 今日概览（版本级）\n\n| 平台 | 版本 | 崩溃 | 崩溃率 | 启动 P50 | 慢帧最差页 |\n|---|---|---|---|---|---|\n'
     for v in $IOS_COLS; do
       printf '| iOS | %s | %s | %s | %s | %s |\n' "$v" \
@@ -1305,27 +1311,10 @@ if [ -s "$INDEX_FILE" ] && [ -x "$ROOT/bin/md2docx.py" ]; then
   fi
 fi
 
-# 台账镜像：仓库 LEDGER.md 是真相源，镜像顶部加「请勿在此编辑」警告
-LEDGER_XML=""
-if [ -s "$LEDGER_SRC" ]; then
-  {
-    printf '> ⚠️ 本页为仓库 `reports/LEDGER.md` 的只读镜像，请勿在此编辑；修改请在仓库提交。\n\n'
-    cat "$LEDGER_SRC"
-  } > "$PUBLISH_DIR/docs/ledger.md"
-  LEDGER_DOC="$PUBLISH_DIR/docs/ledger.md"
-  # 彩色版：状态词上色、引用块转高亮框、表格斑马纹（md2docx.py 通用转换器）
-  if [ -x "$ROOT/bin/md2docx.py" ] && "$ROOT/bin/md2docx.py" "$LEDGER_SRC" \
-       --title "崩溃专项台账 LEDGER（只读镜像）" \
-       --head-bg "$XC_HEAD" --zebra "$XC_ZEBRA" \
-       --warn "本页为仓库 reports/LEDGER.md 的只读镜像，请勿在此编辑；修改请在仓库提交。" \
-       > "$PUBLISH_DIR/docs/ledger.xml" 2>/dev/null; then
-    LEDGER_XML="$PUBLISH_DIR/docs/ledger.xml"
-  fi
-else
-  LEDGER_DOC=""
-fi
+# 台账已移交 L2 独占产出（change crash-ledger-l2-ownership D1），L1 不再渲染或投递台账镜像。
+# 索引页台账入口是固定 URL 直链（${LEDGER_URL}，见脚本顶部），不依赖本次跑批产出任何台账文件。
 
-# 投递：日报/台账镜像/索引页三份文档都每次新建（docx.builtin.import），URL 由 agent 回填。
+# 投递：日报/索引页两份文档每次新建（docx.builtin.import），URL 由 agent 回填。
 # 卡片两态并存：message.md（纯 markdown 回退/调试视图）+ card.json（结构化 interactive 卡片，agent 原样投递）。
 # card.json 末尾的占位符 __DETAIL_URL__ / __INDEX_URL__ 由 agent 建完文档后回填。
 jq -n \
@@ -1337,17 +1326,13 @@ jq -n \
   --arg report "$PUBLISH_DIR/docs/daily.md" \
   --arg reportxml "$REPORT_XML" \
   --arg title "崩溃 & 性能日报 · $DAY" \
-  --arg ledger "$LEDGER_DOC" \
-  --arg ledgerxml "$LEDGER_XML" \
   --arg index "$INDEX_FILE" \
   --arg indexxml "$INDEX_XML" \
-  --arg ledger_id "$DOC_LEDGER_ID" \
   --arg index_id "$DOC_INDEX_ID" \
   --arg arch "$ARCHIVE_FILE" \
   --arg vsum "iOS ${IOS_V1:-—} · Android ${AND_V1:-—}" \
   '{type:"daily", day:$day, run_id:$run, chat_id:$chat, message_file:$msg, card_file:$card,
     create_doc: {file:$report, xml_file:$reportxml, title:$title, label:"日报"},
-    ledger_doc: (if $ledger != "" then {file:$ledger, xml_file:$ledgerxml, title:"崩溃专项台账 LEDGER（只读镜像）", label:"台账", doc_id:$ledger_id} else null end),
     index_doc: (if $index != "" then {file:$index, xml_file:$indexxml, title:"Dino 崩溃跟踪 · 索引", label:"索引", doc_id:$index_id} else null end),
     archive_append: {jsonl_file:$arch, type:"daily", day:$day, versions:$vsum}}' \
   > "$PUBLISH_DIR/manifest.json"
@@ -1400,8 +1385,10 @@ jq -n --arg t "$TS" --arg u "$DATA_UNTIL" --arg r "$RUN_ID" \
   --arg iv "$(printf '%s' "$IOS_COLS" | tr '\n' ' ')" --arg av "$(printf '%s' "$AND_COLS" | tr '\n' ' ')" \
   '{last_run:$t,run_id:$r,ok:true,data_until:$u,versions:{ios:$iv,android:$av}}' > "$STATE/health-daily.json"
 
-# 中间产物保留 30 天（每个卡片数字最直接的审计物证），与 crash-daily-* 目录同节奏
-find "$STATE" -maxdepth 1 -name 'metrics-*' -mtime +30 -exec rm -rf {} + 2>/dev/null || true
+# latest 软链指向本次跑批产物，供 2.4/2.5 回归对比与人工排查使用（ln -sfn 覆盖式，指向相对路径避免机器间路径漂移）
+ln -sfn "$TS" "$STATE/runs/$DAY/L1/latest"
+
+# 中间产物保留 30 天（每个卡片数字最直接的审计物证），按 $STATE/runs/<日期>/ 整目录清理（design D7）
+cleanup_old_runs "$STATE"
 find "$STATE/logs" -name 'daily-*.log' -mtime +60 -delete 2>/dev/null || true
-find "$STATE" -maxdepth 1 -name 'crash-daily-*' -mtime +30 -exec rm -rf {} + 2>/dev/null || true
 echo "=== 完成 ==="

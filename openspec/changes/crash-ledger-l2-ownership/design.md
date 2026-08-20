@@ -38,13 +38,13 @@
 
 ### D2 台账同步用 `block_replace` + `append`，不用 `overwrite`
 
-**决策**：现状表定点替换，时间线追加。`overwrite` 仅在首次建立结构时使用一次。
+**决策**：现状表定点替换，时间线追加。`overwrite` 在任何阶段都不使用 —— 首次建立四段结构也走 `append`，既有内容保留在其上方，由人工确认后另行清理。
 
 **理由**：时间线是只增不改的历史记录，`overwrite` 会连同它一起重写。CLI 文档已明确警告该命令丢弃无关富文本。
 
 **备选**：本地维护完整 markdown 后整份 `overwrite` → 否决。这要求本地源与飞书永远一致，任何一端的漂移都会静默丢内容。
 
-**未验证前提**：`block_replace` 依赖 block ID，而 block ID 在文档结构变动后是否稳定尚未实测。**tasks.md 中排为前置 spike**，验证不通过则改用锚点方案（见 D3）。
+**已验证（2026-08-19 spike，见 tasks.md 1.1–1.6）**：`block_replace` 依赖 block ID；实测确认见 D3。
 
 ### D3 定点更新的定位方式：block ID 优先，锚点兜底
 
@@ -53,6 +53,25 @@
 **理由**：block ID 是 CLI 的原生定位方式，精确且无需污染文档内容。锚点方案更鲁棒但会在文档中留下标记文本。
 
 **取舍**：先验再选，不预设。
+
+**2026-08-19 spike 结论（bot 身份 `cli_aaf7b44ddeb8de14`，对台账文档 `TtpwdhgKroMH1DxJumojTflrppz` 实测）**：
+
+1. **备份路径**：`--profile crash-triage` 不存在（`lark-cli profile list` 只列出 appId `cli_aaf7b44ddeb8de14`，`crash-triage` 是历史 alias 未生效）。**实际必须用 `--profile cli_aaf7b44ddeb8de14`**（或不传 `--profile`，因为它是唯一激活的 profile）。CLAUDE.md 中 `LARK_PROFILE=crash-triage` 的环境变量写法需核对生效方式——`install.sh` 生成的 wrapper 里这个变量是否真的传给了 `lark-cli --profile`，需要在任务组 9 文档收尾时一并核实措辞，避免误导。
+2. **备份取数**：`docs +fetch --doc-format xml --detail full` 配 `-q '.content'`（jq 路径）会取到 `null`——正确字段路径是 `.data.document.content`（顶层 `.content` 不存在，`--jq`/`-q` 在这个命令下作用于完整响应体而非"文档内容"这个别名）。已验证：`lark-cli docs +fetch --doc <token> --doc-format xml --detail full --format json` 输出，`jq -r '.data.document.content'` 拿到完整 24134 字节 XML，非空可解析。**实现脚本请用这个字段路径，不要假设 `--jq '.content'` 能直接拿到正文。**
+3. **`--content` 不接受绝对路径的 `@file`**：CLI 报错 "`--file` must be a relative path within the current directory"。**实测可行方案**：管道 `cat file | lark-cli docs +update ... --content -`（stdin），或先 `cd` 到内容文件所在目录用相对路径 `@./file`。`bqq()` 式的 wrapper 若要写临时内容文件，必须放在允许的相对路径下，或统一走 stdin。
+4. **block_replace 会生成新 block ID**（这是 API 固有行为，非 bug）：对表格块 `doxjp9BBwuU4Fm8cgSeCT5s9Oyc` 执行 `block_replace`（内容原样回填）后，新表格块 ID 变为 `doxjp8oDIJtXkJ7tYCIlrX7bRRf`——**旧 ID 立即失效**，再次 `+fetch` 该文档已查不到旧 ID。
+5. **但新 ID 在不相关操作下保持稳定**：`block_replace` 之后连续两次 `append`（在文档末尾追加不相关内容）不影响该表格的 block ID，两次 append 后重新 `+fetch` 确认 ID 仍是 `doxjp8oDIJtXkJ7tYCIlrX7bRRf`。**结论：`append` 不会扰动其他块的 ID，`block_replace` 只会改变被替换的那个块自己的 ID。**
+6. **设计含义（写入 D2/D3 最终选型）**：**block ID 方案有效，不需要锚点兜底**，但有一个必须处理的约束——**block ID 不能跨轮跑批缓存复用**。因为每次 `block_replace` 都会让现状表拿到一个新 ID，下一周想再替换它时，必须先重新 `+fetch --detail with-ids` 取当前 ID，不能读上周记的 ID（会 404 或误伤其他块）。**实现方式**：`crash-weekly.sh` 每次同步台账前，先用稳定的章节标题 block ID（如"Issue 台账" `h2`，它本身不被 `block_replace` 触碰、跨轮不变）做 `--scope section --start-block-id <该标题ID>` 或 `--scope range` 圈定范围，在返回内容里用正则/jq 找到其下第一个 `<table id="...">`，取这个**当次现查**的 ID 去做 `block_replace`。**不要把表格 block ID 存进 `docs.json` 之类的持久缓存**——存了也没用，下一轮必须重查。
+7. **`crashlytics_list_events` 字段确认**（appId `1:465344775452:ios:610bc2f8ea0750fff466d9`，issueId `5ac8785ef88998bfaf4f9a6af4a39ac3`，pageSize=1，单次调用耗时约 8 秒）：
+   - **堆栈帧**：有，但**不是结构化数组**——`threads` 字段是一段纯文本（"Thread: (crashed)" + 若干 "at <symbol>" 行，无 file/line/offset 分字段）；唯一结构化的单帧是 `blameFrame`（symbol / offset / address / library / owner / blamed）。事实层落盘时按原样存文本块，不要假设能按帧数组解析。
+   - **设备**：`device`（manufacturer/model/architecture/marketingName/formFactor）✓
+   - **系统**：`operatingSystem`（displayVersion/os/type）✓
+   - **`memory.free`**：✓ 存在（`memory.used` / `memory.free`，字符串数字）
+   - **`processState`**：✓ 存在（示例值 `FOREGROUND`）
+   - **`current_screen`**：**不是顶层字段**，出现在 `customKeys.current_screen`（本例值 `WKImagePreviewViewController`）——但这是个案（该崩溃走 `safe_decode_fallback` 场景才带这个 key），**不能假设每条事件都有**；更可靠的页面上下文来源是 `breadcrumbs` 里的 `firebase_screen_class`（CLAUDE.md 已有此结论，本次复核一致）。
+   - **breadcrumb**：✓ 存在，`breadcrumbs` 字段是带时间戳的事件文本块（`app_diagnostic` / `screen_view` / `page_view` 等）。
+   - **variant**：字段名是 `issueVariant`（非 `variant`），结构为 `{id: <hex>}`。事实层若要做变体分组，用这个字段名。
+   - `crashlytics_get_report{topIssues}` 单次约 9 秒，`crashlytics_list_events` 单次约 8 秒，两次共 17 秒——**首轮全量抓取（15 个 issue 量级）预估在 4–5 分钟内**，远低于 `TRIAGE_TIMEOUT`（1800s），4.6 的实测项风险可控。
 
 ### D4 事实层以完整 32 位标识为文件名，永久保留
 
@@ -146,8 +165,8 @@ L2 跑批时长增加（性能段 + 事实层首轮抓取） | L2 周一 05:30 �
 1. **改造期**：MacBook 本地开发，测试投递到私聊 `ou_edd20a8dbfcc5e3ee279a225aec044d0`；Mac mini 保持现状运行现有代码（生产链路不中断）。
 2. **验收**：`check-scripts.sh` 全绿 → L1 DRY RUN → L2 DRY RUN → L2 私聊真实投递 → 抽查台账现状表与时间线结构 → 二次跑批验证 `block_replace` 不破坏时间线。
 3. **同步**：验收通过后 push，Mac mini `git fetch && merge --ff-only`，重跑 `install.sh` 重生成 wrapper。
-4. **回滚**：改造集中在 `crash-daily.sh` / `crash-weekly.sh` / `deliver.sh` / `fetch-snapshot.sh` 四个文件，`git revert` 即可。飞书侧台账文档在首次 `overwrite` 前需留一份内容备份（`docs +fetch` 存盘），以便回滚。
-5. **一次性清理**：现有 91 个跑批残渣目录直接删除（既有 30 天清理机制本来也会删）；仓库内 `LEDGER.md` / `weekly-index.jsonl` / 两份专项快照 md 移入 `$STATE`。
+4. **回滚**：改造集中在 `crash-daily.sh` / `crash-weekly.sh` / `deliver.sh` / `fetch-snapshot.sh` 四个文件，`git revert` 即可。飞书侧台账文档在首次同步前需留一份内容备份（`docs +fetch` 存盘）；因为不使用 `overwrite`，回滚只需删除新追加的四段结构块，既有内容未被触碰。
+5. **一次性清理**：现有 92 个跑批残渣目录（`metrics-*` / `crash-daily-*` / `weekly-*`，全部产生于 2026-08-18～08-19 的开发调试期，约 3.6 MB）删除，但**保留最近 1 组 L1 与最近 1 组 L2** 作为新旧布局的对照样本 —— 任务 2.4/2.5 换路径后，用 `diff <(ls 旧样本) <(ls runs/<日期>/L1/latest)` 验证产物文件集无遗漏，比目视检查确定。样本在 2.4/2.5 验收通过后可自行删除。仓库内 `LEDGER.md` / `weekly-index.jsonl` / 两份专项快照 md 移入 `$STATE`。
 
 ## Open Questions
 
