@@ -14,9 +14,9 @@
 | 数据源 | BigQuery（crashlytics / sessions / performance） | Firebase MCP（topIssues 等） |
 | 用不用模型 | **否**，纯 `bq` + `jq` + `lark-cli` | 是，仅用于取数与 git 反查 |
 | 碰不碰仓库 | 只读 clone（git 反查修复状态） | 只读 clone |
-| 产出 | 群卡片 + **刷新索引页** + **同步台账镜像** | 新建报告文档 + 群卡片 + 索引页追加一行 |
+| 产出 | 群卡片 + 日报 + 索引页（**不含台账**，change `crash-ledger-l2-ownership`） | 周报文档 + 群卡片 + 索引页归档 + **台账同步**（新增性能段、WoW 环比） |
 | 投递 | `bin/deliver.sh`（`lark-cli`，确定性、幂等） | 同左 |
-| 版本口径 | **只统计最新 2 个版本**，按版本分列 + 版本间对比 | **主力版本**（近 7 天会话量 top2） |
+| 版本口径 | **只统计最新 2 个版本**（按版本号），按版本分列 + 版本间对比 | **主力版本**（近 7 天会话量 top2，复用日报 SQL 换窗口） |
 
 **两条都不写业务仓库、不 commit、不 push。**
 
@@ -25,11 +25,10 @@
 L1 每天都跑，所以文档同步挂在它身上（最多 1 天延迟），不单独做同步脚本：
 
 1. **重建索引页**（`DOC_INDEX_ID`，overwrite）——跟踪表数据每天变
-2. **同步台账镜像**（`DOC_LEDGER_ID`，overwrite）——把仓库 `reports/LEDGER.md` 推上去，让不看仓库的人也能读
 
-> ⚠️ **现状（2026-08-17）**：lark 块 API 不支持表格、`docx_builtin_import` 只能新建不能覆盖，所以「固定 ID 覆盖」改为**每次新建 + 回填**：L1 每天产 3 份文档（日报 + 台账只读镜像 + 索引页），索引页三入口（日报/周报最新/台账）的 URL 由 agent 建完文档后回填占位符（`__DAILY_URL__` / `__LEDGER_URL__`），卡片末尾带 `📄 详情` + `🗂 崩溃跟踪索引` 两个链接。因此各文档 URL 天天变，稳定入口靠每天卡片里的「索引」链接。
+> ⚠️ **现状（2026-08-19）**：lark 块 API 不支持表格、`docx_builtin_import` 只能新建不能覆盖，所以「固定 ID 覆盖」改为**每次新建 + 回填**：L1 每天产 2 份文档（日报 + 索引页），索引页两入口（日报/周报最新）的 URL 由 agent 建完文档后回填占位符（`__DAILY_URL__` / `__INDEX_URL__`），卡片末尾带 `📄 详情` + `🗂 崩溃跟踪索引` 两个链接。因此各文档 URL 天天变，稳定入口靠每天卡片里的「索引」链接。
 
-> 台账的**真相源始终是仓库文件**，在线版是只读镜像。镜像顶部带「请勿在此编辑」警告。人在修复提交时更新仓库台账，次日 L1 自动同步上线。
+> 台账由 **L2 独占产出**（change `crash-ledger-l2-ownership`）。本地源在 `$STATE/ledger/LEDGER.md`，同步到飞书文档 `TtpwdhgKroMH1DxJumojTflrppz`。L1 不再读写台账——索引页的「台账」入口是固定 URL，不是动态生成的文档。
 
 ---
 
@@ -153,8 +152,7 @@ bash bin/setup.sh                        # 两个路径都不用设，setup 自�
 | `CRASH_REPORT_MIN_SESSIONS` | 否 | 版本候选门槛（低于此会话数的版本不进清单），默认 `5` |
 | `CRASH_REPORT_MAX_VERSION_COLS` | 否 | 卡片版本列上限（最新 N 版 ∪ 主力 2 版），默认 `4` |
 | `DOC_INDEX_ID` | 否 | 索引页文档 **URL**（或 token）。设了就每天原地覆盖、URL 固定；不设则每天新建一份 |
-| `DOC_LEDGER_ID` | 否 | 台账镜像文档 URL（同上） |
-| `CRASH_REPORT_DOC_URL_BASE` | 否 | 上两项传裸 token 时用它拼回 URL；直接传完整 URL 则不需要 |
+| `CRASH_REPORT_DOC_URL_BASE` | 否 | 索引页传裸 token 时用它拼回 URL；直接传完整 URL 则不需要 |
 | `CRASH_REPORT_FOLDER` | 否 | 云文档父文件夹名，默认 `Dino 崩溃 & 性能日/周报` |
 | `CRASH_REPORT_FOLDER_DAILY` / `_WEEKLY` | 否 | 子文件夹名，默认 `L1 日报` / `L2 周报` |
 

@@ -102,7 +102,7 @@ sqlite3 ~/.hermes/cron/executions.db \
 | 产物 | 渲染方式 |
 |---|---|
 | 日报 | `crash-daily.sh` 直接生成 XML（`build_report_xml`），复用卡片那套 `cell()` / `delta_of()` 的阈值判定，只把 `<font color=X>` 转成 `<span text-color="X">` |
-| 台账镜像 | `bin/md2docx.py` 通用转换（markdown 结构照搬 + 状态词按语义上色 + 引用块转高亮框 + 表格斑马纹） |
+| 台账 | `bin/render-ledger.sh` 生成 markdown → `bin/md2docx.py` 通用转换（结构照搬 + 状态词按语义上色 + 引用块转高亮框 + 表格斑马纹），由 L2 的 `sync_ledger()` 定点写入 |
 | 索引 / 周报 | `bin/md2docx.py` 同款转换（2026-08-18 起四份产物配色统一） |
 
 配色常量集中在 `crash-daily.sh` 顶部：`XC_HEAD`（表头蓝底）/ `XC_ZEBRA`（偶数行灰底）/ `XC_HILITE`（最新版列黄底）。
@@ -113,13 +113,15 @@ sqlite3 ~/.hermes/cron/executions.db \
 
 `crash-daily.sh` / `crash-weekly.sh` 只算数据、产出 `$STATE/publish/manifest.json` + `card.json` + 待导入的 markdown；`bin/deliver.sh` 读 manifest，用 `lark-cli` 走完投递。脚本末尾串行调用 deliver，**投递失败不改变生成脚本的退出码**——数据已落盘，重跑 `deliver.sh` 补投即可。`CRASH_REPORT_NO_DELIVER=1` 只生成不投递。
 
-投递链路（顺序不能换）：导入日报 → 导入台账镜像 → 回填索引页的 `__DAILY_URL__` / `__LEDGER_URL__` → 导入索引页 → 回填卡片的 `__DETAIL_URL__` / `__INDEX_URL__` → 发卡片。占位符必须在导入前填好：`drive +import` 只能新建不能覆盖。
+L1 投递链路（顺序不能换）：导入日报 → 回填索引页的 `__DAILY_URL__` → 导入索引页 → 回填卡片的 `__DETAIL_URL__` / `__INDEX_URL__` → 发卡片。占位符必须在导入前填好：`drive +import` 只能新建不能覆盖。**台账不在 L1 链路里**（change `crash-ledger-l2-ownership`），索引页的台账入口是固定 URL 直链。
 
-- **幂等靠 `--idempotency-key`**（值 = `run_id`），不需要投递台账。这条链路以前交给 LLM agent 做，代价是「文档建了卡片没发」的重复投递且系统不自知——2026-08-18 换成确定性脚本。
+L2 的台账同步是 `deliver.sh` 里独立的 `sync_ledger()`，不走上面这条主链：按标题定位现状表 → `block_replace` 定点替换 → 时间线 `append` 追加。**全程不得 `overwrite`**，定位失败必须报错中止（退化成 overwrite 会连时间线历史一起重写）。首次同步目标文档还没有「Issue 现状表」标题时走 bootstrap：`append` 本地台账全文，旧内容原样保留在其上方，由人工核实后另行清理。
+
+- **幂等靠 `--idempotency-key`**（值 = `run_id`），台账同步不需要它（`block_replace` 本身幂等）。这条链路以前交给 LLM agent 做，代价是「文档建了卡片没发」的重复投递且系统不自知——2026-08-18 换成确定性脚本。
 - **陈旧 manifest 闸门**：`deliver.sh` 校验 `day` 必须等于今天。脚本失败时不会重写 manifest，照投就会把昨天的卡片当今天发。
 - **同一位置的导入必须串行**，并发会撞 `232140101`/`232140100`/`233523001`。
 - **文档组织**：`deliver.sh` 自动建 `Dino 崩溃 & 性能日/周报` 父目录 + `L1 日报` / `L2 周报` 子目录（按名字查、查不到才建，token 缓存在 `$STATE/folders.json`）。日报周报收进各自目录，索引与台账放父目录根部。
-- **覆盖优先于新建**：建过的文档记在 `$STATE/docs.json`，下次直接 `docs +update --command overwrite`。索引 / 台账永久固定 URL；日报周报每天（每周）一份新的，但**同日重跑覆盖当天那份**（键 `daily-<日期>`）。优先级 `环境变量 DOC_*_ID > docs.json 自动记忆 > 新建`。
+- **覆盖优先于新建**：建过的文档记在 `$STATE/docs.json`，下次直接 `docs +update --command overwrite`。索引 / 台账永久固定 URL；日报周报每天（每周）一份新的，但**同日重跑覆盖当天那份**（键 `daily-<日期>`）。优先级 `环境变量 DOC_*_ID > docs.json 自动记忆 > 新建`。**台账是例外**：固定 URL 但绝不 `overwrite`，走 `sync_ledger()` 的 block_replace + append。
 - **清理挂在投递收尾**，不能挂在「新建」路径上——稳态下每天都是覆盖，新建路径根本不执行。
 - **归档统一**：日报与周报都写 `reports/report-index.jsonl`（进 git），索引页据此渲染两张归档表。归档在**卡片发送成功之后**追加——归档的语义是「已投递」不是「已生成」。今日条目次日才出现在归档表，当天的入口在页面顶部。
 
@@ -196,7 +198,7 @@ CardKit v2 的 `table` 组件字段只有 `rows` / `page_size` / `row_height` / 
 
 ### 运行数据布局（`$STATE/`，均不入库）
 
-> ⚠️ **以下是 change `crash-ledger-l2-ownership` 定稿的目标布局，实施中。** 当前代码仍按时间戳平铺（`metrics-<TS>/` / `crash-daily-<TS>/` / `weekly-<TS>/`）。
+> ✅ **已实施**（change `crash-ledger-l2-ownership`，2026-08-19 implement 完成）。旧的时间戳平铺布局（`metrics-<TS>/` / `crash-daily-<TS>/` / `weekly-<TS>/`）已废弃。
 
 ```
 $STATE/                          # ${XDG_STATE_HOME:-~/.local/state}/crash-triage
@@ -221,7 +223,7 @@ $STATE/                          # ${XDG_STATE_HOME:-~/.local/state}/crash-triag
 | `last-snapshot.json` | L2 变化检测基准；**首跑无基准时只建基线不报新增**（否则刷一屏「新增」） |
 | `health-daily.json` / `health.json` | L1 / L2 的健康状态 |
 
-**仓库内保留判据 = 可再生性。** `reports/report-index.jsonl` 是**唯一入库的运行产物**——它存历次日报/周报的飞书文档 URL，而飞书端无法枚举本 bot 的文档，删了就永久断链。其余（台账、专项快照、`weekly-index.jsonl`）都移入 `$STATE`。
+**仓库内保留判据 = 可再生性。** `reports/report-index.jsonl` 是**唯一入库的运行产物**——它存历次日报/周报的飞书文档 URL，而飞书端无法枚举本 bot 的文档，删了就永久断链。其余都在 `$STATE`：台账 `ledger/LEDGER.md`、专项快照 `ledger/snapshots/`、旧口径周报归档 `ledger/weekly-index.jsonl`（`build_index()` 读时与 `report-index.jsonl` 合并，避免历史断链）。
 
 ## 部署实例：飞书侧固定资源
 
@@ -251,7 +253,7 @@ Dino 崩溃 & 性能日/周报   ExuPfsz3Rl1x7kdIQRojxeFVpue
 | 文档 | URL |
 |---|---|
 | Dino 崩溃跟踪 · 索引 | `https://qjphu5vphyf4.jp.larksuite.com/docx/UPQNdbzGio2l3bxOleRjK1nOpHd` |
-| 崩溃专项台账 LEDGER（只读镜像） | `https://qjphu5vphyf4.jp.larksuite.com/docx/TtpwdhgKroMH1DxJumojTflrppz` |
+| 崩溃专项台账 LEDGER | `https://qjphu5vphyf4.jp.larksuite.com/docx/TtpwdhgKroMH1DxJumojTflrppz` |
 
 日报 / 周报**不在此表**：每天（每周）一份新文档收进对应目录，**同日重跑覆盖当天那份**（键 `daily-YYYY-MM-DD` / `weekly-YYYY-MM-DD` 记在 `docs.json`）。历史通过索引页的「报告归档」表与 `reports/report-index.jsonl` 追踪。
 
@@ -291,7 +293,7 @@ Dino 崩溃 & 性能日/周报   ExuPfsz3Rl1x7kdIQRojxeFVpue
 
 ## 硬约束（都是踩过的坑）
 
-- **`--allowedTools` 禁止前缀通配**：写 `"mcp__firebase"` 会放行写操作 `crashlytics_update_issue`，2026-08-06 已因此误关线上 issue（见 `reports/LEDGER.md` 事故记录）。必须逐个列只读工具。
+- **`--allowedTools` 禁止前缀通配**：写 `"mcp__firebase"` 会放行写操作 `crashlytics_update_issue`，2026-08-06 已因此误关线上 issue（事故记录见 `$STATE/ledger/LEDGER.md`）。必须逐个列只读工具。
 - **跨仓库 git 反查必须带 `--add-dir`**，否则被权限边界拦下、静默产出未验证的 `null`。prompt 里已要求「不得让 null 冒充查过没有」。
 - **L2 的根因与方案边界**（2026-08-19 按实测修正）：原表述「L2 自动档不出根因与修复方案」与实际不符——`full` 模式的 `report.md` 实测会产出七章 226 行，含风险分级、钻取确认的根因、修复方案（且自述「未经人工复核，落地前须验证」），甚至会主动标注「为什么本轮不给根因」（栈未符号化时）。真正的边界是：
   - **崩溃段**：可出根因与方案，但**必须标注未经复核**，且必须区分「✅钻取确认」与「⚠️聚合推断」。
@@ -311,10 +313,17 @@ Dino 崩溃 & 性能日/周报   ExuPfsz3Rl1x7kdIQRojxeFVpue
 
 - **OpenSpec 驱动**（`openspec/`，schema `spec-driven`，CLI 已装）。进行中的 change 在 `openspec/changes/<name>/`（proposal / design / tasks / specs delta），归档在 `changes/archive/`，已归档能力落在 `openspec/specs/`。工作流走 `.hermes/skills/openspec-{explore,propose,apply-change,archive-change}`——propose 阶段**只写规划产物不写代码**。
 - 动手改脚本前先看对应 change 的 `design.md`/`tasks.md`：多数当前行为（阈值、卡片表格结构、staleness 兜底、审计日志）都有对应 change 记录了理由与取舍。
-- ⚠️ **台账口径已变（change `crash-ledger-l2-ownership`，实施中）**。旧表述「`reports/LEDGER.md` 是崩溃处置结论的人工真相源，飞书上是只读镜像（L1 每天同步）」**已被证伪**：2026-08-19 实测发现三份台账并存且分叉——`crash-triage/reports/LEDGER.md`（153 行，只含 iOS）、`dino-english-ios/reports/crash-triage/LEDGER.md`（98 行，iOS 团队仍在更新）、`dino-english-android/reports/crash-triage/LEDGER.md`（70 行，从未进过飞书）。根因是 `ab6748b`（08-14）复制 iOS 台账进本仓库却未删原件，本仓库那份成了孤儿副本，L1 每天镜像的是过期内容。
-  - **新口径**：台账由 **L2 独占产出**，本地源 `$STATE/ledger/LEDGER.md`，同步到飞书文档 `TtpwdhgKroMH1DxJumojTflrppz`。**L1 不再读写台账**。
+- ✅ **台账口径（change `crash-ledger-l2-ownership`，2026-08-19 implement 完成）**。历史背景：旧表述「`reports/LEDGER.md` 是崩溃处置结论的人工真相源，飞书上是只读镜像（L1 每天同步）」已被证伪——2026-08-19 实测发现三份台账并存且分叉（本仓库 153 行只含 iOS、`dino-english-ios` 98 行仍在更新、`dino-english-android` 70 行从未进过飞书）。根因是 `ab6748b`（08-14）复制 iOS 台账进本仓库却未删原件，本仓库那份成了孤儿副本，L1 每天镜像的是过期内容。
+  - **口径**：台账由 **L2 独占产出**，本地源 `$STATE/ledger/LEDGER.md`，同步到飞书文档 `TtpwdhgKroMH1DxJumojTflrppz`。**L1 不再读写台账**（`crash-daily.sh` 已无 `LEDGER_SRC` / `DOC_LEDGER_ID`，索引页台账入口改固定 URL 直链）。
   - **结构**（对齐 Android 那份的四段式）：项目常量 / 崩溃收口点登记 / **Issue 现状表**（单表双端，含「平台」列）/ **变更时间线**（挂周报链接）。
-  - **同步方式**：现状表走 `docs +update --command block_replace` 定点替换，时间线走 `--command append` 追加，**绝不 `overwrite`**（会丢时间线历史）。
+  - **同步方式**：`deliver.sh` 的 `sync_ledger()`——现状表走 `docs +update --command block_replace` 定点替换，时间线走 `--command append` 追加，**任何阶段都不用 `overwrite`**（会丢时间线历史）。定位不到标题块且无本地全文可 bootstrap 时**报错中止，不退化为 overwrite**。
+  - **block ID 不可跨轮缓存**（2026-08-19 spike 实测）：每次 `block_replace` 都会让被替换的块拿到新 ID，旧 ID 立即失效；但 `append` 不扰动其他块的 ID。所以每轮同步前必须按标题重查当次 ID，**不要存进 `docs.json`**。
   - **初始内容**：Issue 现状表从零建立，不迁移历史结论（旧台账留在两个业务仓库供查阅）；「项目常量」与「收口点登记」两段例外迁移——它们是项目事实而非处置结论。
-  - **修复状态由代码提交驱动**：commit message 约定 `[crash:<8位id>]`，跑批时反扫两个业务仓库 `git log --all --grep='\[crash:' --since='14 days'` 自动更新「处置状态」列。**不在业务仓库装任何 hook**——反扫幂等可补漏，hook 漏一次就永久没记录，且要在团队共用仓库里配飞书凭证。
+  - **修复状态由代码提交驱动**：commit message 约定 `[crash:<8位id>]`，`bin/scan-fix-commits.sh` 反扫两个业务仓库 `git log --all --grep='\[crash:' --since='14 days'` 自动更新「处置状态」列。纯只读、不 checkout / reset、**不在业务仓库装任何 hook**——反扫幂等可补漏，hook 漏一次就永久没记录，且要在团队共用仓库里配飞书凭证。8 位短 id 撞到多个 issue 时不自动更新，标为待人工确认。
   - **性能不进台账**：性能是连续指标、无追踪 ID，只在 L2 周报做趋势与页面定位，且不出根因。
+
+### lark-cli 实测勘误（2026-08-19 spike）
+
+- **`--profile crash-triage` 不存在**：`lark-cli profile list` 只列出 appId `cli_aaf7b44ddeb8de14`，`crash-triage` 是未生效的历史 alias。用 `--profile cli_aaf7b44ddeb8de14`，或不传（它是唯一激活的 profile）。
+- **`docs +fetch` 取正文的 jq 路径是 `.data.document.content`**，不是 `.content`（后者恒为 `null`）。
+- **`--content @绝对路径` 被拒**（"must be a relative path within the current directory"）：改用 stdin（`cat f | lark-cli ... --content -`）或先 `cd` 到文件目录用 `@./file`。
