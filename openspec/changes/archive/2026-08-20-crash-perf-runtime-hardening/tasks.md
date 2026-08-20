@@ -31,5 +31,5 @@
 - [x] 4.7a 云文档目录结构（父目录 + L1/L2 子目录），按名字幂等查找、token 缓存
 - [x] 4.7b 索引与台账改原地覆盖（`DOC_*_ID` 设了才生效，未设则沿用新建并打印 URL）
 - [x] 4.7c 日报周报统一归档到 `reports/report-index.jsonl`，索引页渲染两张表，兼容旧 `weekly-index.jsonl`
-- [ ] 4.7 **真实投递验证**（会真的建文档发卡片）：先用私聊 `ou_xxx` 跑一轮，确认 `drive +import` 返回的 URL 字段名与递归提取一致
-- [ ] 4.8 `crash-perf-execution-audit-log` 归档时删除 T1「投递幂等台账 / card_sent 闸门 / 同日补投」条目（已被 `--idempotency-key` 取代）
+- [x] 4.7 **真实投递验证**（会真的建文档发卡片）：先用私聊 `ou_xxx` 跑一轮，确认 `drive +import` 返回的 URL 字段名与递归提取一致 — 2026-08-20 实证：L1/L2 多轮真实投递到 `ou_edd20a8dbfcc5e3ee279a225aec044d0`，`publish_doc()` 均正确取到 URL（如 `docx/KdK8dlqXuoOkQdxxz1sjszLspnc`），覆盖新建与原地覆盖两条路径
+- [x] 4.8 `crash-perf-execution-audit-log` 归档时删除 T1「投递幂等台账 / card_sent 闸门 / 同日补投」条目（已被 `--idempotency-key` 取代） — 2026-08-20 结项：`crash-perf-execution-audit-log` 32 项一项未实施，从未落地过 T1，无内容可删。本条的实质诉求「幂等靠 `--idempotency-key` 而非台账」已在 `deliver.sh:291` 实现并写入 CLAUDE.md；若将来重启审计日志 change，需以此为前提重写其 T1
