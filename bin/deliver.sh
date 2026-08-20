@@ -425,11 +425,13 @@ sync_ledger() { # $1=doc_id(URL或token) $2=table内容文件(xml优先) $3=tabl
 
   # ── 2. 以标题 id 为锚点 section-fetch，在其下找当次现查的表格 block id ─────
   # 不复用/缓存表格 id：block_replace 每次都会让表格拿到新 id，跨轮必须重查（design D3 第 6 点）。
+  # 与标题定位同理：section 返回的是 DocxXML 文本，不是块结构 JSON——
+  # 旧实现在 JSON 里找 type=="table" 永远落空（2026-08-20 实测）。按 <table id="..."> 标签取。
   local section table_id
   section="$("${LK[@]}" docs +fetch --doc "$doc" --scope section --start-block-id "$heading_id" \
               --detail with-ids --as "$LARK_AS" --format json 2>&1)" || section=""
-  table_id="$(printf '%s' "$section" | json_only | jq -r \
-    '[.. | objects | select(.type? == "table" or .tag? == "table") | (.["block-id"]? // .id?)] | first // empty' 2>/dev/null || true)"
+  table_id="$(printf '%s' "$section" | json_only | jq -r '.data.document.content // ""' 2>/dev/null \
+    | grep -oE '<table id="[^"]*"' | head -1 | sed -E 's/^<table id="([^"]*)"/\1/' || true)"
   if [ -z "$table_id" ]; then
     echo "  ❌ 台账同步失败：标题「${LEDGER_HEADING_TEXT}」下定位不到表格 block，中止同步（不退化为 overwrite）" >&2
     return 1
