@@ -35,7 +35,7 @@ STATE="${CRASH_REPORT_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/crash-tri
 
 分开的理由不是洁癖：`git clean -xfd` / 重新 clone 会连同被忽略的文件一起抹掉，而 `last-snapshot.json` 丢了会把下周所有 issue 报成新增（2026-08-07 那类事故）。
 
-**归档 `report-index.jsonl` 也在 `$STATE`**（2026-08-20 起，此前在仓库里纳入 git）。它存历次日报/周报飞书文档的 URL，飞书端无法枚举本 bot 的文档，删了就永久断链——但"入 git"这个持久化手段在这套系统里不成立：追加它的是无人值守的生产机，而那台机器**推不了 git**（无凭证），条目只会永远躺在工作区。实测三个后果：一次 `git clean` / 重新 clone 就全没；脏工作区让 `update.sh` 的 `git pull --ff-only` 卡住；两台机器各写各的必然分叉。现与 `docs.json` / `last-snapshot.json` 同级，同样靠"别删 `$STATE`"保底。仓库里那份保留为历史存档，运行时不再写入。
+**归档 `report-index.jsonl` 也在 `$STATE`**（2026-08-20 从仓库移出）。它存不可再生的飞书文档 URL，但「入 git」这个持久化手段在这里不成立——追加它的是无人值守的生产机，**那台机器推不了 git**（无凭证），条目只会躺在工作区：`git clean` 就全没、脏工作区卡住 `pull --ff-only`、两台机器必然分叉（三样都实测踩到）。仓库里那份留作历史存档，运行时不再写入。
 
 `REPOS_ROOT` 同样自动探测：优先运行根的**同级目录**（业务仓库通常和本仓库并排 clone，只读 fetch），没有才用 `$ROOT/repos` 隔离 clone。
 
@@ -57,11 +57,16 @@ STATE="${CRASH_REPORT_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/crash-tri
 ## 常用命令
 
 ```bash
-# DRY RUN（不投递；L1 会把卡片 JSON 写到 state/publish/card.json 后 exit 0）
-CRASH_REPORT_ROOT=$HOME/crash-triage CRASH_REPORT_CHAT_ID=<ou_xxx> \
-  CRASH_REPORT_DRY_RUN=1 bash bin/crash-daily.sh
-CRASH_REPORT_ROOT=$HOME/crash-triage CRASH_REPORT_CHAT_ID=<ou_xxx> \
-  CRASH_REPORT_DRY_RUN=1 bash bin/crash-weekly.sh
+# DRY RUN（投递目标由 local.env 定，不用传 CHAT_ID；ROOT 自动探测）
+CRASH_REPORT_DRY_RUN=1 bash bin/crash-daily.sh
+CRASH_REPORT_DRY_RUN=1 bash bin/crash-weekly.sh
+
+# ⚠️ DRY_RUN 在打完卡片预览后就 exit 0，**跑不到 build_index / manifest**。
+#    要验索引页或投递清单，用 NO_DELIVER（走完整链路，只是不投）：
+CRASH_REPORT_NO_DELIVER=1 bash bin/crash-daily.sh
+
+# ⚠️ 整跑要 5 分钟以上。别给它设短超时——进程被信号杀掉会触发 ERR trap，
+#    把「被杀」当成故障告警发出去（2026-08-20 因 2 分钟超时误报进群）。
 
 # 单条 SQL 手工验证（脚本用 sed 替换占位符再喂 bq）
 sed -e "s|{{TABLE}}|dino-english-497507.firebase_performance.com_prime_dino_english_IOS|g" \
@@ -75,8 +80,7 @@ bash bin/setup.sh
 bash bin/install.sh
 bash bin/update.sh
 
-# 改脚本后的唯一自动检查（两项：bash -n 语法 + $VAR 紧邻多字节字符；全绿才提交）
-# ⛔ 不能用 `bash -n` 代替：那只覆盖第一项，第二项才是反复踩的那个坑。
+# 改脚本后的唯一自动检查，写完立刻跑
 bash bin/check-scripts.sh
 
 # 运维
@@ -92,7 +96,9 @@ sqlite3 ~/.hermes/cron/executions.db \
 
 > ⚠️ `hermes cron run <id>` 手工触发**总是打印 `Ran now: failed`**，与实际成败无关——Hermes 后台派发路径只设 `executed=True` 却漏设 `execution_success`（`tools/cronjob_tools.py:1347` vs `hermes_cli/cron.py:476`）。**以 `executions.db` 的 status 和脚本日志为准**，别追这个假故障（2026-08-18 踩过）。
 
-没有单元测试。改脚本后的验收链：`bash bin/check-scripts.sh`（**两项**：`bash -n` 语法 + `$VAR` 紧邻多字节字符，唯一的自动检查，**写完立刻跑、不要等到提交前**）→ DRY RUN → 抽查 2–3 个数值与 Firebase 控制台对得上（[bin/INSTALL.md](bin/INSTALL.md) §6）。
+没有单元测试。验收链：`check-scripts.sh` → DRY RUN → 抽查 2–3 个数值与 Firebase 控制台对得上（[bin/INSTALL.md](bin/INSTALL.md) §6）。
+
+⛔ `check-scripts.sh` 是**两项**检查：`bash -n` 语法 + **`$VAR` 紧邻多字节字符**。不能用 `bash -n` 代替——第二项才是反复踩的那个坑（`"${miss:+（$miss）}"` 在 `set -u` 下报 `miss?: unbound variable`，bash 把全角括号的字节并进了变量名）。
 
 ## 架构要点
 
@@ -204,7 +210,7 @@ sessions 优先 REALTIME 活表，缺失才回退批量表并在卡片上显式�
 🔴 启动 P95 iOS 1.5.4 425ms · Android 1.5.3 4363ms
 ```
 
-⛔ **多字节字符不能紧跟 `${var:+...}`**：`"${miss:+（$miss）}"` 在 `set -u` 下报 `miss?: unbound variable`——bash 把全角括号的后续字节并进了变量名。全角括号与 `·` 分隔符一律先条件赋值再拼接。
+⛔ 全角括号与 `·` 分隔符一律先条件赋值再拼接，不要写成 `${var:+（...）}`（见上方 `check-scripts.sh` 第二项）。
 
 ### 卡片的能力边界
 
@@ -217,8 +223,6 @@ CardKit v2 的 `table` 组件字段只有 `rows` / `page_size` / `row_height` / 
 卡片是每端一张 CardKit v2 表（列 = 指标 | 版本列 2–4 个 | 对比），行标签带窗口天数（`崩溃率 7d` / `会话数 1d`）——不标窗口必被读成同一口径。对比列 = 最新版 − 上一版：**箭头跟数值方向，颜色跟好坏**（合并会让「会话数 -51 ↑」这类越大越好的指标自相矛盾）；会话数用 `neutral` 不着色。同版本 DoD/WoW 只进日报文档，不进卡片。
 
 ### 运行数据布局（`$STATE/`，均不入库）
-
-> ✅ **已实施**（change `crash-ledger-l2-ownership`，2026-08-19 implement 完成）。旧的时间戳平铺布局（`metrics-<TS>/` / `crash-daily-<TS>/` / `weekly-<TS>/`）已废弃。
 
 ```
 $STATE/                          # ${XDG_STATE_HOME:-~/.local/state}/crash-triage
@@ -235,16 +239,11 @@ $STATE/                          # ${XDG_STATE_HOME:-~/.local/state}/crash-triag
 └── *.json                       基准文件，**保持顶层不动**（见下表）
 ```
 
-**顶层只放基准文件。** 跑批中间产物一律落 `runs/<日期>/L1/<时刻>/`——`index-render.md` 与
-`archive-merged.jsonl` 曾写在 `$STATE` 顶层，2026-08-20 归位到跑批目录：manifest 把 `index-render.md`
-的路径交给 `deliver.sh`，而 `publish/` 下次跑批即被 `rm -rf`，放 `runs/` 才能在补投时还找得到。
+三条约定（都是踩过的坑）：
 
-**清理不能按文件名前缀分网。** L1 只删 `daily-*.log`、L2 只删 `weekly-*.log`，`bq-stderr-*.log` 从两张网
-中间漏过去、永不清理（2026-08-20 盘出 20 个陈年文件）。现改为 `find "$STATE/logs" -type f -mtime +60`
-整目录清，两个脚本各跑一次也幂等。同理 L2 那条 `snapshot-*.json` 遗留清理必须带 `-maxdepth 1`，
-否则会递归进 `runs/` 与 `backup/`。
-
-**为什么基准文件不进子目录**：它们是跨跑批的累积状态，丢失后果严重（`docs.json` 丢 → 新建整套重复飞书文档，2026-08-19 实际发生；`last-snapshot.json` 丢 → 全部 issue 报成新增，2026-08-07 事故）。保持原位 = 零迁移风险，46 处 `$STATE/xxx.json` 引用一处不改。
+- **顶层只放基准文件**，跑批中间产物一律落 `runs/<日期>/L1/<时刻>/`。`index-render.md` 的路径要交给 `deliver.sh`，而 `publish/` 下次跑批即被 `rm -rf`，放 `runs/` 补投时才找得到。基准文件不进子目录是因为丢失后果严重（`docs.json` 丢 → 新建整套重复飞书文档；`last-snapshot.json` 丢 → 全部 issue 报成新增），保持原位 = 零迁移风险。
+- **清理不能按文件名前缀分网**：L1 只删 `daily-*.log`、L2 只删 `weekly-*.log`，`bq-stderr-*.log` 从两张网中间漏过去永不清理。现按 `find "$STATE/logs" -type f -mtime +60` 整目录清。同理 L2 那条 `snapshot-*.json` 遗留清理必须带 `-maxdepth 1`，否则递归进 `runs/` 与 `backup/`。
+- ⚠️ **`path.env` 是新名**（旧 `config.env`——它是探测结果缓存不是配置，叫 config 会诱导人把真配置写进去然后被覆写）。四个读取端各留一轮 `config.env` 回落分支，**等所有机器都跑过 `setup.sh` 后可删**。
 
 | 文件 | 作用 |
 |---|---|
@@ -257,7 +256,7 @@ $STATE/                          # ${XDG_STATE_HOME:-~/.local/state}/crash-triag
 | `last-snapshot.json` | L2 变化检测基准；**首跑无基准时只建基线不报新增**（否则刷一屏「新增」） |
 | `health-daily.json` / `health.json` | L1 / L2 的健康状态 |
 
-**运行产物一律在 `$STATE`，仓库只放代码。** 归档 `report-index.jsonl`、台账 `ledger/LEDGER.md`、专项快照 `ledger/snapshots/`、旧口径周报归档 `ledger/weekly-index.jsonl`（`build_index()` 读时与归档合并，避免历史断链）都在 `$STATE`。
+旧口径周报归档 `ledger/weekly-index.jsonl` 由 `build_index()` 读时与 `report-index.jsonl` 合并，避免历史断链。
 
 **归档的异地备份靠人工**，不在关键路径上——想留一份进 git 就手工拷回仓库提交：
 
@@ -269,99 +268,29 @@ scp dino911@dino911s-mac-mini:.local/state/crash-triage/report-index.jsonl repor
 
 ## 部署实例：飞书侧固定资源
 
-**这些是这套部署独有的事实，不是代码。** 运行时它们缓存在 `$STATE/docs.json` 与 `$STATE/folders.json`（机器本地、不入库），本表是缓存丢失 / 换机器 / 换会话时的兜底记录。`deliver.sh` 新建任何固定资源时会打印可直接粘贴的回填块。
+租户 / 应用 ID、文件夹 token、固定文档 URL、scope 现状、不要删的历史文档、`docs.json` /
+`folders.json` 的键格式——**这些是这套部署独有的查阅型事实，不是代码**，已移到
+[bin/INSTALL.md §12](bin/INSTALL.md)。运行时它们缓存在 `$STATE/docs.json` 与
+`$STATE/folders.json`（机器本地、不入库），INSTALL.md 那份是缓存丢失 / 换机器时的兜底。
 
-### 租户与应用
+改代码时只需记住三条：
 
-| 项 | 值 |
-|---|---|
-| 租户域名 | `qjphu5vphyf4.jp.larksuite.com` |
-| **主力应用** | 壹帏管家 `cli_aaf7b44ddeb8de14` · lark-cli profile `crash-triage` · 身份钉死 `--as bot` |
-| 另两个应用 | `cli_aad59f453275de18`（Leong Chee Wei's Lark CLI，lark-cli 默认 profile）· `cli_aaf7d7fc6ef9de17`（Dino AI Data Assistant） |
-| 你的 open_id | 壹帏管家下 `ou_edd20a8dbfcc5e3ee279a225aec044d0` · 旧 app 下 `ou_a14d438768dbc819773b94c84f82726a` |
-
-⚠️ **open_id 按 app 隔离**，跨 app 用会报 `99992361 open_id cross app`。群 ID（`oc_`）是租户级的，不受影响。
-
-### 文件夹（2026-08-18 建，均已授予你 full_access）
-
-```
-Dino 崩溃 & 性能日/周报   ExuPfsz3Rl1x7kdIQRojxeFVpue
-  ├─ L1 日报              DRngfVukxlsGvodQSNhjco1BpKs
-  └─ L2 周报              RSr3fsHDal7uu5dtqTjjPxdtpbb
-```
-
-### 固定文档（原地覆盖，URL 不变）
-
-| 文档 | URL |
-|---|---|
-| Dino 崩溃跟踪 · 索引 | `https://qjphu5vphyf4.jp.larksuite.com/docx/UPQNdbzGio2l3bxOleRjK1nOpHd` |
-| 崩溃专项台账 LEDGER | `https://qjphu5vphyf4.jp.larksuite.com/docx/TtpwdhgKroMH1DxJumojTflrppz` |
-
-日报 / 周报**不在此表**：每天（每周）一份新文档收进对应目录，**同日重跑覆盖当天那份**（键 `daily-YYYY-MM-DD` / `weekly-YYYY-MM-DD` 记在 `docs.json`）。历史通过索引页的「报告归档」表与 `reports/report-index.jsonl` 追踪。
-
-### 投递目标
-
-| 场景 | ID |
-|---|---|
-| 正式群 | `oc_655033f1f85fa04f9eac25d56f056fc9`（Dino 崩溃 & 性能日/周报） |
-| 私聊验证 | `ou_edd20a8dbfcc5e3ee279a225aec044d0` |
-
-`deliver.sh` 按前缀分流：`ou_` 走 `--user-id`，其余走 `--chat-id`。
-
-**投递目标由机器决定，不由命令决定。** 每台机器在 `$STATE/local.env` 里写自己的
-`CRASH_REPORT_CHAT_ID`：开发机（MacBook）填私聊 `ou_`，**只有生产机（Mac mini）填正式群 `oc_`**。
-该文件由人手写、`setup.sh` 永不覆写（`path.env` 才是生成的，每次 `install.sh` / `update.sh` 都被
-`>` 整个重写，配置放那儿会丢）。样例见 [bin/local.env.example](bin/local.env.example)。
-
-加载点在 `crash-daily.sh` / `crash-weekly.sh` / `deliver.sh`，**位置在解析 `CHAT_ID` 之前**——
-普通赋值会盖掉命令行传入的同名环境变量，所以 `CRASH_REPORT_CHAT_ID=oc_… bash bin/crash-daily.sh`
-在开发机上仍然只发私聊。`deliver.sh` 另外用它压过 manifest 里记的 `chat_id`（不一致时打印一行，
-不静默改），挡住「拿别处产出的 manifest 在本机补投」这条路。起因是 2026-08-20 一次测试里
-命令行直接写了正式群 ID，只因当时带了 `CRASH_REPORT_NO_DELIVER=1` 才没发出去。
-
-⚠️ 没有 `local.env` 的机器行为不变（沿用 wrapper 里 export 的值），所以 Mac mini 拉新代码后
-**不做任何动作也照常发群**；但它同样不设防，建议一并补上 `local.env`。
-
-**`path.env` 是 2026-08-20 起的新名，旧名 `config.env`。** 改名的理由：它不是「配置」而是
-`setup.sh` 的**探测结果缓存**（一行 PATH），叫 config 会诱导人把真配置写进去，而它每次
-`setup.sh` 都被 `>` 覆写。读取端保留一轮 `config.env` 回落分支，服务于「只 `git pull` 没跑
-`setup.sh`」的机器；`setup.sh` 写完 `path.env` 会删掉旧文件。等所有机器都跑过一次
-`setup.sh` / `update.sh`，回落分支可以删。
-
-⚠️ 随改名一起补了 **`deliver.sh` 的 PATH 兜底 else 分支**——它原本只有 `if`，文件缺失时直接吃
-cron 的最小 env，而 `lark-cli` 装在 npm 全局目录里，PATH 一缺投递整条链路挂掉，且报错指向
-`lark-cli` 而不是 PATH。
-
-### scope 现状（2026-08-18）
-
-- **bot 身份**：三个 app 都已开通 `drive:drive`，建目录 / 建文档 / 发消息全通。
-- **user 身份**（壹帏管家）：只批下来 `im:*` 与 `contact:user.basic_profile:readonly`，**没有 docs / drive / 权限管理**。
-- 后果：**加协作者只能在飞书 UI 里点**（`drive +member-add` 需要 `docs:permission.member:create`，bot 身份则被 `1063002` 拒）。想走 CLI 需在后台给 user 身份补 scope 并**发布新版本**，然后重新 `lark-cli auth login --profile crash-triage`。
-
-### ⛔ 不要删的历史文档（旧 app 云空间根目录）
-
-| token | 标题 | 说明 |
-|---|---|---|
-| `V1I3di1YQo29v6xNZoGjbZCDppe` | Dino 崩溃跟踪 · 索引 | 2026-08-07 建，INSTALL.md 旧 `DOC_INDEX_ID` |
-| `FvmTdArLyoOydQxdAo8jRNSUpAg` | 崩溃专项总台账（LEDGER）— iOS | 2026-08-07 建，旧 `DOC_LEDGER_ID` |
-| `OjTmd3Vyuo8RPuxV76MjRYxzpCd` | 崩溃 & 性能日报 · 2026-08-07 | 历史产物 |
-| `KSFUdzCKYocCYcx4l1yjrBiFpyd` | 崩溃周报 · 2026-08-07 | 历史产物 |
-| `CkUpdh7KSo2oGuxOsmpjgL4up5G` · `Wb0Td39FXojn4wx2lqFjFJSdphb` | 【探测】权限检查 · （无标题） | 非本流水线产物 |
-
-### 运行时状态文件
-
-| 文件 | 内容 | 键 |
-|---|---|---|
-| `$STATE/docs.json` | 文档台账（决定覆盖还是新建） | `<profile>\|index` · `<profile>\|ledger` · `<profile>\|daily-<日期>` |
-| `$STATE/folders.json` | 目录 token 缓存 | `<profile>\|<父token或root>/<目录名>` |
-
-两者都按 profile 隔离：换 app 后复用旧 token 会得到「无权限」，比「找不到」更难排查。
+- ⚠️ **open_id 按 app 隔离**，跨 app 用报 `99992361`。群 ID（`oc_`）是租户级的，不受影响。
+- ⚠️ **两台机器的 `docs.json` 指向同一份索引页与台账**，所以开发机跑一次就会覆盖群里那份。
+  `deliver.sh` 据此设了自测闸门：投 `ou_` 时跳过归档 / 索引页 / 台账同步。
+- **投递目标由机器决定，不由命令决定。** 每台机器在 `$STATE/local.env` 写自己的
+  `CRASH_REPORT_CHAT_ID`（开发机 `ou_` 私聊，**只有生产机填 `oc_` 群**）。该文件人手写、
+  脚本永不覆写；加载点在三个入口**解析 `CHAT_ID` 之前**，普通赋值会盖掉命令行传入的同名
+  环境变量——所以 `CRASH_REPORT_CHAT_ID=oc_… bash bin/crash-daily.sh` 在开发机上仍只发私聊。
+  `deliver.sh` 另用它压过 manifest 里的 `chat_id`（不一致时打印一行），挡住拿别处的 manifest
+  在本机补投。样例见 [bin/local.env.example](bin/local.env.example)。起因是 2026-08-20 一次测试
+  命令行直接写了正式群 ID。
 
 ## 硬约束（都是踩过的坑）
 
 - **`--allowedTools` 禁止前缀通配**：写 `"mcp__firebase"` 会放行写操作 `crashlytics_update_issue`，2026-08-06 已因此误关线上 issue（事故记录见 `$STATE/ledger/LEDGER.md`）。必须逐个列只读工具。
 - **跨仓库 git 反查必须带 `--add-dir`**，否则被权限边界拦下、静默产出未验证的 `null`。prompt 里已要求「不得让 null 冒充查过没有」。
-- **L2 的根因与方案边界**（2026-08-19 按实测修正）：原表述「L2 自动档不出根因与修复方案」与实际不符——`full` 模式的 `report.md` 实测会产出七章 226 行，含风险分级、钻取确认的根因、修复方案（且自述「未经人工复核，落地前须验证」），甚至会主动标注「为什么本轮不给根因」（栈未符号化时）。真正的边界是：
+- **L2 的根因与方案边界**：`full` 模式的 `report.md` 确实会出根因与方案（七章 226 行，含风险分级与钻取确认）。边界是：
   - **崩溃段**：可出根因与方案，但**必须标注未经复核**，且必须区分「✅钻取确认」与「⚠️聚合推断」。
   - **性能段**：**不出根因与方案**（硬约束）——性能是连续指标，无堆栈可钻取，推断无从证伪；只给趋势、可定位对象与下一步取证方向。
   - **台账**：只收结论，深度分析留在周报并以链接引用。自动生成的错误结论会被下一轮反扫误判为「已修复」而自我强化——这是该约束的原始理由，对**写入台账的结论**依然成立。
@@ -373,13 +302,13 @@ cron 的最小 env，而 `lark-cli` 装在 npm 全局目录里，PATH 一缺投�
   - 生产路径（cron）因脚本开头的 `unset` 免疫；**从 Hermes 会话里手工调 `bq`/`gcloud` 排查时会中招**。
   - 兜底：`~/.local/bin/{bq,gcloud,gsutil}` 是 wrapper，内容为 `exec env -u PYTHONPATH /opt/homebrew/bin/$T "$@"`。删掉即回滚。
 - **超时用 `lib.sh` 的 `run_with_timeout`**，不依赖 coreutils `timeout`；`set -e` 下要 `|| RC=$?` 捕获 124 才能走降级路径。
-- **L2 平稳周照常投递**：卡片、周报文档、台账同步一个不少。`send=false` 只由 DRY RUN 产生，与本周有无变化无关（`crash-weekly.sh` §7）。旧表述「无变化时 L2 不发送（避免播报噪音化）」是**从未实现过的行为**，2026-08-20 实测证伪 —— 代码从来没判断过 `WEEK_STATE`。平稳周仍投递是对的：周报正文有卡片装不下的性能趋势与版本明细，而「本周无异常」本身就是要让人看见的结论。
+- **L2 平稳周照常投递**：卡片、周报文档、台账同步一个不少。`send=false` 只由 DRY RUN 产生，与本周有无变化无关（代码从没判断过 `WEEK_STATE`）。周报正文有卡片装不下的性能趋势与版本明细，而「本周无异常」本身就是要让人看见的结论。
 
 ## 规格与台账
 
 - **OpenSpec 驱动**（`openspec/`，schema `spec-driven`，CLI 已装）。进行中的 change 在 `openspec/changes/<name>/`（proposal / design / tasks / specs delta），归档在 `changes/archive/`，已归档能力落在 `openspec/specs/`。工作流走 `.hermes/skills/openspec-{explore,propose,apply-change,archive-change}`——propose 阶段**只写规划产物不写代码**。
 - 动手改脚本前先看对应 change 的 `design.md`/`tasks.md`：多数当前行为（阈值、卡片表格结构、staleness 兜底、审计日志）都有对应 change 记录了理由与取舍。
-- ✅ **台账口径（change `crash-ledger-l2-ownership`，2026-08-19 implement 完成）**。历史背景：旧表述「`reports/LEDGER.md` 是崩溃处置结论的人工真相源，飞书上是只读镜像（L1 每天同步）」已被证伪——2026-08-19 实测发现三份台账并存且分叉（本仓库 153 行只含 iOS、`dino-english-ios` 98 行仍在更新、`dino-english-android` 70 行从未进过飞书）。根因是 `ab6748b`（08-14）复制 iOS 台账进本仓库却未删原件，本仓库那份成了孤儿副本，L1 每天镜像的是过期内容。
+- ✅ **台账口径（change `crash-ledger-l2-ownership`，2026-08-19 完成）**。起因是三份台账并存分叉、L1 每天镜像的是孤儿副本。
   - **口径**：台账由 **L2 独占产出**，本地源 `$STATE/ledger/LEDGER.md`，同步到飞书文档 `TtpwdhgKroMH1DxJumojTflrppz`。**L1 不再读写台账**（`crash-daily.sh` 已无 `LEDGER_SRC` / `DOC_LEDGER_ID`，索引页台账入口改固定 URL 直链）。
   - **结构**（对齐 Android 那份的四段式）：项目常量 / 崩溃收口点登记 / **Issue 现状表**（单表双端，含「平台」列）/ **变更时间线**（挂周报链接）。
   - **同步方式**：`deliver.sh` 的 `sync_ledger()`——现状表走 `docs +update --command block_replace` 定点替换，时间线走 `--command append` 追加，**任何阶段都不用 `overwrite`**（会丢时间线历史）。定位不到标题块且无本地全文可 bootstrap 时**报错中止，不退化为 overwrite**。

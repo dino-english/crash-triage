@@ -420,3 +420,73 @@ hermes -z: --toolsets did not contain any valid toolsets.
 - [ ] BigQuery 崩溃表就绪后，把崩溃数据源从 MCP 换成事件级统计，并补崩溃率
 - [ ] 为 L2 加整体超时保护
 - [ ] 与 Android 侧对齐「提交带 issue ID」约定（打通自动修复状态判定的前提）
+
+---
+
+## 12. 飞书侧固定资源（部署实例）
+
+**这些是这套部署独有的事实，不是代码。** 运行时它们缓存在 `$STATE/docs.json` 与 `$STATE/folders.json`（机器本地、不入库），本表是缓存丢失 / 换机器 / 换会话时的兜底记录。`deliver.sh` 新建任何固定资源时会打印可直接粘贴的回填块。
+
+### 租户与应用
+
+| 项 | 值 |
+|---|---|
+| 租户域名 | `qjphu5vphyf4.jp.larksuite.com` |
+| **主力应用** | 壹帏管家 `cli_aaf7b44ddeb8de14` · lark-cli profile `crash-triage` · 身份钉死 `--as bot` |
+| 另两个应用 | `cli_aad59f453275de18`（Leong Chee Wei's Lark CLI，lark-cli 默认 profile）· `cli_aaf7d7fc6ef9de17`（Dino AI Data Assistant） |
+| 你的 open_id | 壹帏管家下 `ou_edd20a8dbfcc5e3ee279a225aec044d0` · 旧 app 下 `ou_a14d438768dbc819773b94c84f82726a` |
+
+⚠️ **open_id 按 app 隔离**，跨 app 用会报 `99992361 open_id cross app`。群 ID（`oc_`）是租户级的，不受影响。
+
+### 文件夹（2026-08-18 建，均已授予你 full_access）
+
+```
+Dino 崩溃 & 性能日/周报   ExuPfsz3Rl1x7kdIQRojxeFVpue
+  ├─ L1 日报              DRngfVukxlsGvodQSNhjco1BpKs
+  └─ L2 周报              RSr3fsHDal7uu5dtqTjjPxdtpbb
+```
+
+### 固定文档（原地覆盖，URL 不变）
+
+| 文档 | URL |
+|---|---|
+| Dino 崩溃跟踪 · 索引 | `https://qjphu5vphyf4.jp.larksuite.com/docx/UPQNdbzGio2l3bxOleRjK1nOpHd` |
+| 崩溃专项台账 LEDGER | `https://qjphu5vphyf4.jp.larksuite.com/docx/TtpwdhgKroMH1DxJumojTflrppz` |
+
+日报 / 周报**不在此表**：每天（每周）一份新文档收进对应目录，**同日重跑覆盖当天那份**（键 `daily-YYYY-MM-DD` / `weekly-YYYY-MM-DD` 记在 `docs.json`）。历史通过索引页的「报告归档」表与 `reports/report-index.jsonl` 追踪。
+
+### 投递目标
+
+| 场景 | ID |
+|---|---|
+| 正式群 | `oc_655033f1f85fa04f9eac25d56f056fc9`（Dino 崩溃 & 性能日/周报） |
+| 私聊验证 | `ou_edd20a8dbfcc5e3ee279a225aec044d0` |
+
+`deliver.sh` 按前缀分流：`ou_` 走 `--user-id`，其余走 `--chat-id`。每台机器在 `$STATE/local.env`
+里写自己的 `CRASH_REPORT_CHAT_ID`：开发机（MacBook）填私聊，**只有生产机（Mac mini）填正式群**。
+机制说明见 CLAUDE.md「部署实例」。
+
+### scope 现状（2026-08-18）
+
+- **bot 身份**：三个 app 都已开通 `drive:drive`，建目录 / 建文档 / 发消息全通。
+- **user 身份**（壹帏管家）：只批下来 `im:*` 与 `contact:user.basic_profile:readonly`，**没有 docs / drive / 权限管理**。
+- 后果：**加协作者只能在飞书 UI 里点**（`drive +member-add` 需要 `docs:permission.member:create`，bot 身份则被 `1063002` 拒）。想走 CLI 需在后台给 user 身份补 scope 并**发布新版本**，然后重新 `lark-cli auth login --profile crash-triage`。
+
+### ⛔ 不要删的历史文档（旧 app 云空间根目录）
+
+| token | 标题 | 说明 |
+|---|---|---|
+| `V1I3di1YQo29v6xNZoGjbZCDppe` | Dino 崩溃跟踪 · 索引 | 2026-08-07 建，INSTALL.md 旧 `DOC_INDEX_ID` |
+| `FvmTdArLyoOydQxdAo8jRNSUpAg` | 崩溃专项总台账（LEDGER）— iOS | 2026-08-07 建，旧 `DOC_LEDGER_ID` |
+| `OjTmd3Vyuo8RPuxV76MjRYxzpCd` | 崩溃 & 性能日报 · 2026-08-07 | 历史产物 |
+| `KSFUdzCKYocCYcx4l1yjrBiFpyd` | 崩溃周报 · 2026-08-07 | 历史产物 |
+| `CkUpdh7KSo2oGuxOsmpjgL4up5G` · `Wb0Td39FXojn4wx2lqFjFJSdphb` | 【探测】权限检查 · （无标题） | 非本流水线产物 |
+
+### 运行时状态文件
+
+| 文件 | 内容 | 键 |
+|---|---|---|
+| `$STATE/docs.json` | 文档台账（决定覆盖还是新建） | `<profile>\|index` · `<profile>\|ledger` · `<profile>\|daily-<日期>` |
+| `$STATE/folders.json` | 目录 token 缓存 | `<profile>\|<父token或root>/<目录名>` |
+
+两者都按 profile 隔离：换 app 后复用旧 token 会得到「无权限」，比「找不到」更难排查。
