@@ -19,7 +19,7 @@ chmod +x "$ROOT/bin"/*.sh
 # 不再有「把脚本复制到别处」这一步：代码就地跑在仓库里，setup 只负责本机配置与定时。
 # （2026-08-18：删掉了 scripts/crash-report 源副本与自装 cp 逻辑，双份同步的分叉风险随之消失）
 
-# ── 1. 探测二进制真实路径，写 config.env ──────────────
+# ── 1. 探测二进制真实路径，写 path.env ────────────────
 # 不硬编码：launchd 只给最小 env，各机器 node / brew 路径不一定相同。
 echo "--- 探测工具路径 ---"
 MISSING=()
@@ -41,8 +41,13 @@ if [ ${#MISSING[@]} -gt 0 ]; then
 fi
 # 去重后拼 PATH，尾部补系统目录兜底
 UNIQ="$(printf '%s\n' "${DIRS[@]}" | awk '!seen[$0]++' | paste -sd: -)"
-printf 'PATH="%s:/usr/bin:/bin:/usr/sbin:/sbin"\n' "$UNIQ" > "$STATE/config.env"
-echo "  → 写入 $STATE/config.env"
+printf 'PATH="%s:/usr/bin:/bin:/usr/sbin:/sbin"\n' "$UNIQ" > "$STATE/path.env"
+echo "  → 写入 $STATE/path.env"
+# 旧名遗留清理：读取端还有一轮 config.env 回落分支，留着它会让「跑过 setup.sh 的机器」
+# 仍旧读到陈旧副本。写成功后就删，读取端的回落只服务于「只 git pull 没跑 setup.sh」那种机器。
+if [ -f "$STATE/config.env" ]; then
+  rm -f "$STATE/config.env" && echo "  → 清理旧名 $STATE/config.env（2026-08-20 改名为 path.env）"
+fi
 
 # ── 2. MCP 配置（复用本机 firebase login 凭证，不含密钥）──
 cat > "$ROOT/bin/mcp.json" <<'JSON'
@@ -84,7 +89,7 @@ clone_or_fetch "$AND_REMOTE" "dino-english-android"
 # ── 4. 探活 ───────────────────────────────────────────
 echo "--- 探活 ---"
 # shellcheck disable=SC1091
-. "$STATE/config.env"; export PATH
+. "$STATE/path.env"; export PATH
 npx -y firebase-tools@latest login:list 2>/dev/null | grep -q '@' \
   && echo "  ✅ firebase 已登录" || { echo "  ❌ firebase 未登录，跑 npx -y firebase-tools@latest login"; exit 1; }
 

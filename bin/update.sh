@@ -35,7 +35,7 @@ else
 fi
 
 say "重探本机工具路径"
-bash "$SELF_DIR/setup.sh" >/dev/null 2>&1 && echo "  ✅ config.env / mcp.json 已刷新" || echo "  ❌ setup.sh 失败"
+bash "$SELF_DIR/setup.sh" >/dev/null 2>&1 && echo "  ✅ path.env / mcp.json 已刷新" || echo "  ❌ setup.sh 失败"
 
 say "刷新 hermes wrapper"
 W="$HOME/.hermes/scripts"

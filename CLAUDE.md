@@ -25,7 +25,7 @@ Dino（iOS + Android）崩溃 & 性能日报/周报流水线的**部署运行时
 | | 路径 | 说明 |
 |---|---|---|
 | 代码 `ROOT` | 本仓库 clone 目录 | 脚本按自身位置解析（`bin/` 的上级），**不写死绝对路径**——clone 到哪都能跑 |
-| 运行数据 `STATE` | `${XDG_STATE_HOME:-~/.local/state}/crash-triage` | logs / 快照 / 历史 / 每日报告 / `config.env` / 生成好的 plist |
+| 运行数据 `STATE` | `${XDG_STATE_HOME:-~/.local/state}/crash-triage` | logs / 快照 / 历史 / 每日报告 / `path.env` / `local.env` / 生成好的 plist |
 
 ```bash
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -224,12 +224,24 @@ $STATE/                          # ${XDG_STATE_HOME:-~/.local/state}/crash-triag
 ├── issues/<32位id>.json         事实层：崩溃事件详情，一次抓永久留，不参与清理
 ├── ledger/LEDGER.md             台账本地源（L2 产出，同步飞书）
 │   └── snapshots/               历史专项快照 md（从仓库移入）
-├── runs/<日期>/{L1,L2}/<时刻>/  跑批产物，保留 30 天，附 latest 软链
-├── backup/                      台账等不可再生内容的手工备份
-├── logs/                        日志保留 60 天；bq stderr 落 bq-stderr-<TS>.log
+├── runs/<日期>/{L1,L2}/<时刻>/  跑批产物（物证），保留 30 天，附 latest 软链
+├── reports/<日期>-{daily,weekly}.md  报告 markdown 本地副本，保留 90 天
+├── backup/                      台账等不可再生内容的**手工**备份，无写入者也不自动清理
+├── logs/                        保留 60 天，**整目录按 mtime 清**（含 bq-stderr-<TS>.log）
 ├── publish/                     每次运行 rm -rf 重建的投递目录
+├── path.env                     setup.sh 探测生成（只有 PATH），install.sh / update.sh 每次覆写
+├── local.env                    机器本地配置（CRASH_REPORT_CHAT_ID），**人手写，脚本永不覆写**
 └── *.json                       基准文件，**保持顶层不动**（见下表）
 ```
+
+**顶层只放基准文件。** 跑批中间产物一律落 `runs/<日期>/L1/<时刻>/`——`index-render.md` 与
+`archive-merged.jsonl` 曾写在 `$STATE` 顶层，2026-08-20 归位到跑批目录：manifest 把 `index-render.md`
+的路径交给 `deliver.sh`，而 `publish/` 下次跑批即被 `rm -rf`，放 `runs/` 才能在补投时还找得到。
+
+**清理不能按文件名前缀分网。** L1 只删 `daily-*.log`、L2 只删 `weekly-*.log`，`bq-stderr-*.log` 从两张网
+中间漏过去、永不清理（2026-08-20 盘出 20 个陈年文件）。现改为 `find "$STATE/logs" -type f -mtime +60`
+整目录清，两个脚本各跑一次也幂等。同理 L2 那条 `snapshot-*.json` 遗留清理必须带 `-maxdepth 1`，
+否则会递归进 `runs/` 与 `backup/`。
 
 **为什么基准文件不进子目录**：它们是跨跑批的累积状态，丢失后果严重（`docs.json` 丢 → 新建整套重复飞书文档，2026-08-19 实际发生；`last-snapshot.json` 丢 → 全部 issue 报成新增，2026-08-07 事故）。保持原位 = 零迁移风险，46 处 `$STATE/xxx.json` 引用一处不改。
 
@@ -237,6 +249,7 @@ $STATE/                          # ${XDG_STATE_HOME:-~/.local/state}/crash-triag
 |---|---|
 | `daily-snapshot.json` | 明日「新增 issue」判定基准（MCP ids）+ 当日版本集回溯 |
 | `metrics-history.jsonl` | 天级单日值滚动 **90 天**（`HISTORY_KEEP`，**按版本存储**）；无 `versions` 键的旧口径行读取时自动丢弃并提示 |
+| `perf-history.jsonl` | L2 性能周维度趋势，滚动 **12 周**（`PERF_HISTORY_KEEP`，约一季度）；WoW 对比的基准 |
 | `docs.json` | 文档台账：决定覆盖还是新建。带日期后缀的键保留 90 天（`DOC_KEEP_DAYS`），`index` / `ledger` 无日期后缀、永不清理 |
 | `folders.json` | 目录 token 缓存，按 profile 隔离 |
 | `last-snapshot.json` | L2 变化检测基准；**首跑无基准时只建基线不报新增**（否则刷一屏「新增」） |
@@ -284,6 +297,30 @@ Dino 崩溃 & 性能日/周报   ExuPfsz3Rl1x7kdIQRojxeFVpue
 | 私聊验证 | `ou_edd20a8dbfcc5e3ee279a225aec044d0` |
 
 `deliver.sh` 按前缀分流：`ou_` 走 `--user-id`，其余走 `--chat-id`。
+
+**投递目标由机器决定，不由命令决定。** 每台机器在 `$STATE/local.env` 里写自己的
+`CRASH_REPORT_CHAT_ID`：开发机（MacBook）填私聊 `ou_`，**只有生产机（Mac mini）填正式群 `oc_`**。
+该文件由人手写、`setup.sh` 永不覆写（`path.env` 才是生成的，每次 `install.sh` / `update.sh` 都被
+`>` 整个重写，配置放那儿会丢）。样例见 [bin/local.env.example](bin/local.env.example)。
+
+加载点在 `crash-daily.sh` / `crash-weekly.sh` / `deliver.sh`，**位置在解析 `CHAT_ID` 之前**——
+普通赋值会盖掉命令行传入的同名环境变量，所以 `CRASH_REPORT_CHAT_ID=oc_… bash bin/crash-daily.sh`
+在开发机上仍然只发私聊。`deliver.sh` 另外用它压过 manifest 里记的 `chat_id`（不一致时打印一行，
+不静默改），挡住「拿别处产出的 manifest 在本机补投」这条路。起因是 2026-08-20 一次测试里
+命令行直接写了正式群 ID，只因当时带了 `CRASH_REPORT_NO_DELIVER=1` 才没发出去。
+
+⚠️ 没有 `local.env` 的机器行为不变（沿用 wrapper 里 export 的值），所以 Mac mini 拉新代码后
+**不做任何动作也照常发群**；但它同样不设防，建议一并补上 `local.env`。
+
+**`path.env` 是 2026-08-20 起的新名，旧名 `config.env`。** 改名的理由：它不是「配置」而是
+`setup.sh` 的**探测结果缓存**（一行 PATH），叫 config 会诱导人把真配置写进去，而它每次
+`setup.sh` 都被 `>` 覆写。读取端保留一轮 `config.env` 回落分支，服务于「只 `git pull` 没跑
+`setup.sh`」的机器；`setup.sh` 写完 `path.env` 会删掉旧文件。等所有机器都跑过一次
+`setup.sh` / `update.sh`，回落分支可以删。
+
+⚠️ 随改名一起补了 **`deliver.sh` 的 PATH 兜底 else 分支**——它原本只有 `if`，文件缺失时直接吃
+cron 的最小 env，而 `lark-cli` 装在 npm 全局目录里，PATH 一缺投递整条链路挂掉，且报错指向
+`lark-cli` 而不是 PATH。
 
 ### scope 现状（2026-08-18）
 

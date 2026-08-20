@@ -127,7 +127,7 @@ bash bin/setup.sh                        # 两个路径都不用设，setup 自�
 
 `setup.sh` 会做：
 
-1. **探测二进制真实路径写入 `$STATE/config.env`** —— 不硬编码 PATH。cron / launchd 都只给最小 env，各机器 node/brew 路径不同，硬编码必挂
+1. **探测二进制真实路径写入 `$STATE/path.env`**（2026-08-20 前叫 `config.env`，`setup.sh` 会自动清掉旧文件） —— 不硬编码 PATH。cron / launchd 都只给最小 env，各机器 node/brew 路径不同，硬编码必挂
 2. 写 `bin/mcp.json`（Firebase MCP 配置，**不含任何密钥**，复用本机 firebase login 凭证）
 3. 业务仓库：**运行根的同级目录**里有就直接用（只读 fetch），没有才 clone 到 `$ROOT/repos`
 4. 按本机实际路径生成 launchd plist 到 `$STATE/`（备选调度方案，见 §7.6；主调度是 Hermes cron）
@@ -368,7 +368,7 @@ hermes -z: --toolsets did not contain any valid toolsets.
 
 | 坑 | 说明 |
 |---|---|
-| **cron / launchd 最小 env** | 都不继承登录 shell 的 PATH。`config.env` 由 `setup.sh` 探测生成，**换过 node/brew 路径后必须重跑 `setup.sh`** |
+| **cron / launchd 最小 env** | 都不继承登录 shell 的 PATH。`path.env` 由 `setup.sh` 探测生成，**换过 node/brew 路径后必须重跑 `setup.sh`**；投递目标另放人手写的 `local.env`，`setup.sh` 永不覆写它 |
 | **`PYTHONPATH` 会毒死 gcloud/bq** | Hermes 注入的 `PYTHONPATH` 指向其 py3.12 site-packages，而 gcloud 用 3.14 启动 → `apitools` ABI 不匹配、导入即崩，报错却写「gcloud installation corruption，请重装」。**两个入口脚本开头都有 `unset PYTHONPATH`**，生产路径免疫；手工排查时用 `~/.local/bin/{bq,gcloud,gsutil}` wrapper（内含 `env -u PYTHONPATH`） |
 | **`hermes cron run` 的成败提示不可信** | 后台派发路径漏设 `execution_success`，**永远打印 `Ran now: failed`**。以 `executions.db` 的 status + 脚本日志为准 |
 | **`claude -p` 需 `< /dev/null`** | 否则等 stdin 3 秒并打警告 |

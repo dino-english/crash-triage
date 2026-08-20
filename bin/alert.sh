@@ -15,9 +15,12 @@ set -uo pipefail
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export CRASH_REPORT_ROOT="${CRASH_REPORT_ROOT:-$(dirname "$SELF_DIR")}"
 STATE="${CRASH_REPORT_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/crash-triage}"
-[ -f "$STATE/config.env" ] && . "$STATE/config.env" 2>/dev/null
+# if/elif 不是两条 && ：并列写法下旧的 config.env 会盖掉 path.env，迁移后那份是陈旧的
+if [ -f "$STATE/path.env" ]; then . "$STATE/path.env" 2>/dev/null
+elif [ -f "$STATE/config.env" ]; then . "$STATE/config.env" 2>/dev/null   # 旧名，兼容一轮
+fi
 # 告警器不能和被监控对象共享故障源：PATH 配错正是最常见的失败原因之一，
-# 而 config.env 恰好就是 PATH 的来源。找不到 lark-cli 就补上常见安装位置再试
+# 而 path.env 恰好就是 PATH 的来源。找不到 lark-cli 就补上常见安装位置再试
 # （2026-08-18 实测：伪造坏 PATH 触发告警，告警自己也发不出去）。
 if ! command -v lark-cli >/dev/null 2>&1; then
   PATH="$PATH:$HOME/.npm-global/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"

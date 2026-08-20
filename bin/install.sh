@@ -38,8 +38,11 @@ command -v claude >/dev/null 2>&1 && claude --version >/dev/null 2>&1 \
 
 # ── 2. 目录与本机配置 ──────────────────────────────────
 say "2/7 目录与本机配置"
-bash "$SELF_DIR/setup.sh" >/dev/null 2>&1 && ok "setup.sh（config.env / mcp.json / plist 模板）" || bad "setup.sh 失败"
-[ -s "$STATE/config.env" ] && ok "config.env" || bad "config.env 未生成"
+bash "$SELF_DIR/setup.sh" >/dev/null 2>&1 && ok "setup.sh（path.env / mcp.json / plist 模板）" || bad "setup.sh 失败"
+[ -s "$STATE/path.env" ] && ok "path.env" || bad "path.env 未生成"
+# local.env 决定这台机器往哪投递，setup.sh 永不生成它——缺了只提示、不算失败（沿用 wrapper 的值）
+[ -s "$STATE/local.env" ] && ok "local.env（本机投递目标）" \
+  || todo "建 $STATE/local.env 定死本机投递目标（开发机填 ou_ 私聊，生产机填 oc_ 群）：cp $ROOT/bin/local.env.example $STATE/local.env"
 
 # ── 3. 三个授权（必须人做）─────────────────────────────
 say "3/7 授权检查（都要浏览器 + TTY，无法自动化）"
