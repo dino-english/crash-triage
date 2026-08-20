@@ -593,6 +593,15 @@ elif [ -s "$REPORT" ]; then
   cp "$REPORT" "$PUBLISH_DIR/docs/weekly.md"; REPORT_FILE="$PUBLISH_DIR/docs/weekly.md"
 fi
 
+# 修复清单按平台分组（纯排版，不改条目内容）：模型产出的清单是 iOS/Android 混排，
+# 读者分派任务时得逐条辨认平台。改 prompt 不可靠（模型未必照办、每轮结果漂移），
+# 排版是确定性问题，交给脚本。失败不影响投递——排版是锦上添花，不能拖垮主链路。
+if [ -n "$REPORT_FILE" ] && [ -x "$ROOT/bin/split-fix-list.py" ]; then
+  "$ROOT/bin/split-fix-list.py" "$REPORT_FILE" 2>/dev/null \
+    && echo "  ✅ 修复清单已按平台分组" \
+    || echo "  ⚠️ 修复清单分组跳过（不影响投递）"
+fi
+
 # 彩色版：与日报同一套配色（表头蓝底、偶数行灰底、状态词按语义上色）。
 # 周报正文是 triage 产出的 markdown，走 md2docx.py 通用转换，不单独写渲染器。
 if [ -n "$REPORT_FILE" ] && [ -x "$ROOT/bin/md2docx.py" ]; then
