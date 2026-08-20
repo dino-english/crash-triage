@@ -491,13 +491,13 @@ case "$TYPE" in
   weekly)
     CARD="$(m card_file)"
     REPORT_FILE="$(m create_doc.file)"; REPORT_TITLE="$(m create_doc.title)"
-    # 无变化不投卡片/不建文档（避免播报噪音化），但**台账照常同步**：
-    # 「不打扰群里」和「不记录数据」是两回事。平稳周的事件量趋势、修复状态同样会变，
-    # 跳过同步会让台账在平稳周停更，正是 2026-08-20 实测踩到的坑（同类错误还有
-    # crash-weekly.sh 那条 quiet 分支，把「内容与卡片重复」当成了「不必留档」）。
+    # send=false 只由 DRY RUN 产生（见 crash-weekly.sh §7）：正式跑批恒为 true，
+    # 与本周有无变化无关。这里保留判断是为了手工构造 manifest 的排障场景——
+    # 此时跳过卡片与文档，但**台账照常同步**：「不打扰群里」和「不记录数据」是两回事，
+    # 台账的事件量趋势与处置状态即便在平稳周也会变。
     WEEKLY_QUIET=0
     if [ "$(m send)" != "true" ]; then
-      echo "  本周无变化（send=false）：跳过卡片与文档，仅同步台账"
+      echo "  send=false：跳过卡片与文档，仅同步台账"
       WEEKLY_QUIET=1
     fi
     F_ROOT="$(ensure_folder "$FOLDER_ROOT_NAME" "")"

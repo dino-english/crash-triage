@@ -549,8 +549,13 @@ REPORT="$STATE/reports/$DAY-weekly.md"
   fi
 } > "$REPORT"
 
-# ── 7. 产出投递清单（发消息/建文档由 Hermes agent 经 lark-mcp 执行）──
-# send 只在「有变化且非 dry-run」时 true；无变化不发（避免播报噪音化）。
+# ── 7. 产出投递清单（发消息/建文档由 bin/deliver.sh 用 lark-cli 执行）──
+# send 只区分「正式跑批」与「DRY RUN」，**与本周有无变化无关**。
+# 这里曾写着「无变化不发（避免播报噪音化）」，2026-08-20 实测证伪：代码从来没有
+# 判断过 WEEK_STATE，平稳周照样发卡片、照样建文档。注释与 CLAUDE.md 都描述了
+# 一个不存在的行为——比代码错更隐蔽，因为下一个人会照着它做判断。
+# 平稳周仍然投递是对的：周报正文有卡片装不下的性能趋势与版本明细，
+# 而「本周无异常」本身就是要让人看见的结论。
 SEND_FLAG="true"; [ "$DRY_RUN" = "1" ] && SEND_FLAG="false"
 echo "  本周状态：${WEEK_STATE}（发送=${SEND_FLAG}）"
 if [ "$DRY_RUN" = "1" ]; then

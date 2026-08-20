@@ -326,7 +326,7 @@ Dino 崩溃 & 性能日/周报   ExuPfsz3Rl1x7kdIQRojxeFVpue
   - 生产路径（cron）因脚本开头的 `unset` 免疫；**从 Hermes 会话里手工调 `bq`/`gcloud` 排查时会中招**。
   - 兜底：`~/.local/bin/{bq,gcloud,gsutil}` 是 wrapper，内容为 `exec env -u PYTHONPATH /opt/homebrew/bin/$T "$@"`。删掉即回滚。
 - **超时用 `lib.sh` 的 `run_with_timeout`**，不依赖 coreutils `timeout`；`set -e` 下要 `|| RC=$?` 捕获 124 才能走降级路径。
-- 无变化时 L2 不发送（`send:false`），避免播报噪音化。
+- **L2 平稳周照常投递**：卡片、周报文档、台账同步一个不少。`send=false` 只由 DRY RUN 产生，与本周有无变化无关（`crash-weekly.sh` §7）。旧表述「无变化时 L2 不发送（避免播报噪音化）」是**从未实现过的行为**，2026-08-20 实测证伪 —— 代码从来没判断过 `WEEK_STATE`。平稳周仍投递是对的：周报正文有卡片装不下的性能趋势与版本明细，而「本周无异常」本身就是要让人看见的结论。
 
 ## 规格与台账
 
