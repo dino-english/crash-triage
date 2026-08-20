@@ -448,7 +448,7 @@ SESS_IOS_BATCH="$PROJECT.firebase_sessions.com_prime_dino_english_IOS"
 SESS_AND_RT="$PROJECT.firebase_sessions.com_prime_dino_english_ANDROID_REALTIME"
 SESS_AND_BATCH="$PROJECT.firebase_sessions.com_prime_dino_english_ANDROID"
 
-echo "--- 选表 ---"
+step "选表"
 SESS_IOS_FALLBACK=0
 if table_exists "$SESS_IOS_RT"; then SESS_IOS="$SESS_IOS_RT";
 elif table_exists "$SESS_IOS_BATCH"; then SESS_IOS="$SESS_IOS_BATCH"; SESS_IOS_FALLBACK=1;
@@ -472,7 +472,7 @@ DATA_UNTIL="$(newest_ts "$IOS_PERF_MAX" "$AND_PERF_MAX")";    [ -n "$DATA_UNTIL"
 ADOPTION_UNTIL="$(newest_ts "$IOS_SESS_MAX" "$AND_SESS_MAX")"; [ -n "$ADOPTION_UNTIL" ] || ADOPTION_UNTIL="—"
 
 # ── 版本解析（唯一源 = sessions 活表，design D1）────────────────────
-echo "--- 解析版本清单 ---"
+step "解析版本清单"
 resolve_versions() { # $1=sessions表 → CSV「version,sessions,devices」（无表头，未排序）
   [ -n "$1" ] || return 0
   bqq csv "$(sed -e "s|{{TABLE}}|$1|g" -e "s|{{DAYS}}|$DAYS|g" -e "s|{{MIN_SESSIONS}}|$MIN_SESSIONS|g" \
@@ -571,7 +571,7 @@ collect_window() { # $1=plat键 $2=版本 $3=crash表 $4=sess表 $5=perf表 $6=c
 mv_() { local f="$TMP/m-$1-$2.json"; [ -s "$f" ] || { echo ""; return 0; }
   jq -r --arg p "$3" 'getpath($p | split(".")) // "" | tostring' "$f" 2>/dev/null || echo ""; }
 
-echo "--- 逐版本取数（窗口值）---"
+step "逐版本取数（窗口值）"
 for v in $IOS_COLS; do
   echo "  iOS $v"
   collect_window ios "$v" "$IOS_CRASH_TBL" "$SESS_IOS" "$IOS_PERF_TBL" "$IOS_CRASH_MAX" "$IOS_PERF_MAX" "$IOS_VER_CSV"
@@ -582,7 +582,7 @@ for v in $AND_COLS; do
 done
 
 # ── 天级单日值：只跟踪最新 N 版（主力补充列不进 1d/历史，design D11 成本控制）──
-echo "--- 天级单日值（DoD/WoW 基准，仅最新 $VERSION_COUNT 版）---"
+step "天级单日值（DoD/WoW 基准，仅最新 $VERSION_COUNT 版）"
 collect_1d() { # $1=plat键 $2=版本 $3=crash表 $4=sess表 $5=perf表
   local p="$1" v="$2" key="$1-$2" c1d='{}' s1d='{}' pf='{}' pfp='{}' off pday pprev
   [ -n "$3" ] && c1d="$(q1d daily-crash-1d.sql    "$3" 1 "$v")" || true
@@ -645,7 +645,7 @@ spark_rate() { jq -r --arg p "$1" --arg v "$2" --argjson n "$SPARK_DAYS" \
 # fetch-snapshot.sh light 模式抓 MCP topIssues（OPEN FATAL）+ git 反查，产出 snapshot.json。
 # 它不驱动卡片任何数字（已由 BigQuery 版本级接管），只用于：
 #   ① 索引页「跟踪中的 issue」与 fix_commit 修复状态反查；② 新增/已修待验告警（全版本口径，已在文案标注）。
-echo "--- 抓取 MCP 崩溃对照数据（全版本口径）---"
+step "抓取 MCP 崩溃对照数据（全版本口径）"
 CRASH_DIR="$TMP"
 CRASH_JSON="$CRASH_DIR/snapshot.json"
 # lib.sh 已在脚本开头（bq 超时护栏处）source，run_with_timeout 此处可直接用。
@@ -841,7 +841,7 @@ AND_TOP_NOTE="$(topsess_note "$AND_TOPSESS" "$AND_NEWEST")"
 IOS_VER_SUM="$(ver_summary "$IOS_V1" "$IOS_V2" "$IOS_COLS")"
 AND_VER_SUM="$(ver_summary "$AND_V1" "$AND_V2" "$AND_COLS")"
 
-echo "--- 组装卡片 ---"
+step "组装卡片"
 IOS_TABLE="$(build_table ios "$IOS_COLS" "$IOS_V1" "$IOS_V2" "$IOS_NEWEST" "$IOS_TOPSESS")"
 AND_TABLE="$(build_table and "$AND_COLS" "$AND_V1" "$AND_V2" "$AND_NEWEST" "$AND_TOPSESS")"
 
@@ -1071,7 +1071,7 @@ print('\n'.join(out))
 XMLPY
 }
 
-echo "--- 生成日报文档 ---"
+step "生成日报文档"
 REPORT="$STATE/reports/$DAY-daily.md"
 {
   printf '# 崩溃 & 性能日报 · %s\n\n' "$DAY"
@@ -1318,7 +1318,7 @@ build_report_xml() {
   } > "$REPORT_XML"
 }
 
-echo "--- 产出投递清单 ---"
+step "产出投递清单"
 PUBLISH_DIR="$STATE/publish"
 rm -rf "$PUBLISH_DIR"; mkdir -p "$PUBLISH_DIR/docs"
 printf '%s\n' "$CARD" > "$PUBLISH_DIR/message.md"

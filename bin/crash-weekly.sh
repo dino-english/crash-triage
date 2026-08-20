@@ -93,12 +93,12 @@ fail() { echo "❌ $*"; jq -n --arg t "$TS" --arg e "$*" '{last_run:$t,ok:false,
 
 # ── 1. 凭证探活（端到端真调，不猜状态字符串）──────────
 # 飞书投递已改由 Hermes agent 经 lark-mcp 完成，此处只探 firebase。
-echo "--- 凭证探活 ---"
+step "凭证探活"
 npx -y firebase-tools@latest login:list 2>/dev/null | grep -q '@' \
   || fail "firebase 未登录，在本机跑 npx -y firebase-tools@latest login"
 
 # ── 2. 同步只读 clone ─────────────────────────────────
-echo "--- 同步仓库 ---"
+step "同步仓库"
 for r in dino-english-ios dino-english-android; do
   d="$REPOS_ROOT/$r"
   [ -d "$d/.git" ] || fail "$d 不是 git 仓库"
@@ -116,7 +116,7 @@ done
 # 旧实现把两者绑在一次 `claude -p` 里，代价是 2026-08-19/20 实测的那次 429——
 # 模型额度一挂，snapshot.json 落不了盘，整跑 fail，群里什么都收不到。
 # 现在数据走 bq（额度无关），分析层单独跑且失败只降级。
-echo "--- L2 数据层：bq 取崩溃快照 ---"
+step "L2 数据层：bq 取崩溃快照"
 OUT_DIR="$STATE/runs/$DAY/L2/$TS"
 mkdir -p "$OUT_DIR"
 # shellcheck disable=SC1091
@@ -151,9 +151,9 @@ ANALYSIS_OK=0
 ANALYSIS_SKIP_REASON=""
 if [ "${CRASH_REPORT_SKIP_ANALYSIS:-0}" = "1" ]; then
   ANALYSIS_SKIP_REASON="按 CRASH_REPORT_SKIP_ANALYSIS=1 跳过"
-  echo "--- 分析层：跳过（${ANALYSIS_SKIP_REASON}）---"
+  step "分析层：跳过（${ANALYSIS_SKIP_REASON}）"
 else
-  echo "--- 分析层：firebase-crash-triage（模型）---"
+  step "分析层：firebase-crash-triage（模型）"
   # 完整 triage 实测跑 12 分钟以上；给 30 分钟上限防挂死（挂死会导致下周又起一个）。
   TRIAGE_TIMEOUT="${TRIAGE_TIMEOUT:-1800}"
   # set -e 下 run_with_timeout 超时返回 124 会直接杀死脚本；用 || 捕获退出码让降级路径存活。
@@ -175,7 +175,7 @@ else
 fi
 
 # ── 4. 变化检测（纯 jq，不经模型）─────────────────────
-echo "--- 变化检测 ---"
+step "变化检测"
 # 首跑无基准时不能把全部 issue 当「新增」播报（2026-08-07 实测刷出 26 条）。
 # 标记为建立基线，只报总数。
 IS_BASELINE=0
@@ -212,7 +212,7 @@ fi
 # 本地源 $STATE/ledger/LEDGER.md：Issue 现状表在跑批期全量重算，变更时间线只追加真正变化。
 # 修复状态由 3. 的反扫驱动（bin/scan-fix-commits.sh），不依赖模型推断——
 # 反扫在取数之前跑完，其结果已经填进 snapshot.json 的 fix_commit 字段。
-echo "--- 台账渲染 ---"
+step "台账渲染"
 
 # 从本地台账里抽出既有现状表（两个锚点之间的内容），供 render-ledger.sh 做「保留首次纳入/备注」的合并。
 PREV_TABLE_FILE="$OUT_DIR/prev-table.md"
@@ -280,7 +280,7 @@ ADOPT_OK=0
 
 if command -v bq >/dev/null 2>&1 && bq query --use_legacy_sql=false --format=csv 'SELECT 1' >/dev/null 2>&1; then
   ADOPT_OK=1
-  echo "--- 主力版本放量（bq）---"
+  step "主力版本放量（bq）"
   top2_versions() { # $1=sessions表 → 「版本,会话,设备」前两行（按会话量降序）
     sed -e "s|{{TABLE}}|$1|g" -e "s|{{DAYS}}|$WEEK_DAYS|g" -e "s|{{MIN_SESSIONS}}|$MIN_SESSIONS|g" \
       "$SQL_DIR/latest-versions.sql" | bq query --use_legacy_sql=false --format=csv 2>/dev/null \
@@ -327,7 +327,7 @@ PERF_ROWS=""    # TSV：平台/版本/启动P50/启动P95/慢帧最差页/慢帧
 PERF_HISTORY="$STATE/perf-history.jsonl"
 PERF_HISTORY_KEEP="${CRASH_REPORT_PERF_HISTORY_KEEP:-12}"   # 12 周，约一季度
 if [ "$ADOPT_OK" = "1" ]; then
-  echo "--- 性能段（bq，窗口 ${WEEK_DAYS}d）---"
+  step "性能段（bq，窗口 ${WEEK_DAYS}d）"
   perf_row() { # $1=平台标签 $2=perf表 $3=版本 → 一行 TSV（失败字段留空，由调用方判定缺数原因）
     local pname="$1" tbl="$2" ver="$3" traces screens net p50 p95 wscreen wslow frozen neterr
     traces="$(sed -e "s|{{TABLE}}|$tbl|g" -e "s|{{DAYS}}|$WEEK_DAYS|g" -e "s|{{VERSIONS}}|\"$ver\"|g" \
