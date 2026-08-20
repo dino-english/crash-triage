@@ -48,6 +48,10 @@ fi
 export PATH
 
 TS="$(date +%Y%m%d-%H%M%S)"
+# 文档标题带时分：同日多次跑批会覆盖 docs.json 里同一份文档（键 weekly-<日期>），
+# 但飞书文档列表里只看标题分不清是哪一次的产物（2026-08-20 Sir 反馈）。
+# 键保持 weekly-<日期> 不变——覆盖语义是对的，改的只是标题可读性。
+TS_HM="$(date +%H:%M)"
 DAY="$(date +%Y-%m-%d)"
 LOG="$STATE/logs/weekly-$TS.log"
 SNAP_NEW="$STATE/snapshot-$TS.json"
@@ -479,7 +483,7 @@ perf_md() {
 }
 
 MSG="$(cat <<MSG_END
-**📊 崩溃周报 · ${DAY}${WEEK_TAG:+ $WEEK_TAG}**
+**📊 崩溃周报 · ${DAY} ${TS_HM}${WEEK_TAG:+ $WEEK_TAG}**
 
 $CHANGES_MD
 
@@ -497,7 +501,7 @@ ADOPT_JSON="$(printf '%s' "$ADOPT_ROWS" | awk -F'\t' 'NF>=6{printf "%s\t%s\t%s\t
 # 只有真出现变化才红；基线与平稳周都是蓝——红色要留给「需要看一眼」的场合
 HEADER_COLOR="blue"; [ "$WEEK_STATE" = changed ] && HEADER_COLOR="red"
 CARD_JSON="$(jq -n \
-  --arg hc "$HEADER_COLOR" --arg ht "📊 崩溃周报 · ${DAY}${WEEK_TAG:+ $WEEK_TAG}" \
+  --arg hc "$HEADER_COLOR" --arg ht "📊 崩溃周报 · ${DAY} ${TS_HM}${WEEK_TAG:+ $WEEK_TAG}" \
   --arg ch "$CHANGES_MD" --arg nm "$NOTE_MD" \
   --argjson rows "${ADOPT_JSON:-[]}" \
   '{schema:"2.0",
@@ -592,7 +596,7 @@ fi
 # 彩色版：与日报同一套配色（表头蓝底、偶数行灰底、状态词按语义上色）。
 # 周报正文是 triage 产出的 markdown，走 md2docx.py 通用转换，不单独写渲染器。
 if [ -n "$REPORT_FILE" ] && [ -x "$ROOT/bin/md2docx.py" ]; then
-  if "$ROOT/bin/md2docx.py" "$REPORT_FILE" --title "崩溃周报 · $DAY" \
+  if "$ROOT/bin/md2docx.py" "$REPORT_FILE" --title "崩溃周报 · $DAY $TS_HM" \
        --head-bg "${CRASH_REPORT_XC_HEAD:-light-blue}" --zebra "${CRASH_REPORT_XC_ZEBRA:-light-gray}" \
        > "$PUBLISH_DIR/docs/weekly.xml" 2>/dev/null; then
     REPORT_XML="$PUBLISH_DIR/docs/weekly.xml"
@@ -624,7 +628,7 @@ jq -n \
   --arg card "$PUBLISH_DIR/card.json" \
   --arg report "$REPORT_FILE" \
   --arg reportxml "$REPORT_XML" \
-  --arg title "崩溃周报 · $DAY" \
+  --arg title "崩溃周报 · $DAY $TS_HM" \
   --arg idx "${CRASH_REPORT_ARCHIVE:-$ROOT/reports/report-index.jsonl}" \
   --arg day "$DAY" \
   --argjson ios "$(echo "$DIFF" | jq '.ios.total')" \

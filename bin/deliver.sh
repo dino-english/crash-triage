@@ -317,10 +317,14 @@ archive_append() { # $1=文档 URL
     jq -c --arg t "$(m archive_append.type)" --arg d "$day" \
       'select(.type != $t or .day != $d)' "$idx" > "$tmp" && mv "$tmp" "$idx"
   fi
+  # at 记录该行是哪一次跑批的产物：按 (type,day) upsert 只留最后一次，
+  # 但索引页表格里若不标时刻，同日重跑后读者无从判断看到的是几点那版（2026-08-20 Sir 反馈）。
   jq -cn --arg t "$(m archive_append.type)" --arg day "$day" --arg url "$1" \
+         --arg at "$(printf '%s' "$RUN_ID" | sed -n 's/^[0-9]\{8\}-\([0-9]\{2\}\)\([0-9]\{2\}\).*/\1:\2/p')" \
          --arg vers "$(m archive_append.versions)" \
          --arg ios "$(m archive_append.ios)" --arg and "$(m archive_append.android)" \
     '{type:$t, day:$day, url:$url}
+     + (if $at   != "" then {at:$at} else {} end)
      + (if $vers != "" then {versions:$vers} else {} end)
      + (if $ios  != "" then {ios:($ios|tonumber? // $ios)} else {} end)
      + (if $and  != "" then {android:($and|tonumber? // $and)} else {} end)' >> "$idx"

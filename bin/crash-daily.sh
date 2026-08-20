@@ -54,6 +54,10 @@ fi
 export PATH
 
 TS="$(date +%Y%m%d-%H%M%S)"
+# 文档标题带时分：同日多次跑批会覆盖 docs.json 里同一份文档（键 daily-<日期>），
+# 但飞书文档列表里只看标题分不清是哪一次的产物，排障时尤其难受（2026-08-20 Sir 反馈）。
+# 键保持 daily-<日期> 不变——覆盖语义是对的，改的只是标题可读性。
+TS_HM="$(date +%H:%M)"
 DAY="$(date +%Y-%m-%d)"
 LOG="$STATE/logs/daily-$TS.log"
 RUN_ID="$TS"
@@ -823,7 +827,7 @@ echo "--- 组装卡片 ---"
 IOS_TABLE="$(build_table ios "$IOS_COLS" "$IOS_V1" "$IOS_V2" "$IOS_NEWEST" "$IOS_TOPSESS")"
 AND_TABLE="$(build_table and "$AND_COLS" "$AND_V1" "$AND_V2" "$AND_NEWEST" "$AND_TOPSESS")"
 
-HEADER_TITLE="📊 ${DAY:5} 崩溃 & 性能"
+HEADER_TITLE="📊 ${DAY:5} $TS_HM 崩溃 & 性能"
 HEADER_COLOR="blue"; [ -n "$ALERTS" ] && HEADER_COLOR="red"
 SESS_FALLBACK_NOTE=""
 { [ "$SESS_IOS_FALLBACK" = 1 ] || [ "$SESS_AND_FALLBACK" = 1 ]; } && SESS_FALLBACK_NOTE="；⚠️ 放量回退批量表（可能停更）"
@@ -1203,14 +1207,15 @@ build_index() {
     if [ -s "$ALL" ] && [ "$(jq -rs 'map(select(.type=="daily")) | length' "$ALL" 2>/dev/null)" != "0" ]; then
       printf '| 日期 | 报告 | 版本 |\n|---|---|---|\n'
       jq -rs --argjson k "$ARCHIVE_DAILY_KEEP" \
-        'map(select(.type=="daily")) | reverse | .[:$k] | .[] | "| \(.day) | [打开](\(.url)) | \(.versions // "—") |"' "$ALL"
+        'map(select(.type=="daily")) | reverse | .[:$k] | .[] | "| \(.day)\(if .at then " " + .at else "" end) | [打开](\(.url)) | \(.versions // "—") |"' "$ALL"
     else
       printf '（暂无归档，本轮投递后出现）\n'
     fi
     printf '\n### 周报\n\n'
     if [ -s "$ALL" ] && [ "$(jq -rs 'map(select(.type=="weekly")) | length' "$ALL" 2>/dev/null)" != "0" ]; then
-      printf '| 日期 | 报告 | iOS OPEN | Android OPEN |\n|---|---|---|---|\n'
-      jq -rs 'map(select(.type=="weekly")) | reverse | .[] | "| \(.day) | [打开](\(.url)) | \(.ios // "—") | \(.android // "—") |"' "$ALL"
+      # 列名不写「OPEN」：数据源 2026-08-20 起是 BigQuery 事件级，含已关闭 issue。
+      printf '| 日期 | 报告 | iOS issue | Android issue |\n|---|---|---|---|\n'
+      jq -rs 'map(select(.type=="weekly")) | reverse | .[] | "| \(.day)\(if .at then " " + .at else "" end) | [打开](\(.url)) | \(.ios // "—") | \(.android // "—") |"' "$ALL"
     else
       printf '（暂无归档，L2 首次运行后出现）\n'
     fi
@@ -1231,7 +1236,7 @@ build_report_xml() {
   if [ -n "$ALERTS" ]; then tone="告警"; emoji="🔴"; bg="light-red"; border="red"
   else tone="无异常"; emoji="✅"; bg="light-green"; border="green"; fi
   {
-    printf '<title>崩溃 &amp; 性能日报 · %s</title>\n' "$DAY"
+    printf '<title>崩溃 &amp; 性能日报 · %s %s</title>\n' "$DAY" "$TS_HM"
     # 结论高亮框：一眼看到今天该不该紧张
     printf '<callout emoji="%s" background-color="%s" border-color="%s">\n' "$emoji" "$bg" "$border"
     if [ -n "$ALERTS" ]; then
@@ -1325,7 +1330,7 @@ jq -n \
   --arg card "$PUBLISH_DIR/card.json" \
   --arg report "$PUBLISH_DIR/docs/daily.md" \
   --arg reportxml "$REPORT_XML" \
-  --arg title "崩溃 & 性能日报 · $DAY" \
+  --arg title "崩溃 & 性能日报 · $DAY $TS_HM" \
   --arg index "$INDEX_FILE" \
   --arg indexxml "$INDEX_XML" \
   --arg index_id "$DOC_INDEX_ID" \
