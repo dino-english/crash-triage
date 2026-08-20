@@ -15,10 +15,21 @@ SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export CRASH_REPORT_ROOT="${CRASH_REPORT_ROOT:-$(dirname "$SELF_DIR")}"
 ROOT="$CRASH_REPORT_ROOT"
 STATE="${CRASH_REPORT_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/crash-triage}"
-if [ -f "$STATE/config.env" ]; then
+# PATH 来源，见 crash-daily.sh 同处注释（path.env 是 2026-08-20 起的新名，config.env 是旧名）。
+# else 兜底是随改名一起补的：本脚本原本只有 if、没有 else，文件缺失时就直接吃 cron 的最小 env，
+# 而 lark-cli 装在 npm 全局目录里——PATH 一缺，投递整条链路挂掉且报错指向 lark-cli 而非 PATH。
+if [ -f "$STATE/path.env" ]; then
+  # shellcheck disable=SC1091
+  . "$STATE/path.env"
+elif [ -f "$STATE/config.env" ]; then
   # shellcheck disable=SC1091
   . "$STATE/config.env"
+else
+  PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.npm-global/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 fi
+# 机器本地配置，见 crash-daily.sh 同处注释。deliver.sh 是投递的唯一出口，这里再 source 一次，
+# 是为了拦住「拿别处产出的 manifest 在本机补投」——那份 manifest 里的 chat_id 可能是正式群。
+[ -f "$STATE/local.env" ] && . "$STATE/local.env"   # shellcheck disable=SC1091
 export PATH
 
 # 身份钉死 bot：user 身份的 refresh token 会过期（需人工重登），无人值守跑必挂；
@@ -61,6 +72,14 @@ jq empty "$MANIFEST" 2>/dev/null || fail "投递清单不是合法 JSON：$MANIF
 m() { jq -r --arg p "$1" '(getpath($p | split(".")) // "") | tostring' "$MANIFEST"; }
 TYPE="$(m type)"; DAY="$(m day)"; RUN_ID="$(m run_id)"; CHAT_ID="$(m chat_id)"
 [ -n "$CHAT_ID" ] || fail "清单缺 chat_id"
+
+# 本机配置压过清单：local.env 里的 CRASH_REPORT_CHAT_ID 决定这台机器往哪投，
+# 而不是清单里记着的那个目标。开发机据此把测试卡片留在私聊，正式群只由生产机投。
+# 生产机上两者本就相同，这段等于没执行；不一致才打印，静默改目标比误发还难查。
+if [ -n "${CRASH_REPORT_CHAT_ID:-}" ] && [ "$CRASH_REPORT_CHAT_ID" != "$CHAT_ID" ]; then
+  echo "  ⚠️ 本机 local.env 覆盖投递目标：清单 ${CHAT_ID} → 实投 ${CRASH_REPORT_CHAT_ID}"
+  CHAT_ID="$CRASH_REPORT_CHAT_ID"
+fi
 
 # 陈旧清单闸门：脚本失败时不会重写 manifest，照投就会把昨天的卡片当今天发出去。
 # 这类静默错误比不投更糟——宁可报错让人来看。
