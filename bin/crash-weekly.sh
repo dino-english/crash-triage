@@ -102,23 +102,68 @@ for r in dino-english-ios dino-english-android; do
   echo "  $r → 对照 origin/$br @ $(git -C "$d" rev-parse --short "origin/$br")"
 done
 
-# ── 3. 抓快照 ─────────────────────────────────────────
-echo "--- 跑 firebase-crash-triage（完整流程）---"
+# ── 3. 数据层：bq 取快照（纯脚本，不调模型）───────────
+# 数据与分析分层：数据是确定性聚合，分析才需要模型。
+# 旧实现把两者绑在一次 `claude -p` 里，代价是 2026-08-19/20 实测的那次 429——
+# 模型额度一挂，snapshot.json 落不了盘，整跑 fail，群里什么都收不到。
+# 现在数据走 bq（额度无关），分析层单独跑且失败只降级。
+echo "--- L2 数据层：bq 取崩溃快照 ---"
 OUT_DIR="$STATE/runs/$DAY/L2/$TS"
+mkdir -p "$OUT_DIR"
 # shellcheck disable=SC1091
 . "$ROOT/bin/lib.sh"
-# 完整 triage 实测跑 12 分钟以上；给 30 分钟上限防挂死（挂死会导致下周又起一个）。
-# 超时不整跑失败——只要 snapshot.json 落了盘就能发变化摘要，报告是加分项。
-TRIAGE_TIMEOUT="${TRIAGE_TIMEOUT:-1800}"
-# set -e 下 run_with_timeout 超时返回 124 会直接杀死脚本；用 || 捕获退出码让降级路径存活。
-run_with_timeout "$TRIAGE_TIMEOUT" "$ROOT/bin/fetch-snapshot.sh" "$OUT_DIR" full || TRIAGE_RC=$?
-[ "${TRIAGE_RC:-0}" -eq 124 ] && echo "  ⚠️ triage 超时（${TRIAGE_TIMEOUT}s），降级为只发变化摘要"
+
+# 反扫提前到取数之前：它是纯 git、不依赖快照，而快照要用它填 fix_commit。
+LEDGER_DIR="$STATE/ledger"
+LEDGER_LOCAL="$LEDGER_DIR/LEDGER.md"
+mkdir -p "$LEDGER_DIR"
+FIXMAP_FILE="$OUT_DIR/fixmap.json"
+if [ -x "$ROOT/bin/scan-fix-commits.sh" ]; then
+  "$ROOT/bin/scan-fix-commits.sh" "$STATE" "$REPOS_ROOT/dino-english-ios" "$REPOS_ROOT/dino-english-android" \
+    "${CRASH_REPORT_FIX_SCAN_DAYS:-14}" > "$FIXMAP_FILE" 2>"$OUT_DIR/fixmap-scan.log" \
+    || echo "  ⚠️ 修复状态反扫失败，台账现状表本轮不更新处置状态列（详见 fixmap-scan.log）"
+else
+  echo '{"mapped":{},"ambiguous":[],"platform_unavailable":["ios","android"]}' > "$FIXMAP_FILE"
+fi
+[ -s "$FIXMAP_FILE" ] || echo '{"mapped":{},"ambiguous":[],"platform_unavailable":["ios","android"]}' > "$FIXMAP_FILE"
+AMBIG_N="$(jq '.ambiguous | length' "$FIXMAP_FILE" 2>/dev/null || echo 0)"
+[ "$AMBIG_N" -gt 0 ] 2>/dev/null && echo "  ⚠️ 反扫发现 $AMBIG_N 个歧义短标识，未自动更新，详见 fixmap.json"
+
 SNAP_NEW="$OUT_DIR/snapshot.json"
-TRIAGE_REPORT="$OUT_DIR/report.md"
-# 快照是核心产出，缺了才算真失败；report.md 缺失只降级（prompt 已要求先写快照再写报告）
-[ -s "$SNAP_NEW" ] || fail "快照文件为空（triage 退出码 ${TRIAGE_RC:-?}）"
-[ -s "$TRIAGE_REPORT" ] || echo "  ⚠️ 未产出 report.md，本周只发变化摘要"
+"$ROOT/bin/fetch-snapshot-bq.sh" "$OUT_DIR" "$FIXMAP_FILE"
+# 数据层失败 = 真失败：没有快照就没有台账、没有变化摘要，发出去只会是错误信息。
+[ -s "$SNAP_NEW" ] || fail "数据层未产出 snapshot.json"
 jq -e '.ios and .android' "$SNAP_NEW" >/dev/null || fail "快照 JSON 结构不符（缺 ios/android）"
+
+# ── 3b. 分析层：模型跑深度分析（可选，失败只降级）──────
+# 额度耗尽 / 超时 / 模型不可用都只让本周少一章分析，不影响数据、台账与投递。
+TRIAGE_REPORT="$OUT_DIR/report.md"
+ANALYSIS_OK=0
+ANALYSIS_SKIP_REASON=""
+if [ "${CRASH_REPORT_SKIP_ANALYSIS:-0}" = "1" ]; then
+  ANALYSIS_SKIP_REASON="按 CRASH_REPORT_SKIP_ANALYSIS=1 跳过"
+  echo "--- 分析层：跳过（${ANALYSIS_SKIP_REASON}）---"
+else
+  echo "--- 分析层：firebase-crash-triage（模型）---"
+  # 完整 triage 实测跑 12 分钟以上；给 30 分钟上限防挂死（挂死会导致下周又起一个）。
+  TRIAGE_TIMEOUT="${TRIAGE_TIMEOUT:-1800}"
+  # set -e 下 run_with_timeout 超时返回 124 会直接杀死脚本；用 || 捕获退出码让降级路径存活。
+  run_with_timeout "$TRIAGE_TIMEOUT" "$ROOT/bin/fetch-snapshot.sh" "$OUT_DIR/analysis" full || TRIAGE_RC=$?
+  if [ "${TRIAGE_RC:-0}" -eq 124 ]; then
+    ANALYSIS_SKIP_REASON="分析超时（${TRIAGE_TIMEOUT}s）"
+  elif [ "${TRIAGE_RC:-0}" -ne 0 ]; then
+    # 429 额度耗尽走这条路：退出码非 0 且非超时。
+    ANALYSIS_SKIP_REASON="模型不可用（退出码 ${TRIAGE_RC:-?}，常见原因：额度耗尽 429）"
+  fi
+  if [ -s "$OUT_DIR/analysis/report.md" ]; then
+    cp "$OUT_DIR/analysis/report.md" "$TRIAGE_REPORT"
+    ANALYSIS_OK=1
+    echo "  ✅ 分析报告已产出"
+  else
+    [ -n "$ANALYSIS_SKIP_REASON" ] || ANALYSIS_SKIP_REASON="未产出 report.md"
+    echo "  ⚠️ 本周无深度分析：${ANALYSIS_SKIP_REASON}（数据与台账不受影响）"
+  fi
+fi
 
 # ── 4. 变化检测（纯 jq，不经模型）─────────────────────
 echo "--- 变化检测 ---"
@@ -156,22 +201,9 @@ fi
 
 # ── 4b. 台账渲染（design D1/D2/D11，L2 独占产出，L1 不再碰台账）──────────
 # 本地源 $STATE/ledger/LEDGER.md：Issue 现状表在跑批期全量重算，变更时间线只追加真正变化。
-# 修复状态由 5. 反扫驱动（bin/scan-fix-commits.sh），不依赖模型推断。
+# 修复状态由 3. 的反扫驱动（bin/scan-fix-commits.sh），不依赖模型推断——
+# 反扫在取数之前跑完，其结果已经填进 snapshot.json 的 fix_commit 字段。
 echo "--- 台账渲染 ---"
-LEDGER_DIR="$STATE/ledger"
-LEDGER_LOCAL="$LEDGER_DIR/LEDGER.md"
-mkdir -p "$LEDGER_DIR"
-FIXMAP_FILE="$OUT_DIR/fixmap.json"
-if [ -x "$ROOT/bin/scan-fix-commits.sh" ]; then
-  "$ROOT/bin/scan-fix-commits.sh" "$STATE" "$REPOS_ROOT/dino-english-ios" "$REPOS_ROOT/dino-english-android" \
-    "${CRASH_REPORT_FIX_SCAN_DAYS:-14}" > "$FIXMAP_FILE" 2>"$OUT_DIR/fixmap-scan.log" \
-    || echo "  ⚠️ 修复状态反扫失败，台账现状表本轮不更新处置状态列（详见 fixmap-scan.log）"
-else
-  echo '{"mapped":{},"ambiguous":[],"platform_unavailable":["ios","android"]}' > "$FIXMAP_FILE"
-fi
-[ -s "$FIXMAP_FILE" ] || echo '{"mapped":{},"ambiguous":[],"platform_unavailable":["ios","android"]}' > "$FIXMAP_FILE"
-AMBIG_N="$(jq '.ambiguous | length' "$FIXMAP_FILE" 2>/dev/null || echo 0)"
-[ "$AMBIG_N" -gt 0 ] 2>/dev/null && echo "  ⚠️ 反扫发现 $AMBIG_N 个歧义短标识，未自动更新，详见 fixmap.json"
 
 # 从本地台账里抽出既有现状表（两个锚点之间的内容），供 render-ledger.sh 做「保留首次纳入/备注」的合并。
 PREV_TABLE_FILE="$OUT_DIR/prev-table.md"
@@ -390,7 +422,9 @@ sec() { # $1=平台名 $2=json key → markdown 变化摘要
   local total events
   total=$(echo "$DIFF" | jq -r ".$k.total")
   events=$(echo "$DIFF" | jq -r ".$k.events")
-  printf '**%s** — OPEN FATAL %s 个 / 近 7 天 %s 事件\n' "$name" "$total" "$events"
+  # 口径已从 MCP topIssues（只含 OPEN）换成 BigQuery 事件级（含已关闭 issue），
+  # 再写 OPEN 就是错的——已关闭但仍在崩的 issue 正是当初迁移的动机。
+  printf '**%s** — FATAL issue %s 个 / 近 7 天 %s 事件\n' "$name" "$total" "$events"
   [ "$IS_BASELINE" = "1" ] && { printf '（首次运行，建立基线，不列新增）\n'; return; }
   echo "$DIFF" | jq -r ".$k.new[]?     | \"- 🆕 新增 \\(.title) · \\(.events) 事件\"" || true
   echo "$DIFF" | jq -r ".$k.spiked[]?  | \"- 📈 暴涨 \\(.title) · \\(.events) 事件\"" || true
@@ -414,14 +448,18 @@ elif [ "$CHANGED" -gt 0 ]; then
   WEEK_STATE="changed";  WEEK_TAG=""
 else
   WEEK_STATE="quiet";    WEEK_TAG="· ✅ 本周无新增"
-  CHANGES_MD="$(printf '**✅ 本周无新增 / 暴涨 / 消失的 issue**\n\niOS OPEN FATAL %s 个 · Android OPEN FATAL %s 个（近 7 天）' \
+  CHANGES_MD="$(printf '**✅ 本周无新增 / 暴涨 / 消失的 issue**\n\niOS FATAL issue %s 个 · Android FATAL issue %s 个（近 7 天）' \
     "$(echo "$DIFF" | jq -r '.ios.total')" "$(echo "$DIFF" | jq -r '.android.total')")"
 fi
 
 IOS_BR="$(git -C "$REPOS_ROOT/dino-english-ios" rev-parse --abbrev-ref HEAD)"
 AND_BR="$(git -C "$REPOS_ROOT/dino-english-android" rev-parse --abbrev-ref HEAD)"
-NOTE_MD="$(printf '变化摘要口径：Firebase MCP topIssues（**只含 OPEN issue**，全版本），近 7 天窗。\n取数区间 %sd：%s\n主力版本 = 近 %s 天会话量 top2（日报看的是「版本号最新的 2 个版本」，两者互补，不可混比）。\n崩溃率 = 事件数/会话数（非 crash-free）· 对照分支：iOS %s · Android %s\n根因与修复方案见完整报告（**未经人工复核**，落地前须验证）' \
-  "$WEEK_DAYS" "$WIN_COMPACT" "$WEEK_DAYS" "$IOS_BR" "$AND_BR")"
+# 口径行同时承担「本周有没有分析」的告知——卡片读者多数不会点进文档，
+# 缺分析必须在卡片上就看得见，否则会被读成「本周无异常」。
+ANALYSIS_NOTE="根因与修复方案见完整报告（**未经人工复核**，落地前须验证）"
+[ "$ANALYSIS_OK" = "1" ] || ANALYSIS_NOTE="⚠️ **本周无深度分析**（${ANALYSIS_SKIP_REASON}）；数据与台账不受影响"
+NOTE_MD="$(printf '变化摘要口径：BigQuery 事件级（含已关闭 issue，全版本），近 %s 天窗，**纯脚本取数不经模型**。\n取数区间 %sd：%s\n主力版本 = 近 %s 天会话量 top2（日报看的是「版本号最新的 2 个版本」，两者互补，不可混比）。\n崩溃率 = 事件数/会话数（非 crash-free）· 对照分支：iOS %s · Android %s\n%s' \
+  "$WEEK_DAYS" "$WEEK_DAYS" "$WIN_COMPACT" "$WEEK_DAYS" "$IOS_BR" "$AND_BR" "$ANALYSIS_NOTE")"
 
 # 主力版本表（markdown 与卡片共用同一批数据）
 adopt_md() {
@@ -500,6 +538,15 @@ REPORT="$STATE/reports/$DAY-weekly.md"
   perf_md
   printf '\n> 与日报口径互补但不可混比：日报是日维度当期值，本段是周维度趋势快照，窗口天数不同。\n\n'
   printf '## 四、口径\n\n%s\n' "$NOTE_MD"
+  # 数据/分析分层的可见化：读者必须能一眼看出「本周没有根因分析」是模型不可用，
+  # 而不是「本周没问题」。缺分析和无异常是两件完全不同的事。
+  if [ "$ANALYSIS_OK" = "1" ]; then
+    printf '\n> 分析层：✅ 本周含深度分析（根因与修复方案**未经人工复核**，落地前须验证）。\n'
+  else
+    printf '\n> 分析层：⚠️ **本周无深度分析** — %s。\n' "$ANALYSIS_SKIP_REASON"
+    printf '> 以上数据、台账与变化检测均由 BigQuery + git 纯脚本产出，**不受影响**；\n'
+    printf '> 缺的只是根因与修复方案。额度恢复后重跑本周即可补齐。\n'
+  fi
 } > "$REPORT"
 
 # ── 7. 产出投递清单（发消息/建文档由 Hermes agent 经 lark-mcp 执行）──

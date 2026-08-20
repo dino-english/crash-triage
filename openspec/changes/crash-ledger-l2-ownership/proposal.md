@@ -8,7 +8,11 @@
 
 附带问题：`$STATE` 顶层已有 107 个条目（39 个 `metrics-*` + 37 个 `crash-daily-*` + 15 个 `weekly-*`，其中 26 个是失败跑批留下的空目录），按时间戳平铺，排查需先找时间戳；仓库内混放了可再生产出物（`LEDGER.md`、专项快照 md），违反「仓库只控代码」原则。
 
+4. **数据层绑死模型，额度一挂整跑失败**（2026-08-20 实测追加）：L2 的 `snapshot.json` 由 `claude -p` + Firebase MCP 产出，`crash-weekly.sh` 拿不到快照就 `fail`。2026-08-19 18:21 与 08-20 09:30 两次 Anthropic 429，L2 群里**什么都收不到**。但崩溃事件数、影响面、issue 标题这些数字本就躺在 BigQuery 里，快照之后的整条链路（变化检测纯 `jq`、修复反扫纯 git、台账渲染纯 bash、同步纯 lark-cli）也都不碰模型——只有取数这一步被绑死。**数据是确定性聚合，分析才需要模型**，两者不该同生共死。
+
 ## What Changes
+
+- **L2 数据层与分析层分离**（2026-08-20 追加）：数据层新增 `bin/fetch-snapshot-bq.sh`，用 BigQuery 事件级取数产出 `snapshot.json`，**全程不调模型**；分析层（`fetch-snapshot.sh full` 产出 `report.md`）降级为可选，失败/超时/额度耗尽只让本周少一章分析，不影响数据、台账与投递。周报与卡片显式标注「本周无深度分析 + 原因」——缺分析与无异常是两件事，不能让读者读混。事实层缓存判定同步从 prompt 移进 shell（文件存在性 + 事件计数比较），不再依赖模型自觉执行。
 
 - **BREAKING** L1 不再生成、投递、镜像台账：移除 `crash-daily.sh` 的 `build_ledger_xml` 段与 `LEDGER_SRC` 变量，`deliver.sh` 不再导入台账镜像、不再回填 `__LEDGER_URL__`。
 - 台账所有权移交 L2：新增台账渲染与同步能力，本地源 `$STATE/ledger/LEDGER.md`，同步到既有飞书文档 `TtpwdhgKroMH1DxJumojTflrppz`（复用）。首次建立四段结构走 `append` 追加，既有内容原样保留、由人工确认后另行清理，**任何阶段都不使用 `overwrite`**。
@@ -28,6 +32,7 @@
 - `crash-perf-issue-fact-cache`: 崩溃事件事实层的落盘结构、命中判定、增量抓取与强制重抓语义。
 - `crash-perf-fix-status-reconcile`: `[crash:<8位id>]` commit message 约定、跑批期反扫窗口与幂等性、台账「处置状态」列的更新规则与不可覆盖边界。
 - `crash-perf-weekly-performance`: L2 周报性能段的取数口径、周维度趋势与 WoW 呈现、以及「不出根因」的硬边界。
+- `crash-perf-data-analysis-split`: L2 数据层与分析层的边界——数据层不依赖模型、按 issue 跨版本追踪、取数失败必须显式失败；分析层失败只降级；产出必须标注分析层状态；事实层缓存判定由脚本执行且不同来源互不覆盖。
 - `crash-perf-state-layout`: `$STATE` 目录分层（`runs/` 按日期分组 + 顶层基准文件不动）、清理策略、以及仓库内产出物的保留判据。
 
 ### Modified Capabilities

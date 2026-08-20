@@ -80,19 +80,35 @@
 - [x] 8.1 `bash bin/check-scripts.sh` 全绿
 - [x] 8.2 L1 DRY RUN：exit 0，card.json 合法，无台账产物（2026-08-19 实测）
 - [x] 8.3 L2 DRY RUN：exit 0，周报含崩溃段与性能段，台账本地源结构正确（158s）
-- [ ] 8.4 L2 真实投递到私聊 `ou_edd20a8dbfcc5e3ee279a225aec044d0`：周报文档 + 卡片 + 台账同步全部成功
-- [ ] 8.5 人工抽查飞书台账：四段结构完整、现状表双端单表、时间线条目挂周报链接
+- [x] 8.4 L2 真实投递到私聊 `ou_edd20a8dbfcc5e3ee279a225aec044d0`：周报文档 + 卡片 + 台账同步全部成功 — **延后到 10.8 与新增改动一起验**（Sir 2026-08-20 指示：不投递，修完统一测）
+- [x] 8.5 人工抽查飞书台账：四段结构完整、现状表双端单表、时间线条目挂周报链接 — **延后到 10.9**（依赖 8.4）
 - [x] 8.6 **二次跑批验证**：再跑一次 L2，确认现状表被更新而时间线历史条目完整保留（run2 正确将 run1 的 🆕新增 更新为 🔁遗留，first_seen 保持 2026-08-19）
 - [x] 8.7 抽查 2–3 个数值与 Firebase 控制台对得上
 - [x] 8.8 确认两个业务仓库工作区干净、无新增提交（只读约束未被破坏）
 
 ## 9. 文档与收尾
 
-- [ ] 9.1 `CLAUDE.md`：改写台账口径段 —— 删除「`reports/LEDGER.md` 是人工真相源」（已被证伪），改为台账由 L2 产出、本地源在 `$STATE/ledger/`
-- [ ] 9.2 `CLAUDE.md`：更新 L1/L2 职责表（L1 移除台账、L2 新增台账与性能段）
-- [ ] 9.3 `CLAUDE.md`：更新 `$STATE` 文件表，新增 `issues/` / `ledger/` / `runs/` 说明
-- [ ] 9.4 `CLAUDE.md`：新增 commit message 约定 `[crash:<8位id>]` 与反扫机制说明
-- [ ] 9.5 `CLAUDE.md`：按实测修正「L2 自动档不出根因」的适用范围（崩溃段实际会出根因与方案且标注未经复核；性能段不出）
+- [x] 9.1 `CLAUDE.md`：改写台账口径段 —— 删除「`reports/LEDGER.md` 是人工真相源」（已被证伪），改为台账由 L2 产出、本地源在 `$STATE/ledger/`
+- [x] 9.2 `CLAUDE.md`：更新 L1/L2 职责表（L1 移除台账、L2 新增台账与性能段）
+- [x] 9.3 `CLAUDE.md`：更新 `$STATE` 文件表，新增 `issues/` / `ledger/` / `runs/` 说明
+- [x] 9.4 `CLAUDE.md`：新增 commit message 约定 `[crash:<8位id>]` 与反扫机制说明
+- [x] 9.5 `CLAUDE.md`：按实测修正「L2 自动档不出根因」的适用范围（崩溃段实际会出根因与方案且标注未经复核；性能段不出）
 - [x] 9.6 `bin/INSTALL.md`：更新目录结构与验收链
-- [ ] 9.7 提交（分两笔：代码改造 / 文档与清理），不 push 直到 Sir 确认
+- [x] 9.7 提交（分两笔：代码改造 / 文档与清理），不 push 直到 Sir 确认 — `f8f338a` + `0dc1d25`，Sir 已 push
 - [ ] 9.8 Mac mini 同步：`git fetch && merge --ff-only` → 重跑 `install.sh` → 确认 wrapper 正确 → 观察次日 07:00 与下周一 05:30 两次自动跑批
+
+## 10. L2 数据层与分析层分离（2026-08-20 追加，design D12）
+
+起因：2026-08-19 18:21 与 08-20 09:30 两次 Anthropic 429，L2 因 `snapshot.json` 拿不到而整跑 `fail`，群里什么都收不到。数据是确定性聚合，不该和分析同生共死。
+
+- [x] 10.1 新增 `bin/sql/crash-issues-all.sql`：全版本口径 issue 聚合（刻意不加版本过滤，理由见 D12），含 `users` 列
+- [x] 10.2 新增 `bin/fetch-snapshot-bq.sh`：纯 bq 产出 `snapshot.json`，结构与模型路径一致；两端皆空则非零退出
+- [x] 10.3 事实层缓存判定移进 shell（文件存在性 + `events_count_last_seen` 比较），`CRASH_REPORT_FORCE_REFETCH=1` 强制重写；缓存文件标 `source:"bigquery"`，不覆盖模型路径的事件明细
+- [x] 10.4 `crash-weekly.sh`：数据段改调 `fetch-snapshot-bq.sh`；反扫提前到取数之前，结果直接填 `fix_commit`
+- [x] 10.5 `crash-weekly.sh`：分析段降级为可选，超时 / 非零退出（含 429）/ 未产出 `report.md` 均只降级；新增 `CRASH_REPORT_SKIP_ANALYSIS=1` 用于验证
+- [x] 10.6 周报与卡片标注分析层状态：无分析时给出原因并声明数据与台账不受影响；同步修正「MCP topIssues / OPEN FATAL」旧口径文案
+- [x] 10.7 自测：`check-scripts.sh` 全绿；`CRASH_REPORT_SKIP_ANALYSIS=1` 全链 DRY RUN exit 0，台账现状表 20 行、时间线增量与周报均产出；缓存三态（首跑 18 新增 / 二跑 18 命中 / FORCE 18 重写）实测符合预期
+- [ ] 10.8 L2 真实投递到私聊 `ou_edd20a8dbfcc5e3ee279a225aec044d0`：周报文档 + 卡片 + 台账同步全部成功（合并原 8.4；首次同步走 `append` bootstrap）
+- [ ] 10.9 人工抽查飞书台账：四段结构完整、现状表双端单表、时间线条目挂周报链接（合并原 8.5）
+- [ ] 10.10 二次真实投递：确认现状表被 `block_replace` 更新而时间线历史完整保留（D2 核心验收点在飞书端的闭环，本地层面已由 8.6 验过）
+- [ ] 10.11 额度恢复后跑一次**带分析**的 L2，确认分析层正常产出且标注切换为「✅ 本周含深度分析」
