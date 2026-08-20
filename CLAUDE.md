@@ -35,7 +35,7 @@ STATE="${CRASH_REPORT_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/crash-tri
 
 分开的理由不是洁癖：`git clean -xfd` / 重新 clone 会连同被忽略的文件一起抹掉，而 `last-snapshot.json` 丢了会把下周所有 issue 报成新增（2026-08-07 那类事故）。
 
-**例外：`reports/report-index.jsonl` 放在仓库里且纳入 git**——它存的是历次日报/周报飞书文档的 URL，飞书端无法枚举本 bot 的文档，删了就永久断链。其余状态都可再生。
+**归档 `report-index.jsonl` 也在 `$STATE`**（2026-08-20 起，此前在仓库里纳入 git）。它存历次日报/周报飞书文档的 URL，飞书端无法枚举本 bot 的文档，删了就永久断链——但"入 git"这个持久化手段在这套系统里不成立：追加它的是无人值守的生产机，而那台机器**推不了 git**（无凭证），条目只会永远躺在工作区。实测三个后果：一次 `git clean` / 重新 clone 就全没；脏工作区让 `update.sh` 的 `git pull --ff-only` 卡住；两台机器各写各的必然分叉。现与 `docs.json` / `last-snapshot.json` 同级，同样靠"别删 `$STATE`"保底。仓库里那份保留为历史存档，运行时不再写入。
 
 `REPOS_ROOT` 同样自动探测：优先运行根的**同级目录**（业务仓库通常和本仓库并排 clone，只读 fetch），没有才用 `$ROOT/repos` 隔离 clone。
 
@@ -124,7 +124,8 @@ L2 的台账同步是 `deliver.sh` 里独立的 `sync_ledger()`，不走上面�
 - **文档组织**：`deliver.sh` 自动建 `Dino 崩溃 & 性能日/周报` 父目录 + `L1 日报` / `L2 周报` 子目录（按名字查、查不到才建，token 缓存在 `$STATE/folders.json`）。日报周报收进各自目录，索引与台账放父目录根部。
 - **覆盖优先于新建**：建过的文档记在 `$STATE/docs.json`，下次直接 `docs +update --command overwrite`。索引 / 台账永久固定 URL；日报周报每天（每周）一份新的，但**同日重跑覆盖当天那份**（键 `daily-<日期>`）。优先级 `环境变量 DOC_*_ID > docs.json 自动记忆 > 新建`。**台账是例外**：固定 URL 但绝不 `overwrite`，走 `sync_ledger()` 的 block_replace + append。
 - **清理挂在投递收尾**，不能挂在「新建」路径上——稳态下每天都是覆盖，新建路径根本不执行。
-- **归档统一**：日报与周报都写 `reports/report-index.jsonl`（进 git），索引页据此渲染两张归档表。归档在**卡片发送成功之后**追加——归档的语义是「已投递」不是「已生成」。今日条目次日才出现在归档表，当天的入口在页面顶部。
+- **归档统一**：日报与周报都写 `$STATE/report-index.jsonl`，索引页据此渲染两张归档表。归档在**卡片发送成功之后**追加——归档的语义是「已投递」不是「已生成」。
+- **自测模式不写正式产物**（2026-08-20 起）：`deliver.sh` 按 `CHAT_ID` 前缀判定，投群（`oc_`）才是正式投递；投私聊（`ou_`）时**跳过归档、索引页覆盖与台账同步**。起因是查实两台机器的 `docs.json` 指向**同一份**索引页与台账（`UPQNdbz…` / `Ttpwdhg…`），开发机跑一次就会覆盖群里那份索引页、并把测试结论写进正式台账。日报/周报文档本身照常建——它们按 `docs.json` 的日期键各机器各一份、互不干扰，而看到真实渲染效果正是自测的目的。今日条目次日才出现在归档表，当天的入口在页面顶部。
 
 ### L2 数据层与分析层分离（2026-08-20 起，design D12）
 
@@ -252,10 +253,19 @@ $STATE/                          # ${XDG_STATE_HOME:-~/.local/state}/crash-triag
 | `perf-history.jsonl` | L2 性能周维度趋势，滚动 **12 周**（`PERF_HISTORY_KEEP`，约一季度）；WoW 对比的基准 |
 | `docs.json` | 文档台账：决定覆盖还是新建。带日期后缀的键保留 90 天（`DOC_KEEP_DAYS`），`index` / `ledger` 无日期后缀、永不清理 |
 | `folders.json` | 目录 token 缓存，按 profile 隔离 |
+| `report-index.jsonl` | 历次日报/周报的飞书文档 URL，索引页据此渲染归档表；**不可再生**（飞书端无法枚举本 bot 文档），2026-08-20 从仓库移入 |
 | `last-snapshot.json` | L2 变化检测基准；**首跑无基准时只建基线不报新增**（否则刷一屏「新增」） |
 | `health-daily.json` / `health.json` | L1 / L2 的健康状态 |
 
-**仓库内保留判据 = 可再生性。** `reports/report-index.jsonl` 是**唯一入库的运行产物**——它存历次日报/周报的飞书文档 URL，而飞书端无法枚举本 bot 的文档，删了就永久断链。其余都在 `$STATE`：台账 `ledger/LEDGER.md`、专项快照 `ledger/snapshots/`、旧口径周报归档 `ledger/weekly-index.jsonl`（`build_index()` 读时与 `report-index.jsonl` 合并，避免历史断链）。
+**运行产物一律在 `$STATE`，仓库只放代码。** 归档 `report-index.jsonl`、台账 `ledger/LEDGER.md`、专项快照 `ledger/snapshots/`、旧口径周报归档 `ledger/weekly-index.jsonl`（`build_index()` 读时与归档合并，避免历史断链）都在 `$STATE`。
+
+**归档的异地备份靠人工**，不在关键路径上——想留一份进 git 就手工拷回仓库提交：
+
+```bash
+scp dino911@dino911s-mac-mini:.local/state/crash-triage/report-index.jsonl reports/
+```
+
+生产机推不了 git，所以不能指望它自己备份；这条命令在有凭证的机器上跑。
 
 ## 部署实例：飞书侧固定资源
 

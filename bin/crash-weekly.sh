@@ -30,7 +30,7 @@ fi
 export REPOS_ROOT   # fetch-snapshot.sh 是子进程，不 export 它会退回自己的默认值
 
 # ── 代码与状态分离 ────────────────────────────────────
-# ${ROOT}（仓库）只放代码与需要留痕的产物：bin/ · sql/ · reports/report-index.jsonl，全部由 git 管。
+# ${ROOT}（仓库）只放代码：bin/ · sql/。运行产物一律落 ${STATE}（归档 2026-08-20 起也移了过去）。
 # $STATE 放可变运行数据：logs/ · 每日生成的报告 · 快照 · 历史 · 投递中间产物 · 本机 path.env / local.env。
 # 分开的理由不是洁癖：`git clean -xfd` / 重新 clone 会连同被忽略的文件一起抹掉，
 # 而 last-snapshot.json 丢了会把下周所有 issue 报成新增（2026-08-07 那类事故）。
@@ -643,7 +643,7 @@ jq -n \
   --arg report "$REPORT_FILE" \
   --arg reportxml "$REPORT_XML" \
   --arg title "崩溃周报 · $DAY $TS_HM" \
-  --arg idx "${CRASH_REPORT_ARCHIVE:-$ROOT/reports/report-index.jsonl}" \
+  --arg idx "${CRASH_REPORT_ARCHIVE:-$STATE/report-index.jsonl}" \
   --arg day "$DAY" \
   --argjson ios "$(echo "$DIFF" | jq '.ios.total')" \
   --argjson and "$(echo "$DIFF" | jq '.android.total')" \

@@ -81,6 +81,18 @@ if [ -n "${CRASH_REPORT_CHAT_ID:-}" ] && [ "$CRASH_REPORT_CHAT_ID" != "$CHAT_ID"
   CHAT_ID="$CRASH_REPORT_CHAT_ID"
 fi
 
+# 正式投递 = 投到群（oc_）。投私聊（ou_）是开发机自测，**不得写正式产物**：
+# 两台机器的 docs.json 指向同一份索引页与同一份台账（UPQNdbz… / Ttpwdhg…），
+# 开发机跑一次就会覆盖群里那份索引页、并把测试结论同步进正式台账（2026-08-20 查实）。
+# 归档同理：它的语义是「已正式投递」，私聊测试不该入档。
+# 日报/周报文档本身照常建——它们按 docs.json 的日期键各机器各一份，互不干扰，
+# 而看到真实渲染效果正是自测的目的。
+case "$CHAT_ID" in
+  oc_*) IS_PROD=1 ;;
+  *)    IS_PROD=0
+        echo "  🧪 自测模式（投递目标 ${CHAT_ID} 非群）：跳过归档、索引页与台账同步" ;;
+esac
+
 # 陈旧清单闸门：脚本失败时不会重写 manifest，照投就会把昨天的卡片当今天发出去。
 # 这类静默错误比不投更糟——宁可报错让人来看。
 if [ "$DAY" != "$TODAY" ]; then
@@ -325,6 +337,7 @@ PY
 # 报告归档：日报与周报写同一份 JSONL（{type,day,url,...}），索引页据此渲染归档表。
 # 追加时机固定在卡片发送成功之后——归档的语义是「已投递」，不是「已生成」。
 archive_append() { # $1=文档 URL
+  [ "$IS_PROD" = "1" ] || { echo "  ⏭️ 自测模式，跳过归档"; return 0; }
   local idx day
   idx="$(m archive_append.jsonl_file)"; day="$(m archive_append.day)"
   { [ -n "$idx" ] && [ -n "${1:-}" ]; } || return 0
@@ -502,7 +515,9 @@ case "$TYPE" in
 
     # 索引页里的入口 URL 必须在导入前回填——文档一旦建好就只能新建不能覆盖
     URL_INDEX=""
-    if [ -n "$INDEX_FILE" ]; then
+    if [ -n "$INDEX_FILE" ] && [ "$IS_PROD" != "1" ]; then
+      echo "  ⏭️ 自测模式，跳过索引页覆盖（它是群里那份固定文档）"
+    elif [ -n "$INDEX_FILE" ]; then
       fill "$INDEX_FILE" "__DAILY_URL__"  "$URL_DAILY"
       INDEX_XML="$(m index_doc.xml_file)"
       if [ -s "$INDEX_XML" ]; then
@@ -561,7 +576,9 @@ case "$TYPE" in
     LEDGER_TABLE_FILE="$(m ledger_sync.table_file)"
     LEDGER_TIMELINE_FILE="$(m ledger_sync.timeline_file)"
     LEDGER_LOCAL_FILE="$(m ledger_sync.local_file)"
-    if [ -n "$LEDGER_TABLE_FILE" ]; then
+    if [ -n "$LEDGER_TABLE_FILE" ] && [ "$IS_PROD" != "1" ]; then
+      echo "  ⏭️ 自测模式，跳过台账同步（它是群里那份固定文档，测试结论不得写入）"
+    elif [ -n "$LEDGER_TABLE_FILE" ]; then
       LEDGER_DOC_ID="${CRASH_REPORT_LEDGER_DOC_ID:-$(doc_get ledger)}"
       if [ -z "$LEDGER_DOC_ID" ]; then
         echo "  ⚠️ 台账同步跳过：未配置台账文档（CRASH_REPORT_LEDGER_DOC_ID 或 docs.json 的 ledger 键）"

@@ -38,7 +38,7 @@ fi
 export REPOS_ROOT   # fetch-snapshot.sh 是子进程，不 export 它会退回自己的默认值
 
 # ── 代码与状态分离 ────────────────────────────────────
-# ${ROOT}（仓库）只放代码与需要留痕的产物：bin/ · sql/ · reports/report-index.jsonl，全部由 git 管。
+# ${ROOT}（仓库）只放代码：bin/ · sql/。运行产物一律落 ${STATE}（归档 2026-08-20 起也移了过去）。
 # $STATE 放可变运行数据：logs/ · 每日生成的报告 · 快照 · 历史 · 投递中间产物 · 本机 path.env / local.env。
 # 分开的理由不是洁癖：`git clean -xfd` / 重新 clone 会连同被忽略的文件一起抹掉，
 # 而 last-snapshot.json 丢了会把下周所有 issue 报成新增（2026-08-07 那类事故）。
@@ -86,8 +86,13 @@ DOC_INDEX_ID="${DOC_INDEX_ID:-}"        # 索引页
 # 台账移交 L2 独占产出（change crash-ledger-l2-ownership D1），L1 不再持有 LEDGER_SRC / DOC_LEDGER_ID，
 # 索引页台账入口改为固定 URL 直链，见 build_index() 与下方 CLAUDE.md 固定文档表。
 LEDGER_URL="${LEDGER_URL:-https://qjphu5vphyf4.jp.larksuite.com/docx/TtpwdhgKroMH1DxJumojTflrppz}"
-# 报告归档（日报 + 周报统一一份，进 git）：deliver.sh 在文档建成后追加 {type,day,url,...}
-ARCHIVE_FILE="${CRASH_REPORT_ARCHIVE:-$ROOT/reports/report-index.jsonl}"
+# 报告归档（日报 + 周报统一一份）：deliver.sh 在文档建成后追加 {type,day,url,...}。
+# 落 $STATE 而不是仓库：它由无人值守的生产机追加，而那台机器推不了 git（无凭证），
+# 条目只会永远躺在工作区——一次 git clean / 重新 clone 就没了，还会让 update.sh 的
+# git pull --ff-only 卡住、两台机器各写各的必然分叉（2026-08-20 三样全踩到）。
+# 现与 docs.json / last-snapshot.json 同级：同样不可再生，同样靠"别删 $STATE"保底。
+# 仓库里的 reports/report-index.jsonl 保留为历史存档，运行时不再写入。
+ARCHIVE_FILE="${CRASH_REPORT_ARCHIVE:-$STATE/report-index.jsonl}"
 ARCHIVE_DAILY_KEEP="${CRASH_REPORT_ARCHIVE_DAILY_KEEP:-30}"   # 索引页里日报归档表渲染多少行（文件本身不截断）
 DRY_RUN="${CRASH_REPORT_DRY_RUN:-0}"
 DAYS="${CRASH_REPORT_DAYS:-1}"
