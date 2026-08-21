@@ -128,15 +128,22 @@ echo "=== 崩溃 & 性能日报 ${TS}（最新 $VERSION_COUNT 个版本口径）
 # ── 故障告警：失败要发出去，不能死在日志里 ─────────────────
 # 两条通路：fail() 覆盖已知失败，ERR trap 兜住未预期的非零退出（set -e 直接杀进程那种）。
 # ALERTED 防重复：fail() 已发过就不再由 trap 补发。
+# ⚠️ ALERTED 只在主进程有效：命令替换 / 管道都在子 shell 里跑，那里的 ALERTED=1 传不回来。
+# 2026-08-21 实测一次 grep 无匹配就在群里连发 8 张卡。去重改用文件标记，跑批开始时清一次。
 ALERTED=0
+ALERT_FLAG="$STATE/.alerted-daily"
+rm -f "$ALERT_FLAG"
 CURRENT_STEP="启动"
 step() { CURRENT_STEP="$1"; echo "--- $1 ---"; }
 alert_once() { # $1=step $2=message $3=rc
   [ "$ALERTED" = 1 ] && return 0
-  ALERTED=1
+  [ -e "$ALERT_FLAG" ] && return 0
+  ALERTED=1; : > "$ALERT_FLAG"
   [ -x "$ROOT/bin/alert.sh" ] || return 0
+  # 输出一律走 stderr：ERR trap 可能在命令替换里触发，告警文案打到 stdout 会被当成取数结果
+  # captured 进变量（2026-08-21：`printf: 📣 已发送告警到 oc_…: invalid number`）。
   "$ROOT/bin/alert.sh" --source daily --severity error --step "$1" \
-    --message "$2" --rc "${3:-1}" --run-id "$RUN_ID" --log "$LOG" 2>&1 || true
+    --message "$2" --rc "${3:-1}" --run-id "$RUN_ID" --log "$LOG" >&2 || true
 }
 # 失败位置：脚本实际跑在 bash 3.2（macOS 系统 bash，`#!/usr/bin/env bash` → /bin/bash）。
 # **3.2 下没有任何一种取行号的路子是准的**（2026-08-20 逐个实测）：
@@ -250,10 +257,14 @@ perf_day_offset() { [ -n "$1" ] && [ -n "$2" ] || { echo ""; return 0; }
 
 # ── 三态数据判定（design D6，顺序不可颠倒）────────────────────────
 # 1 表不存在 → table_missing；2 表整体窗口内无数据 → stale；3 表有数据但该版本 0 行 → no_version
-data_state() { # $1=表 $2=该版本查询是否有行(非空且非0即有) $3=表整体 MAX 时间戳（已缓存，避免重复查）
+data_state() { # $1=表 $2=该版本查询是否有行(非空且非0即有) $3=表整体 MAX 时间戳 $4=停更天数（空=未停更）
   if [ -z "$1" ]; then echo table_missing; return 0; fi
   if [ -n "$2" ] && [ "$2" != "0" ]; then echo ok; return 0; fi
-  [ -n "$3" ] && echo no_version || echo stale
+  # 第 2 态不能只判「MAX 为空」：表里存着 08-17 的数据、导出却已断更 4 天时，MAX 非空，
+  # 判定就会掉进第 3 态「该版本无数据」——那是「新版刚发」的常态噪音，没人会追。
+  # 2026-08-21 实测：firebase_performance 断更 4 天，日报每天照出，没有任何信号（stale_days()）。
+  if [ -z "$3" ] || [ -n "${4:-}" ]; then echo stale; return 0; fi
+  echo no_version
 }
 # 崩溃段单独判定：有会话就有分母，「0 条致命事件」是结论本身（0 崩溃），不是缺数。
 # 渲染成「该版本无数据」会让「这版没崩过」这个最该被看见的好消息消失。
@@ -477,6 +488,18 @@ table_exists "$AND_PERF_TBL"  || AND_PERF_TBL=""
 IOS_CRASH_MAX="$(table_max "$IOS_CRASH_TBL")"; AND_CRASH_MAX="$(table_max "$AND_CRASH_TBL")"
 IOS_PERF_MAX="$(table_max "$IOS_PERF_TBL")";   AND_PERF_MAX="$(table_max "$AND_PERF_TBL")"
 IOS_SESS_MAX="$(table_max "$SESS_IOS")";       AND_SESS_MAX="$(table_max "$SESS_AND")"
+# 表整体停更 = table_max 落在窗口起点之前（窗口内必然 0 行）。只用已缓存的 MAX 值换算，不多查 BigQuery。
+stale_days() { # $1=表 MAX 时间戳文本 $2=窗口天数 → 停更天数（未停更 / 无法解析 → 空）
+  local e
+  e="$(_until_epoch "$1")"
+  [ -n "$e" ] || { echo ""; return 0; }
+  [ "$e" -lt "$(( RUN_EPOCH - $2 * 86400 ))" ] || { echo ""; return 0; }
+  echo "$(( (RUN_EPOCH - e) / 86400 ))"
+}
+IOS_PERF_STALE="$(stale_days "$IOS_PERF_MAX" "$PERF_DAYS")"
+AND_PERF_STALE="$(stale_days "$AND_PERF_MAX" "$PERF_DAYS")"
+perf_stale_of() { [ "$1" = ios ] && printf '%s' "$IOS_PERF_STALE" || printf '%s' "$AND_PERF_STALE"; }
+perf_max_of()   { [ "$1" = ios ] && printf '%s' "$IOS_PERF_MAX"   || printf '%s' "$AND_PERF_MAX"; }
 newest_ts() { printf '%s\n%s\n' "$1" "$2" | grep -v '^$' | sort -r | head -1 || true; }
 CRASH_UNTIL="$(newest_ts "$IOS_CRASH_MAX" "$AND_CRASH_MAX")"; [ -n "$CRASH_UNTIL" ] || CRASH_UNTIL="—"
 DATA_UNTIL="$(newest_ts "$IOS_PERF_MAX" "$AND_PERF_MAX")";    [ -n "$DATA_UNTIL" ]  || DATA_UNTIL="—"
@@ -519,7 +542,7 @@ AND_VER_OK=1; [ -n "$AND_V1" ] || AND_VER_OK=0
 
 # ── 逐版本取数（design D5：每版本各跑一次查询，不做 GROUP BY version）──
 # 产出 $TMP/m-<plat>-<ver>.json（卡片/文档共用）与三份明细 CSV（文档明细段用）。
-collect_window() { # $1=plat键 $2=版本 $3=crash表 $4=sess表 $5=perf表 $6=crashMax $7=perfMax $8=版本CSV
+collect_window() { # $1=plat键 $2=版本 $3=crash表 $4=sess表 $5=perf表 $6=crashMax $7=perfMax $8=版本CSV $9=perf停更天数
   local p="$1" v="$2" key="$1-$2"
   local issues='[]' rate='[]' n=0 ev=0 latest="" cev="" sess="" aff="" rp="" rfrac="" cstate
   local traces="$TMP/traces-$key.csv" screens="$TMP/screens-$key.csv" net="$TMP/net-$key.csv"
@@ -552,15 +575,18 @@ collect_window() { # $1=plat键 $2=版本 $3=crash表 $4=sess表 $5=perf表 $6=c
     q perf-network.sql "$5" "$PERF_DAYS" "$v" > "$net"     || true
   fi
   prows=$(( $(wc -l < "$traces") + $(wc -l < "$screens") + $(wc -l < "$net") ))
-  p50="$(int "$(grep '^_app_start,' "$traces" 2>/dev/null | cut -d, -f3 | head -1)")"
-  p95="$(int "$(grep '^_app_start,' "$traces" 2>/dev/null | cut -d, -f4 | head -1)")"
+  # `|| true` 不是防御性冗余：性能表停更时 traces 为空，grep 无匹配返回 1，pipefail 把整条
+  # 管道判成失败；命令替换的子 shell 继承 set -e + errtrace，于是良性的「没这行」被 ERR trap
+  # 当成故障告警发出去（2026-08-21 07:00：4 个版本 × 2 处 = 群里连发 8 张误报卡）。
+  p50="$(int "$(grep '^_app_start,' "$traces" 2>/dev/null | cut -d, -f3 | head -1 || true)")"
+  p95="$(int "$(grep '^_app_start,' "$traces" 2>/dev/null | cut -d, -f4 | head -1 || true)")"
   wscreen="$(csv "$screens" 1)"
   wslow="$(pct "$(csv "$screens" 3)")"
   # 冻结率取「最差慢帧页」同一行的冻结率（沿用既有口径，仅在标签上明确写出「最差页」）
   frozen="$(pct "$(csv "$screens" 4)")"
   neterr="$([ -s "$net" ] && awk -F, '{e+=$5; n+=$2} END{if(n>0) printf "%.2f", e/n*100}' "$net" || echo "")"
   neterr="$(pct "$neterr")"
-  pstate="$(data_state "$5" "$prows" "$7")"
+  pstate="$(data_state "$5" "$prows" "$7" "${9:-}")"
 
   vsess="$(ver_field "$8" "$v" 2)"
   vdev="$(ver_field "$8" "$v" 3)"
@@ -585,11 +611,11 @@ mv_() { local f="$TMP/m-$1-$2.json"; [ -s "$f" ] || { echo ""; return 0; }
 step "逐版本取数（窗口值）"
 for v in $IOS_COLS; do
   echo "  iOS $v"
-  collect_window ios "$v" "$IOS_CRASH_TBL" "$SESS_IOS" "$IOS_PERF_TBL" "$IOS_CRASH_MAX" "$IOS_PERF_MAX" "$IOS_VER_CSV"
+  collect_window ios "$v" "$IOS_CRASH_TBL" "$SESS_IOS" "$IOS_PERF_TBL" "$IOS_CRASH_MAX" "$IOS_PERF_MAX" "$IOS_VER_CSV" "$IOS_PERF_STALE"
 done
 for v in $AND_COLS; do
   echo "  Android $v"
-  collect_window and "$v" "$AND_CRASH_TBL" "$SESS_AND" "$AND_PERF_TBL" "$AND_CRASH_MAX" "$AND_PERF_MAX" "$AND_VER_CSV"
+  collect_window and "$v" "$AND_CRASH_TBL" "$SESS_AND" "$AND_PERF_TBL" "$AND_CRASH_MAX" "$AND_PERF_MAX" "$AND_VER_CSV" "$AND_PERF_STALE"
 done
 
 # ── 天级单日值：只跟踪最新 N 版（主力补充列不进 1d/历史，design D11 成本控制）──
@@ -705,6 +731,18 @@ add_summary "$(yellow_line "慢帧最差页" "$IOS_SLOW_V1" "$AND_SLOW_V1" "$SLO
 add_summary "$(yellow_line "冻结率" "$IOS_FROZEN_V1" "$AND_FROZEN_V1" "$FROZEN_RED" "$FROZEN_YELLOW" "%")"
 add_summary "$(yellow_line "启动 P95" "$IOS_P95_V1" "$AND_P95_V1" "$START_P95_RED" "$START_P95_YELLOW" "ms")"
 add_summary "$(yellow_line "接口错误率" "$IOS_NETERR_V1" "$AND_NETERR_V1" "$NET_ERR_RED" "$NET_ERR_YELLOW" "%")"
+# 数据源停更要顶到卡片上，但它不是执行失败——只进摘要行（黄），不进 ALERTS、不发故障卡。
+perf_stale_line() {
+  local d="" src=""
+  if [ -n "$IOS_PERF_STALE" ] && [ -n "$AND_PERF_STALE" ]; then
+    d="$IOS_PERF_STALE"; [ "$AND_PERF_STALE" -gt "$d" ] && d="$AND_PERF_STALE"
+    src="iOS 截至 $IOS_PERF_MAX · Android 截至 $AND_PERF_MAX"
+  elif [ -n "$IOS_PERF_STALE" ]; then d="$IOS_PERF_STALE"; src="iOS 截至 $IOS_PERF_MAX"
+  elif [ -n "$AND_PERF_STALE" ]; then d="$AND_PERF_STALE"; src="Android 截至 $AND_PERF_MAX"
+  else return 0; fi
+  printf '🟡 性能数据已停更 %s 天 · %s — Firebase→BigQuery 导出未产出，非流水线故障' "$d" "$src"
+}
+add_summary "$(perf_stale_line)"
 STATUS_MD="$SUMMARY_MD"; [ -z "$STATUS_MD" ] && STATUS_MD="✅ 无异常"
 
 # ── 单元格渲染 ────────────────────────────────────────
@@ -1113,6 +1151,12 @@ REPORT="$STATE/reports/$DAY-daily.md"
   for pv in $(printf 'ios %s\n' $IOS_COLS | tr ' ' ':') $(printf 'and %s\n' $AND_COLS | tr ' ' ':'); do
     p="${pv%%:*}"; v="${pv##*:}"
     [ "$p" = ios ] && pn="iOS" || pn="Android"
+    # 停更时三张表全空，逐张打「（无数据）」会被读成「这版没样本」。直接说清是数据源断更。
+    if [ -n "$(perf_stale_of "$p")" ]; then
+      printf '**%s %s** · ⚠️ 数据未同步：性能表已停更 %s 天（截至 %s）\n\n' \
+        "$pn" "$v" "$(perf_stale_of "$p")" "$(perf_max_of "$p")"
+      continue
+    fi
     printf '**%s %s** · 启动与自定义 trace\n\n' "$pn" "$v"
     csv_table "$TMP/traces-$p-$v.csv" '| trace | 次数 | P50 | P95 |
 |---|---|---|---|' '{printf "| %s | %s | %s ms | %s ms |\n",$1,$2,$3,$4}'
@@ -1304,6 +1348,11 @@ build_report_xml() {
       p="${pv%%:*}"; v="${pv##*:}"
       [ "$p" = ios ] && pn="iOS" || pn="Android"
       printf '<h3>%s %s</h3>\n' "$pn" "$v"
+      if [ -n "$(perf_stale_of "$p")" ]; then
+        printf '<p><span text-color="orange">⚠️ 数据未同步：性能表已停更 %s 天（截至 %s）</span></p>\n' \
+          "$(perf_stale_of "$p")" "$(perf_max_of "$p")"
+        continue
+      fi
       printf '<p><b>启动与自定义 trace</b></p>\n'
       xml_csv_table "$TMP/traces-$p-$v.csv" 'trace,次数,P50,P95' '1,2,3: ms,4: ms'
       printf '<p><b>页面渲染（慢帧 &gt;16ms · 冻结 &gt;700ms）</b></p>\n'

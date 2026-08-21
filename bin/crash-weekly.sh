@@ -76,15 +76,21 @@ echo "=== 崩溃周报 $TS ==="
 # ── 故障告警：失败要发出去，不能死在日志里 ─────────────────
 # 两条通路：fail() 覆盖已知失败，ERR trap 兜住未预期的非零退出（set -e 直接杀进程那种）。
 # ALERTED 防重复：fail() 已发过就不再由 trap 补发。
+# ⚠️ ALERTED 只在主进程有效：命令替换 / 管道都在子 shell 里跑，那里的 ALERTED=1 传不回来。
+# 去重改用文件标记，跑批开始时清一次（起因见 crash-daily.sh 同处注释）。
 ALERTED=0
+ALERT_FLAG="$STATE/.alerted-weekly"
+rm -f "$ALERT_FLAG"
 CURRENT_STEP="启动"
 step() { CURRENT_STEP="$1"; echo "--- $1 ---"; }
 alert_once() { # $1=step $2=message $3=rc
   [ "$ALERTED" = 1 ] && return 0
-  ALERTED=1
+  [ -e "$ALERT_FLAG" ] && return 0
+  ALERTED=1; : > "$ALERT_FLAG"
   [ -x "$ROOT/bin/alert.sh" ] || return 0
+  # 输出一律走 stderr：ERR trap 可能在命令替换里触发，打到 stdout 会被 captured 进取数变量。
   "$ROOT/bin/alert.sh" --source weekly --severity error --step "$1" \
-    --message "$2" --rc "${3:-1}" --run-id "$TS" --log "$LOG" 2>&1 || true
+    --message "$2" --rc "${3:-1}" --run-id "$TS" --log "$LOG" >&2 || true
 }
 # 失败位置：脚本实际跑在 bash 3.2（macOS 系统 bash，`#!/usr/bin/env bash` → /bin/bash）。
 # **3.2 下没有任何一种取行号的路子是准的**（2026-08-20 逐个实测）：
@@ -333,7 +339,26 @@ fi
 # 复用 5. 已解析出的主力版本（会话量 top2），复用 L1 现有 SQL（perf-traces/screens/network.sql），
 # 只改窗口天数为 WEEK_DAYS——同一份 SQL 两条链路各自套用不同窗口，口径一致（design D9）。
 # 只给趋势 / 可定位对象 / 下一步取证方向，不出根因与修复方案（硬约束，见 CLAUDE.md）。
+# 时间助手与 tbl_max 原本定义在下方「取数区间」段，为供本段的停更判定使用而前移（定义唯一，未复制）。
+RUN_EPOCH="$(date +%s)"
+_until_epoch() { local s="${1:-}"; s="${s% UTC}"
+  [ -n "$s" ] && [ "$s" != "—" ] || return 0
+  TZ=UTC date -j -f '%Y-%m-%d %H:%M' "$s" '+%s' 2>/dev/null || true; }
+tbl_max() { [ -n "$1" ] || { echo ""; return 0; }
+  bq query --use_legacy_sql=false --format=csv \
+    "SELECT FORMAT_TIMESTAMP('%Y-%m-%d %H:%M UTC', MAX(event_timestamp)) AS ts FROM \`$1\`" 2>/dev/null \
+    | tail -n +2 | tail -1 || true; }
+# 表整体停更 = table_max 落在窗口起点之前（窗口内必然 0 行）。缺了这一判定，导出断更会被
+# 渲染成「该版本无数据」——新版刚发时的常态噪音，没人会追（2026-08-21：性能导出断 4 天无人察觉）。
+stale_days() { # $1=表 MAX 时间戳文本 $2=窗口天数 → 停更天数（未停更 / 无法解析 → 空）
+  local e
+  e="$(_until_epoch "$1")"
+  [ -n "$e" ] || { echo ""; return 0; }
+  [ "$e" -lt "$(( RUN_EPOCH - $2 * 86400 ))" ] || { echo ""; return 0; }
+  echo "$(( (RUN_EPOCH - e) / 86400 ))"
+}
 PERF_OK=0
+IOS_PERF_STALE=""; AND_PERF_STALE=""; IOS_PERF_MAX=""; AND_PERF_MAX=""   # bq 不可用时也要有定义（set -u）
 IOS_PERF_TBL="$PROJECT.firebase_performance.com_prime_dino_english_IOS"
 AND_PERF_TBL="$PROJECT.firebase_performance.com_prime_dino_english_ANDROID"
 PERF_ROWS=""    # TSV：平台/版本/启动P50/启动P95/慢帧最差页/慢帧率/冻结率/接口错误率（列以制表符分隔）
@@ -350,8 +375,10 @@ if [ "$ADOPT_OK" = "1" ]; then
       "$SQL_DIR/perf-screens.sql" | bq query --use_legacy_sql=false --format=csv 2>/dev/null | tail -n +2 || true)"
     net="$(sed -e "s|{{TABLE}}|$tbl|g" -e "s|{{DAYS}}|$WEEK_DAYS|g" -e "s|{{VERSIONS}}|\"$ver\"|g" \
       "$SQL_DIR/perf-network.sql" | bq query --use_legacy_sql=false --format=csv 2>/dev/null | tail -n +2 || true)"
-    p50="$(printf '%s\n' "$traces" | grep '^_app_start,' | cut -d, -f3 | head -1)"
-    p95="$(printf '%s\n' "$traces" | grep '^_app_start,' | cut -d, -f4 | head -1)"
+    # `|| true`：性能表停更时 traces 为空，grep 无匹配返回 1，pipefail 让赋值整体失败，
+    # set -e 直接杀掉整跑（同源问题在 L1 是误报告警，见 crash-daily.sh collect_window）。
+    p50="$(printf '%s\n' "$traces" | grep '^_app_start,' | cut -d, -f3 | head -1 || true)"
+    p95="$(printf '%s\n' "$traces" | grep '^_app_start,' | cut -d, -f4 | head -1 || true)"
     wscreen="$(printf '%s\n' "$screens" | head -1 | cut -d, -f1)"
     wslow="$(printf '%s\n' "$screens" | head -1 | cut -d, -f3)"
     frozen="$(printf '%s\n' "$screens" | head -1 | cut -d, -f4)"
@@ -386,6 +413,11 @@ if [ "$ADOPT_OK" = "1" ]; then
     fi
   }
   PERF_OK=1
+  IOS_PERF_MAX="$(tbl_max "$IOS_PERF_TBL")"; AND_PERF_MAX="$(tbl_max "$AND_PERF_TBL")"
+  IOS_PERF_STALE="$(stale_days "$IOS_PERF_MAX" "$WEEK_DAYS")"
+  AND_PERF_STALE="$(stale_days "$AND_PERF_MAX" "$WEEK_DAYS")"
+  [ -n "$IOS_PERF_STALE" ] && echo "  ⚠️ iOS 性能表已停更 ${IOS_PERF_STALE} 天（截至 ${IOS_PERF_MAX}）"
+  [ -n "$AND_PERF_STALE" ] && echo "  ⚠️ Android 性能表已停更 ${AND_PERF_STALE} 天（截至 ${AND_PERF_MAX}）"
   while IFS= read -r v; do [ -n "$v" ] && perf_row "iOS" "$IOS_PERF_TBL" "$v"; done <<< "$IOS_TOP2_VERS"
   while IFS= read -r v; do [ -n "$v" ] && perf_row "Android" "$AND_PERF_TBL" "$v"; done <<< "$AND_TOP2_VERS"
   # 保留最近 N 条同 (platform,version) 记录：避免无限增长
@@ -404,13 +436,9 @@ fi
 # 里都是 TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {{DAYS}} DAY)，下界锚在跑批时刻）；
 # 终点 = sessions 活表实际取到的最新事件时间。起点是「查询下界」不是「首条数据时间」。
 # bq 不可用时整段降级为空字符串，周报照发（核心是 MCP 变化摘要）。
-RUN_EPOCH="$(date +%s)"
 TZ_LABEL="$(date '+%z')"
 _fmt() { if [ -n "${2:-}" ]; then TZ="$2" date -r "$1" '+%m-%d %H:%M' 2>/dev/null
          else date -r "$1" '+%m-%d %H:%M' 2>/dev/null; fi; }
-_until_epoch() { local s="${1:-}"; s="${s% UTC}"
-  [ -n "$s" ] && [ "$s" != "—" ] || return 0
-  TZ=UTC date -j -f '%Y-%m-%d %H:%M' "$s" '+%s' 2>/dev/null || true; }
 win_compact() {
   local se ue; se=$(( RUN_EPOCH - ${1:-0} * 86400 )); ue="$(_until_epoch "${2:-}")"
   [ -n "$ue" ] || { printf '%s → —' "$(_fmt "$se")"; return 0; }
@@ -426,10 +454,6 @@ win_full() {
 }
 DATA_UNTIL="—"
 if [ "$ADOPT_OK" = "1" ]; then
-  tbl_max() { [ -n "$1" ] || { echo ""; return 0; }
-    bq query --use_legacy_sql=false --format=csv \
-      "SELECT FORMAT_TIMESTAMP('%Y-%m-%d %H:%M UTC', MAX(event_timestamp)) AS ts FROM \`$1\`" 2>/dev/null \
-      | tail -n +2 | tail -1 || true; }
   _MI="$(tbl_max "$PROJECT.firebase_sessions.com_prime_dino_english_IOS_REALTIME")"
   _MA="$(tbl_max "$PROJECT.firebase_sessions.com_prime_dino_english_ANDROID_REALTIME")"
   DATA_UNTIL="$(printf '%s\n%s\n' "$_MI" "$_MA" | grep -v '^$' | sort -r | head -1 || true)"
@@ -481,8 +505,15 @@ AND_BR="$(git -C "$REPOS_ROOT/dino-english-android" rev-parse --abbrev-ref HEAD)
 # 缺分析必须在卡片上就看得见，否则会被读成「本周无异常」。
 ANALYSIS_NOTE="根因与修复方案见完整报告（**未经人工复核**，落地前须验证）"
 [ "$ANALYSIS_OK" = "1" ] || ANALYSIS_NOTE="⚠️ **本周无深度分析**（${ANALYSIS_SKIP_REASON}）；数据与台账不受影响"
-NOTE_MD="$(printf '变化摘要口径：BigQuery 事件级（含已关闭 issue，全版本），近 %s 天窗，**纯脚本取数不经模型**。\n取数区间 %sd：%s\n主力版本 = 近 %s 天会话量 top2（日报看的是「版本号最新的 2 个版本」，两者互补，不可混比）。\n崩溃率 = 事件数/会话数（非 crash-free）· 对照分支：iOS %s · Android %s\n%s' \
-  "$WEEK_DAYS" "$WEEK_DAYS" "$WIN_COMPACT" "$WEEK_DAYS" "$IOS_BR" "$AND_BR" "$ANALYSIS_NOTE")"
+# 数据源停更 ≠ 本周性能平稳。缺了这句，导出断更会被读成「没什么变化」（2026-08-21 日报踩到）。
+PERF_STALE_NOTE=""
+if [ -n "$IOS_PERF_STALE" ] || [ -n "$AND_PERF_STALE" ]; then
+  _ist="正常"; [ -n "$IOS_PERF_STALE" ] && _ist="停更 ${IOS_PERF_STALE} 天（截至 ${IOS_PERF_MAX}）"
+  _ast="正常"; [ -n "$AND_PERF_STALE" ] && _ast="停更 ${AND_PERF_STALE} 天（截至 ${AND_PERF_MAX}）"
+  PERF_STALE_NOTE="$(printf '\n🟡 **性能数据源停更** — iOS %s · Android %s；Firebase→BigQuery 导出未产出，非流水线故障，本周性能段不可读作「平稳」。' "$_ist" "$_ast")"
+fi
+NOTE_MD="$(printf '变化摘要口径：BigQuery 事件级（含已关闭 issue，全版本），近 %s 天窗，**纯脚本取数不经模型**。\n取数区间 %sd：%s\n主力版本 = 近 %s 天会话量 top2（日报看的是「版本号最新的 2 个版本」，两者互补，不可混比）。\n崩溃率 = 事件数/会话数（非 crash-free）· 对照分支：iOS %s · Android %s\n%s%s' \
+  "$WEEK_DAYS" "$WEEK_DAYS" "$WIN_COMPACT" "$WEEK_DAYS" "$IOS_BR" "$AND_BR" "$ANALYSIS_NOTE" "$PERF_STALE_NOTE")"
 
 # 主力版本表（markdown 与卡片共用同一批数据）
 adopt_md() {
@@ -496,6 +527,8 @@ perf_md() {
   if [ "$PERF_OK" != "1" ]; then
     printf '（性能数据源不可用，跳过本段；崩溃段变化摘要不受影响）\n'; return 0
   fi
+  [ -n "$IOS_PERF_STALE" ] && printf '> ⚠️ **iOS 性能表已停更 %s 天**（截至 %s）——窗口内 0 行，下表 iOS 各列为空是数据源断更，不是「本周无异常」。\n\n' "$IOS_PERF_STALE" "$IOS_PERF_MAX"
+  [ -n "$AND_PERF_STALE" ] && printf '> ⚠️ **Android 性能表已停更 %s 天**（截至 %s）——窗口内 0 行，下表 Android 各列为空是数据源断更，不是「本周无异常」。\n\n' "$AND_PERF_STALE" "$AND_PERF_MAX"
   [ -n "$PERF_ROWS" ] || { printf '（本次未取到性能数据）\n'; return 0; }
   printf '| 平台 | 版本 | 启动 P50 | 启动 P95 | 慢帧最差页 | 慢帧率 | 冻结率 | 接口错误率 |\n|---|---|---|---|---|---|---|---|\n'
   printf '%s' "$PERF_ROWS" | awk -F'\t' 'NF>=8{printf "| %s | %s | %sms | %sms | %s | %s%% | %s%% | %s%% |\n",$1,$2,$3,$4,$5,$6,$7,$8}'
