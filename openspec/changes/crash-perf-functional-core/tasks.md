@@ -25,7 +25,7 @@
 - [x] 2.1 新建 `bin/lib/core/format.sh`，移入 `int` / `pct` / `rate_pct` / `_fmt` / `_until_epoch` / `win_compact` / `win_full`
 - [x] 2.2 新建 `bin/lib/core/verdict.sh`，移入 `traffic_light` / `cell_color` / `delta_cell` / `stale_days`
 - [x] 2.3 新建 `bin/lib/core/version.sh`，移入 `pick_newest` / `pick_top_sessions` / `union_versions` / `ver_field`
-- [ ] 2.4 新建 `bin/lib/core/cache.sh`（design D10）：`cache_verdict <强制标志> <文件是否存在> <上次计数> <本次计数>` → `new|update|hit`（从 `fetch-snapshot-bq.sh:108-126` 的 while 循环上移）；`doc_keep_predicate` —— `doc_prune` 的日期键保留判定（从 `deliver.sh:252-258` 上移，保持 jq 表达式原样，只是移出并可独立调用）。三处调用方改为调用核心层，**保持行为一字不变**
+- [ ] 2.4 ⏸ 未做：新建 `bin/lib/core/cache.sh`（design D10）：`cache_verdict <强制标志> <文件是否存在> <上次计数> <本次计数>` → `new|update|hit`（从 `fetch-snapshot-bq.sh:108-126` 的 while 循环上移）；`doc_keep_predicate` —— `doc_prune` 的日期键保留判定（从 `deliver.sh:252-258` 上移，保持 jq 表达式原样，只是移出并可独立调用）。三处调用方改为调用核心层，**保持行为一字不变**
 - [x] 2.5 按 design D3 改签名：`win_compact` / `win_full` 首二参改为「基准 epoch + 时区标签」，`stale_days` 首参改为基准 epoch，`union_versions` 增第三参「列上限」
 - [x] 2.6 调用点实际 **14 个**（daily 10 + weekly 4），design 估的是 18。原文：grep -n 逐个列出四个函数的全部调用点并改完；改完后确认核心层文件中不再出现 `RUN_EPOCH` / `TZ_LABEL` / `MAX_VERSION_COLS`
 - [x] 2.7 两个入口脚本 source 三个核心层文件（顺序任意，放在 `common.sh` 之前或之后均可）
@@ -36,30 +36,30 @@
 
 ## 3. 断言用例
 
-- [ ] 3.1 写 `bin/test/run.sh`：提供 `assert_eq <期望> <实际> <用例名>`，遍历 `bin/test/core-*.sh`，统计通过/失败，有失败则非零退出（bash 3.2 兼容，零外部依赖）
-- [ ] 3.2 `bin/test/core-format.sh`：覆盖 `format.sh` 全部函数。必含边界 —— `rate_pct` 分母为 `0` / 为空 → 空串；`int` / `pct` 空输入 → 空串；`pct` 整数与小数两种输出形态；`_until_epoch` 输入 `—` 与不可解析串 → 空；`win_compact` / `win_full` 止点为空 → 降级形态。**用例内固定 `TZ`**（design：`_fmt` 读环境 TZ）
-- [ ] 3.3 `bin/test/core-verdict.sh`：`traffic_light` 空值与「无法计算」不判定 → 空串（这是「空值不告警」口径的根）；红/黄/绿三档各一例含边界值；`delta_cell` 覆盖 `lower_better` / `higher_better` / `neutral` 三方向 × 正/负/零增量，验证「箭头跟数值、颜色跟好坏」；`stale_days` 未停更 → 空、已停更 → 天数
-- [ ] 3.4 `bin/test/core-version.sh`：`pick_newest` 按版本号而非会话量排序（含 `1.5.10` vs `1.5.9` 这类 `sort -V` 才对的用例）；`union_versions` 去重、排序、上限截断；`pick_top_sessions` 按会话量；`ver_field` 命中与未命中；**单版本可比时的退化情形**
-- [ ] 3.5 `bin/test/core-cache.sh`（design D10）：`cache_verdict` 覆盖 强制标志=1 / 文件不存在 / 计数变大 / 计数相等 四种入参组合；**并单列一条 `本次 < 上次`** —— **该缺陷已由 change `crash-fact-cache-freshness` 于 2026-08-22 修复**（抓取判定与记录更新拆开、`latest_event` 取 max）。用例直接钉住**修复后的正确行为**：`本次 < 上次` → 抓取判定为 `skip`，但观测字段仍刷新。⛔ 不要再写「已知缺陷」注释——那是修复前的状态。`doc_keep_predicate` 覆盖：日期键在 cutoff 内保留 / 超出丢弃 / **无日期后缀的固定键（`index` / `ledger`）无条件保留** —— 最后这条正是 2026-08-18 生产误删的那个场景（`deliver.sh:249-251` 注释），是本 change 里最高价值的一条用例
-- [ ] 3.6 期望值从行为意图推导，不从当前输出反抄（design 风险表末项）。若某用例的意图值与实际输出不符，**不改代码也不改用例**，记入 `openspec/changes/crash-perf-functional-core/findings.md` 报给人判断
-- [ ] 3.7 `bash bin/test/run.sh` 全绿
+- [x] 3.1 写 `bin/test/run.sh`：提供 `assert_eq <期望> <实际> <用例名>`，遍历 `bin/test/core-*.sh`，统计通过/失败，有失败则非零退出（bash 3.2 兼容，零外部依赖）
+- [x] 3.2 `bin/test/core-format.sh`：覆盖 `format.sh` 全部函数。必含边界 —— `rate_pct` 分母为 `0` / 为空 → 空串；`int` / `pct` 空输入 → 空串；`pct` 整数与小数两种输出形态；`_until_epoch` 输入 `—` 与不可解析串 → 空；`win_compact` / `win_full` 止点为空 → 降级形态。**用例内固定 `TZ`**（design：`_fmt` 读环境 TZ）
+- [x] 3.3 `bin/test/core-verdict.sh`：`traffic_light` 空值与「无法计算」不判定 → 空串（这是「空值不告警」口径的根）；红/黄/绿三档各一例含边界值；`delta_cell` 覆盖 `lower_better` / `higher_better` / `neutral` 三方向 × 正/负/零增量，验证「箭头跟数值、颜色跟好坏」；`stale_days` 未停更 → 空、已停更 → 天数
+- [x] 3.4 `bin/test/core-version.sh`：`pick_newest` 按版本号而非会话量排序（含 `1.5.10` vs `1.5.9` 这类 `sort -V` 才对的用例）；`union_versions` 去重、排序、上限截断；`pick_top_sessions` 按会话量；`ver_field` 命中与未命中；**单版本可比时的退化情形**
+- [ ] 3.5 ⏸ 未做（`cache_verdict` / `doc_keep_predicate` 尚未上移核心层，见 2.4）：`bin/test/core-cache.sh`（design D10）：`cache_verdict` 覆盖 强制标志=1 / 文件不存在 / 计数变大 / 计数相等 四种入参组合；**并单列一条 `本次 < 上次`** —— **该缺陷已由 change `crash-fact-cache-freshness` 于 2026-08-22 修复**（抓取判定与记录更新拆开、`latest_event` 取 max）。用例直接钉住**修复后的正确行为**：`本次 < 上次` → 抓取判定为 `skip`，但观测字段仍刷新。⛔ 不要再写「已知缺陷」注释——那是修复前的状态。`doc_keep_predicate` 覆盖：日期键在 cutoff 内保留 / 超出丢弃 / **无日期后缀的固定键（`index` / `ledger`）无条件保留** —— 最后这条正是 2026-08-18 生产误删的那个场景（`deliver.sh:249-251` 注释），是本 change 里最高价值的一条用例
+- [x] 3.6 期望值从行为意图推导，不从当前输出反抄（design 风险表末项）。若某用例的意图值与实际输出不符，**不改代码也不改用例**，记入 `openspec/changes/crash-perf-functional-core/findings.md` 报给人判断
+- [x] 3.7 `bash bin/test/run.sh` 全绿
 
 ## 4. 闸门：把约束变成退出码
 
 - [x] 4.1 `check-scripts.sh` 改为递归扫描 `find "$SELF_DIR" -name '*.sh'`（**当前只扫 `$SELF_DIR/*.sh`，不改则 `bin/lib/` 与 `bin/test/` 下的新代码完全不受检查，含那条多字节变量 lint**）
-- [ ] 4.2 加依赖方向 lint：`bin/lib/core/*.sh` 中匹配 `^[^#]*(\bbq\b|lark-cli|claude |curl |firebase|\$STATE|\$ROOT|\$\{STATE|\$\{ROOT)` 即失败，输出文件、行号、命中内容
-- [ ] 4.3 加重复定义检测：扫全部 `bin/**/*.sh` 行首函数定义按名聚合，≥2 个文件即失败；豁免清单以「函数名:文件名 + 一行理由」的数据形式集中在脚本内（`fail:deliver.sh` 独立进程语义不同、`say:install.sh` 与 `say:update.sh` 装机链路本次未合并）
-- [ ] 4.4 加测试闸：调用 `bin/test/run.sh`，失败则整体非零
-- [ ] 4.5 接入 shellcheck：未安装时打印一行跳过提示且**不影响退出码**；已安装则计入退出码。按 design Open Questions —— 若首次接入报出的既有问题超过约 50 项，本 change 内改为仅提示不失败，并在 `findings.md` 记录数量与另开 change 的建议
-- [ ] 4.6 **自检的自检**：在 `bin/lib/core/` 临时放一个含 `$STATE` 的文件，确认 4.2 报错；临时在第二个脚本里复制一个已有函数名，确认 4.3 报错；临时改坏一个纯函数，确认 4.4 报错。三项各确认后删除临时改动
-- [ ] 4.7 `bash bin/check-scripts.sh` 全绿
+- [x] 4.2 加依赖方向 lint：`bin/lib/core/*.sh` 中匹配 `^[^#]*(\bbq\b|lark-cli|claude |curl |firebase|\$STATE|\$ROOT|\$\{STATE|\$\{ROOT)` 即失败，输出文件、行号、命中内容
+- [x] 4.3 加重复定义检测：扫全部 `bin/**/*.sh` 行首函数定义按名聚合，≥2 个文件即失败；豁免清单以「函数名:文件名 + 一行理由」的数据形式集中在脚本内（`fail:deliver.sh` 独立进程语义不同、`say:install.sh` 与 `say:update.sh` 装机链路本次未合并）
+- [x] 4.4 加测试闸：调用 `bin/test/run.sh`，失败则整体非零
+- [x] 4.5 接入 shellcheck（本机未安装 → 走「跳过并提示」分支，已验证不影响退出码；**已安装时的实际告警量仍未知**）：未安装时打印一行跳过提示且**不影响退出码**；已安装则计入退出码。按 design Open Questions —— 若首次接入报出的既有问题超过约 50 项，本 change 内改为仅提示不失败，并在 `findings.md` 记录数量与另开 change 的建议
+- [x] 4.6 **自检的自检**：在 `bin/lib/core/` 临时放一个含 `$STATE` 的文件，确认 4.2 报错；临时在第二个脚本里复制一个已有函数名，确认 4.3 报错；临时改坏一个纯函数，确认 4.4 报错。三项各确认后删除临时改动
+- [x] 4.7 `bash bin/check-scripts.sh` 全绿
 - [ ] 4.8 单独提交
 
 ## 5. 文档与收尾
 
-- [ ] 5.1 `CLAUDE.md` 的「常用命令」增 `bash bin/test/run.sh`；并说明 `check-scripts.sh` 已从两项检查扩为五项（原文明确写着「是**两项**检查」，不改会与实际不符）
-- [ ] 5.2 `CLAUDE.md` 的「架构要点」增一节：分层与依赖方向（核心层无副作用、外壳层编排、lint 如何强制），并写明**渲染层拆分与表名参数化是刻意的 Non-goal**及其理由，避免下一个读者以为是遗漏
+- [x] 5.1 `CLAUDE.md` 的「常用命令」增 `bash bin/test/run.sh`；并说明 `check-scripts.sh` 已从两项检查扩为五项（原文明确写着「是**两项**检查」，不改会与实际不符）
+- [x] 5.2 `CLAUDE.md` 的「架构要点」增一节：分层与依赖方向（核心层无副作用、外壳层编排、lint 如何强制），并写明**渲染层拆分与表名参数化是刻意的 Non-goal**及其理由，避免下一个读者以为是遗漏
 - [ ] 5.3 `CLAUDE.md` 记下 8 个跨进程边界（`alert.sh` / `scan-fix-commits.sh` / `fetch-snapshot-bq.sh` / `fetch-snapshot.sh` / `render-ledger.sh` / `split-fix-list.py` / `md2docx.py` / `deliver.sh`）及其统一形状「`export` 环境变量 + argv 进，文件 + 退出码出」，并指向 `bin/test/artifacts.sh` 的产物清单（design D9）；同时登记一处**已知未修缺口**：`fetch-snapshot.sh:80-135` 用自然语言在 prompt 里复述了 `fetch-snapshot-bq.sh` 的同一套缓存策略，重复定义检测抓不到、模型那份不可断言（design D10）
-- [ ] 5.4 `bin/INSTALL.md` 说明 bats / shellcheck 均为可选、生产机无需安装
+- [x] 5.4 `bin/INSTALL.md` 说明 bats / shellcheck 均为可选、生产机无需安装
 - [ ] 5.5 最终验收：`bash bin/check-scripts.sh` → `bash bin/test/run.sh` → `bin/test/baseline.sh` 跑 L1 与 L2（走快照回滚协议），与 0.5/0.6 基线三层 diff 为空
 - [ ] 5.6 若 `findings.md` 有条目（3.6 的意图不符项、4.5 的 shellcheck 数量），在归档前逐条与人确认处置

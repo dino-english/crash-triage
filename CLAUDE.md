@@ -101,7 +101,48 @@ sqlite3 ~/.hermes/cron/executions.db \
 
 没有单元测试。验收链：`check-scripts.sh` → DRY RUN → 抽查 2–3 个数值与 Firebase 控制台对得上（[bin/INSTALL.md](bin/INSTALL.md) §6）。
 
-⛔ `check-scripts.sh` 是**两项**检查：`bash -n` 语法 + **`$VAR` 紧邻多字节字符**。不能用 `bash -n` 代替——第二项才是反复踩的那个坑（`"${miss:+（$miss）}"` 在 `set -u` 下报 `miss?: unbound variable`，bash 把全角括号的字节并进了变量名）。
+⛔ `check-scripts.sh` 是**六项**检查（2026-08-23 起，change `crash-perf-functional-core`）：
+
+1. `bash -n` 语法
+2. **`$VAR` 紧邻多字节字符** —— 反复踩的那个坑（`"${miss:+（$miss）}"` 在 `set -u` 下报
+   `miss?: unbound variable`，bash 把全角括号的字节并进了变量名）
+3. `md2docx.py` 语法
+4. **依赖方向 lint** —— `bin/lib/core/` 出现 `bq` / `lark-cli` / `$STATE` / `$ROOT` 即失败
+5. **重复定义检测** —— 同名函数出现在两个及以上文件即失败（豁免清单以数据形式集中在脚本内）
+6. **纯函数断言** —— `bin/test/run.sh`，39 条
+
+外加可选的 ShellCheck（未安装则跳过，不影响退出码——生产机不该为开发期工具多一项装机步骤）。
+
+⚠️ **必须递归扫描 `bin/**/*.sh`**。早先只扫 `bin/*.sh`，于是 `bin/lib/` 与 `bin/test/` 下的新代码
+**完全不受任何检查**——实测第一个放进 `bin/test/` 的脚本就带着 `$SCRIPT（` 通过了自检、运行时才炸；
+改递归后立刻抓出 6 处。
+
+### 分层与依赖方向（2026-08-23，change `crash-perf-functional-core`）
+
+采用 **Functional Core / Imperative Shell**，取 Clean Architecture 的依赖规则、不取 Ports & Adapters
+（bash 无类型系统兜底，接口反转只有成本没有强制力）。
+
+```
+bin/lib/core/{format,verdict,version}.sh   纯函数：格式化 / 阈值判定 / 版本挑选
+bin/lib/common.sh                          外壳层共享：step / alert_once / err_stack / on_err / fail
+bin/lib.sh                                 编排辅助：run_with_timeout / cleanup_old_runs
+bin/crash-{daily,weekly}.sh                编排（imperative shell）
+```
+
+- **核心层不依赖任何全局**，加载顺序任意，可在 `env -i` 空环境中直接调用——这是「可测」的操作性定义。
+  依赖当前时刻的函数改为接收基准时刻作参数（`win_compact` / `win_full` / `stale_days` 首参是 epoch）。
+- **核心层缺失时直接失败不退化**：`lib.sh` / `common.sh` 有回落分支，但阈值判定与格式化只有这一份实现，
+  退化版本会**静默产出错误数字**，比直接失败危险得多。
+- **依赖规则靠 grep lint 强制**（检查项 4）。bash 没有编译器，这是它在这门语言里唯一能落地的形式。
+- ⛔ **渲染层拆分与表名参数化是刻意的 Non-goal**，不是遗漏：三种渲染共享 `cell()` / `delta_of()` 的判定，
+  拆分需要逐段对照，与「零行为变更」的验收目标冲突；表名硬编码 16 处则属于投机抽象（12 个月内不接第三个 app）。
+
+**等价性验收**（`bin/test/`）：三层产物 diff —— 中间产物（取数层）/ 投递产物（渲染层）/ 基准文件（状态写入）。
+`baseline.sh` 走**快照回滚协议**：不还原则 L2 的基线提升会让第二次跑批看到零变化、`issues/` 缓存会从冷变热走不同分支。
+⚠️ 活数据上 diff 永远不为空（滚动窗口锚在跑批时刻，实测 6 分钟内 sessions 就变），故用
+`CRASH_REPORT_BQ_CACHE=<目录>` 按 SQL 哈希冻结数据——**生产禁用**。
+⚠️ 该缓存只包住 `bqq`（L1 的助手），`crash-weekly.sh` 有 9 处直连 `bq query` 绕过它，
+故 L2 目前只能做「数字盲比对」验结构。
 
 ## 架构要点
 

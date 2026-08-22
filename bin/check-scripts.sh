@@ -29,5 +29,58 @@ for f in sorted(pathlib.Path(sys.argv[1]).rglob('*.sh')):
 sys.exit(bad)
 PY
 python3 -c "import ast; ast.parse(open('$SELF_DIR/md2docx.py').read())" 2>/dev/null || { echo "❌ md2docx.py 语法"; rc=1; }
+
+# ── 3. 依赖方向 lint（change crash-perf-functional-core，design D5）───────────
+# bash 没有编译器，这是「内层不知道外层」这条依赖规则在这门语言里**唯一能落地的强制形式**。
+# 核心层出现取数 / 投递 / 模型调用 / 网络，或引用运行目录、状态目录变量，即失败。
+# 跳过整行注释；行内注释的假阳性是刻意接受的代价——**假阴性（核心层偷读 $STATE）才是真风险**。
+if [ -d "$SELF_DIR/lib/core" ]; then
+  hits="$(grep -nE '^[^#]*(\bbq\b|lark-cli|claude |curl |firebase|\$STATE|\$ROOT|\$\{STATE|\$\{ROOT)' \
+            "$SELF_DIR"/lib/core/*.sh 2>/dev/null || true)"
+  if [ -n "$hits" ]; then
+    echo "❌ 核心层出现外层依赖（应为纯函数，见 bin/lib/core/*.sh 顶部说明）："
+    printf '%s\n' "$hits" | sed 's|^'"$SELF_DIR"'/|   |'
+    rc=1
+  fi
+fi
+
+# ── 4. 重复定义检测 ──────────────────────────────────────────────
+# 同名函数出现在两个及以上文件即失败。豁免清单以**数据形式**集中在下面，
+# 每项带一行理由——散落的 if 判断会让清单悄悄长大而无人察觉。
+#   fail:deliver.sh      独立进程，不写 health 文件（投递失败不改变生成脚本的健康状态），语义不同
+#   fail:crash-daily.sh  common.sh 缺失时的回落分支
+#   fail:crash-weekly.sh 同上
+#   say:install.sh       装机链路，与流水线运行时无关，本次未合并（不是「不该合并」）
+#   say:update.sh        同上
+dup="$(
+  { for f in $(find "$SELF_DIR" -name '*.sh' -type f | sort); do
+      grep -oE '^[a-zA-Z_][a-zA-Z0-9_]*\(\)' "$f" | tr -d '()' | sed "s|\$|	${f#"$SELF_DIR"/}|"
+    done; } | grep -vE '^(fail	(deliver|crash-daily|crash-weekly)\.sh|say	(install|update)\.sh)$' \
+  | awk -F'\t' '{n[$1]=n[$1]" "$2; c[$1]++} END{for(k in c) if(c[k]>1) print "   " k ": " n[k]}' | sort
+)"
+if [ -n "$dup" ]; then
+  echo "❌ 同名函数在多个文件中重复定义（共享函数应收口到 bin/lib/）："
+  printf '%s\n' "$dup"
+  rc=1
+fi
+
+# ── 5. 纯函数断言 ────────────────────────────────────────────────
+if [ -x "$SELF_DIR/test/run.sh" ]; then
+  bash "$SELF_DIR/test/run.sh" || rc=1
+fi
+
+# ── 6. ShellCheck（可选依赖）─────────────────────────────────────
+# 生产机是无人值守的 Mac mini，不该为开发期工具多一项装机步骤。
+# 未安装 → 跳过并提示，**不影响退出码**；已安装 → 计入。
+if command -v shellcheck >/dev/null 2>&1; then
+  sc="$(find "$SELF_DIR" -name '*.sh' -type f -print0 | xargs -0 shellcheck -S warning 2>&1 || true)"
+  if [ -n "$sc" ]; then
+    echo "⚠️ ShellCheck 报告（首 20 行）："; printf '%s\n' "$sc" | head -20
+    SC_COUNT="$(printf '%s\n' "$sc" | grep -cE '^In .* line [0-9]+:' || true)"
+    echo "   共 ${SC_COUNT} 处。首次接入若数量大，先记录再分批清理，不阻塞本轮（见 change findings）"
+  fi
+else
+  echo "ℹ️ 未安装 shellcheck，跳过静态检查（可选依赖，不影响退出码）"
+fi
 [ $rc -eq 0 ] && echo "✅ 全部通过"
 exit $rc
