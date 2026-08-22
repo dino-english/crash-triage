@@ -195,6 +195,13 @@ else
   run_with_timeout() { local s="$1"; shift; "$@"; }   # 无 lib.sh 时退化为直接执行
   cleanup_old_runs() { :; }                            # 无 lib.sh 时跳过清理，不阻塞主流程
 fi
+# 核心层（纯函数）。不依赖任何全局，加载顺序任意；缺失则整跑失败——
+# 这些是阈值判定与格式化的唯一实现，退化版本会静默产出错误数字，比直接失败危险得多。
+for _c in format verdict version; do
+  # shellcheck disable=SC1090
+  . "$ROOT/bin/lib/core/${_c}.sh" || { echo "❌ 核心层缺失：bin/lib/core/${_c}.sh" >&2; exit 1; }
+done
+
 BQ_TIMEOUT="${BQ_TIMEOUT:-180}"      # 单条查询上限；正常查询 3s 内返回，180s 已是极宽松
 mkdir -p "$STATE/logs"
 BQ_ERRLOG="$STATE/logs/bq-stderr-$TS.log"
@@ -339,12 +346,6 @@ state_text() { # $1=state $2=表整体最新时间戳 → 单元格文案
 
 # ── 数值格式化 ────────────────────────────────────────
 csv() { [ -s "$1" ] && cut -d, -f"$2" "$1" | head -1 || echo ""; }
-# BigQuery 的 ROUND 返回浮点（251.0 / 0.00），卡片上要读得快就得去掉无意义小数位
-int()  { [ -n "$1" ] && printf '%.0f' "$1" || echo ""; }               # 251.0 → 251
-pct()  { [ -n "$1" ] && awk -v v="$1" 'BEGIN{printf (v==int(v)?"%.0f":"%.1f"), v}' || echo ""; }  # 0.00→0 · 73.5→73.5
-# 崩溃率天然是千分位量级，固定两位小数（2/1017→0.20），与 pct() 的「整数去零」口径区分
-rate_pct() { [ -n "$1" ] && [ -n "$2" ] && [ "$2" != "0" ] \
-  && awk -v e="$1" -v s="$2" 'BEGIN{printf "%.2f", e/s*100}' || echo ""; }
 daily_rate() { rate_pct "$1" "$2"; }
 day_ago() { date -v-"${1:-0}"d +%Y-%m-%d 2>/dev/null; }   # BSD date（macOS）：N 天前日期
 
@@ -356,43 +357,7 @@ day_ago() { date -v-"${1:-0}"d +%Y-%m-%d 2>/dev/null; }   # BSD date（macOS）�
 # 注意起点是「查询下界」不是「首条数据时间」，故措辞一律用「窗口」不用「数据自」。
 RUN_EPOCH="$(date +%s)"
 TZ_LABEL="$(date '+%z')"
-_fmt() { if [ -n "${2:-}" ]; then TZ="$2" date -r "$1" '+%m-%d %H:%M' 2>/dev/null
-         else date -r "$1" '+%m-%d %H:%M' 2>/dev/null; fi; }
-# "2026-08-16 06:59 UTC" → epoch；解析失败返回空（调用方原样回退，不炸）
-_until_epoch() { local s="${1:-}"; s="${s% UTC}"
-  [ -n "$s" ] && [ "$s" != "—" ] || return 0
-  TZ=UTC date -j -f '%Y-%m-%d %H:%M' "$s" '+%s' 2>/dev/null || true; }
-# 卡片用：08-15 17:22 → 08-16 14:59 (+08) · 08-15 09:22 → 08-16 06:59 UTC
-win_compact() {
-  local se ue; se=$(( RUN_EPOCH - ${1:-0} * 86400 )); ue="$(_until_epoch "${2:-}")"
-  [ -n "$ue" ] || { printf '%s → —' "$(_fmt "$se")"; return 0; }
-  printf '%s → %s (%s) · %s → %s UTC' "$(_fmt "$se")" "$(_fmt "$ue")" \
-    "${TZ_LABEL%00}" "$(_fmt "$se" UTC)" "$(_fmt "$ue" UTC)"
-}
-# 文档用：08-15 09:22 UTC / 08-15 17:22 +0800 → 08-16 06:59 UTC / 08-16 14:59 +0800
-win_full() {
-  local se ue; se=$(( RUN_EPOCH - ${1:-0} * 86400 )); ue="$(_until_epoch "${2:-}")"
-  [ -n "$ue" ] || { printf '%s UTC / %s %s → —' "$(_fmt "$se" UTC)" "$(_fmt "$se")" "$TZ_LABEL"; return 0; }
-  printf '%s UTC / %s %s → %s UTC / %s %s' \
-    "$(_fmt "$se" UTC)" "$(_fmt "$se")" "$TZ_LABEL" \
-    "$(_fmt "$ue" UTC)" "$(_fmt "$ue")" "$TZ_LABEL"
-}
 
-# 统一阈值红绿灯（R3）：>红 → red（🔴）；>黄 → yellow（🟡，待对齐）；否则 green（🟢）。
-# 空值 / 「无法计算」→ 空串（不判定，避免误告警）。
-traffic_light() {
-  local v="$1" red="$2" yellow="$3"
-  [ -n "$v" ] && [ "$v" != "无法计算" ] || { echo ""; return; }
-  awk -v v="$v" -v r="$red" -v y="$yellow" 'BEGIN{ if(v>r) print "red"; else if(v>y) print "yellow"; else print "green" }'
-}
-cell_color() { # $1=判定值 $2=红 $3=黄 $4=单元格内容
-  local t; t="$(traffic_light "$1" "$2" "$3")"
-  case "$t" in
-    red)    printf '<font color=red>%s</font>' "$4";;
-    yellow) printf '<font color=orange>%s</font>' "$4";;
-    *)      printf '%s' "$4";;
-  esac
-}
 # 告警行：只由**最新版**触发（design D8）。$1=指标名 $2=iOS最新版值 $3=Android最新版值 $4=红 $5=黄 $6=单位
 #
 # 摘要行必须标版本、且区分「没超阈值」与「没算出来」：
@@ -454,35 +419,6 @@ ALERTS=""
 add_alert() { [ -n "$1" ] && ALERTS="${ALERTS:+$ALERTS
 }$1"; return 0; }
 
-# ── 版本间对比（本次核心可读性诉求）────────────────────────────────
-# 「最新版 − 上一版」。方向沿用仓库约定：数值变大 = 变差 = ↑（会话数除外，放量越多越好）。
-# 任一端缺数据 → 「—」，绝不拿 0 顶替（0 和「没数据」在这里是完全不同的结论）。
-delta_cell() { # $1=最新版值 $2=上一版值 $3=单位(pp|ms|n) $4=方向(lower_better|higher_better|neutral)
-  local unit="${3:-n}" dir="${4:-lower_better}" txt worse arrow
-  { [ -n "$1" ] && [ -n "$2" ] && [ "$1" != "无法计算" ] && [ "$2" != "无法计算" ]; } || { printf '—'; return 0; }
-  txt="$(awk -v c="$1" -v o="$2" -v u="$unit" 'BEGIN{
-    d=c-o; sign=(d>0)?"+":"";
-    if(u=="ms")      printf "%s%dms", sign, d;
-    else if(u=="pp") printf "%s%.2fpp", sign, d;
-    else             printf "%s%g", sign, d;
-  }')"
-  # neutral：只给方向不判好坏（放量进度这类指标，红绿会暗示「新版会话少 = 出问题了」，并不成立）
-  worse="$(awk -v c="$1" -v o="$2" -v dir="$dir" 'BEGIN{
-    d=c-o;
-    if(d==0 || dir=="neutral"){print "flat"}
-    else if(dir=="higher_better"){ print (d>0)?"better":"worse" }
-    else { print (d>0)?"worse":"better" }
-  }')"
-  # 箭头跟**数值方向**（涨=↑），颜色跟**好坏**（红=变差）——两者分开表达；
-  # 合并会让「会话数 -51」这类「越大越好」的指标渲染成「-51 ↑」，读起来自相矛盾。
-  arrow="$(awk -v c="$1" -v o="$2" 'BEGIN{ d=c-o; print (d>0)?"↑":(d<0)?"↓":"" }')"
-  [ -n "$arrow" ] && txt="$txt $arrow"
-  case "$worse" in
-    worse)  printf '<font color=red>%s</font>' "$txt";;
-    better) printf '<font color=green>%s</font>' "$txt";;
-    *)      printf '%s' "$txt";;
-  esac
-}
 
 # 环比 DoD/WoW（同版本，进日报文档；卡片只出版本间对比，见 design D7）
 _dod_wow() { # $1=今日值 $2=昨日值 $3=D-7值 $4=单位(pp|ms) $5=日期标注(可空)
@@ -554,16 +490,8 @@ table_exists "$AND_PERF_TBL"  || AND_PERF_TBL=""
 IOS_CRASH_MAX="$(table_max "$IOS_CRASH_TBL")"; AND_CRASH_MAX="$(table_max "$AND_CRASH_TBL")"
 IOS_PERF_MAX="$(table_max "$IOS_PERF_TBL")";   AND_PERF_MAX="$(table_max "$AND_PERF_TBL")"
 IOS_SESS_MAX="$(table_max "$SESS_IOS")";       AND_SESS_MAX="$(table_max "$SESS_AND")"
-# 表整体停更 = table_max 落在窗口起点之前（窗口内必然 0 行）。只用已缓存的 MAX 值换算，不多查 BigQuery。
-stale_days() { # $1=表 MAX 时间戳文本 $2=窗口天数 → 停更天数（未停更 / 无法解析 → 空）
-  local e
-  e="$(_until_epoch "$1")"
-  [ -n "$e" ] || { echo ""; return 0; }
-  [ "$e" -lt "$(( RUN_EPOCH - $2 * 86400 ))" ] || { echo ""; return 0; }
-  echo "$(( (RUN_EPOCH - e) / 86400 ))"
-}
-IOS_PERF_STALE="$(stale_days "$IOS_PERF_MAX" "$PERF_DAYS")"
-AND_PERF_STALE="$(stale_days "$AND_PERF_MAX" "$PERF_DAYS")"
+IOS_PERF_STALE="$(stale_days "$RUN_EPOCH" "$IOS_PERF_MAX" "$PERF_DAYS")"
+AND_PERF_STALE="$(stale_days "$RUN_EPOCH" "$AND_PERF_MAX" "$PERF_DAYS")"
 perf_stale_of() { [ "$1" = ios ] && printf '%s' "$IOS_PERF_STALE" || printf '%s' "$AND_PERF_STALE"; }
 perf_max_of()   { [ "$1" = ios ] && printf '%s' "$IOS_PERF_MAX"   || printf '%s' "$AND_PERF_MAX"; }
 newest_ts() { printf '%s\n%s\n' "$1" "$2" | grep -v '^$' | sort -r | head -1 || true; }
@@ -578,14 +506,6 @@ resolve_versions() { # $1=sessions表 → CSV「version,sessions,devices」（�
   bqq csv "$(sed -e "s|{{TABLE}}|$1|g" -e "s|{{DAYS}}|$DAYS|g" -e "s|{{MIN_SESSIONS}}|$MIN_SESSIONS|g" \
     "$SQL_DIR/latest-versions.sql")" | tail -n +2 || true
 }
-# 最新 N 个版本（新→旧）。版本号语义排序交给 sort -V（BigQuery 无原生支持，design D3）。
-pick_newest() { printf '%s\n' "$1" | grep -v '^$' | cut -d, -f1 | sort -rV -u | head -"$2" || true; }
-# 会话量 top2（主力版本）。与「最新 N 版」不重合时补列，避免大盘版本从日报消失（design D11）。
-pick_top_sessions() { printf '%s\n' "$1" | grep -v '^$' | sort -t, -k2,2 -nr | head -2 | cut -d, -f1 || true; }
-# 列集合 = 最新 N 版 ∪ 主力 2 版，按版本号新→旧，上限 MAX_VERSION_COLS
-union_versions() { printf '%s\n%s\n' "$1" "$2" | grep -v '^$' | sort -rV -u | head -"$MAX_VERSION_COLS" || true; }
-# 某版本在 CSV 里的会话数 / 设备数
-ver_field() { printf '%s\n' "$1" | grep -v '^$' | awk -F, -v v="$2" -v f="$3" '$1==v{print $f; exit}' || true; }
 
 IOS_VER_CSV="$(resolve_versions "$SESS_IOS")"
 AND_VER_CSV="$(resolve_versions "$SESS_AND")"
@@ -593,8 +513,8 @@ IOS_NEWEST="$(pick_newest "$IOS_VER_CSV" "$VERSION_COUNT")"
 AND_NEWEST="$(pick_newest "$AND_VER_CSV" "$VERSION_COUNT")"
 IOS_TOPSESS="$(pick_top_sessions "$IOS_VER_CSV")"
 AND_TOPSESS="$(pick_top_sessions "$AND_VER_CSV")"
-IOS_COLS="$(union_versions "$IOS_NEWEST" "$IOS_TOPSESS")"
-AND_COLS="$(union_versions "$AND_NEWEST" "$AND_TOPSESS")"
+IOS_COLS="$(union_versions "$IOS_NEWEST" "$IOS_TOPSESS" "$MAX_VERSION_COLS")"
+AND_COLS="$(union_versions "$AND_NEWEST" "$AND_TOPSESS" "$MAX_VERSION_COLS")"
 # 最新版 / 上一版（告警与版本间对比的两端）
 IOS_V1="$(printf '%s\n' "$IOS_NEWEST" | sed -n 1p)"; IOS_V2="$(printf '%s\n' "$IOS_NEWEST" | sed -n 2p)"
 AND_V1="$(printf '%s\n' "$AND_NEWEST" | sed -n 1p)"; AND_V2="$(printf '%s\n' "$AND_NEWEST" | sed -n 2p)"
@@ -1324,9 +1244,9 @@ SESS_FALLBACK_NOTE=""
 { [ "$SESS_IOS_FALLBACK" = 1 ] || [ "$SESS_AND_FALLBACK" = 1 ]; } && SESS_FALLBACK_NOTE="；⚠️ 放量回退批量表（可能停更）"
 NOTE_MD="$(printf '本报告只统计最新 %s 个版本（会话量 top2 不在其中时补「主力」列）；跨版本合计值不再输出。\n取数区间 性能 %sd：%s\n取数区间 放量 %sd：%s\n取数区间 崩溃 %sd：%s%s\n崩溃=BigQuery 事件级（含已关闭 issue）· 崩溃率=事件数/会话数 · Crash-free=会话口径（**与控制台的用户口径不可比**，且为下界估计）· 卡死信号行**双端指标不同不可比**：Android=ANR 率（${CRASH_DAYS}d，与 Play 门槛口径亦不同），iOS=冻结帧率（${PERF_DAYS}d，系统层无 ANR 概念）· 非致命双端不可比 · 慢帧>16ms / 冻结>700ms 为帧级占比\n格内对比 = 最新版 − 上一版（箭头跟数值方向、颜色跟好坏）；表头括号内为该版本的 **会话数/设备数**（设备数才是「多少人在用」，会话数会被同一人反复启动放大）；影响集中行取该端事件最多的版本；同版本 DoD/WoW 与完整 13 项指标见日报文档' \
   "$VERSION_COUNT" \
-  "$PERF_DAYS"  "$(win_compact "$PERF_DAYS"  "$DATA_UNTIL")" \
-  "$DAYS"       "$(win_compact "$DAYS"       "$ADOPTION_UNTIL")" \
-  "$CRASH_DAYS" "$(win_compact "$CRASH_DAYS" "$CRASH_UNTIL")" "$SESS_FALLBACK_NOTE")"
+  "$PERF_DAYS"  "$(win_compact "$RUN_EPOCH" "$TZ_LABEL" "$PERF_DAYS" "$DATA_UNTIL")" \
+  "$DAYS"       "$(win_compact "$RUN_EPOCH" "$TZ_LABEL" "$DAYS" "$ADOPTION_UNTIL")" \
+  "$CRASH_DAYS" "$(win_compact "$RUN_EPOCH" "$TZ_LABEL" "$CRASH_DAYS" "$CRASH_UNTIL")" "$SESS_FALLBACK_NOTE")"
 
 CARD_JSON="$(jq -n \
   --arg hc "$HEADER_COLOR" --arg ht "$HEADER_TITLE" --arg sm "$STATUS_MD" \
@@ -1740,9 +1660,9 @@ REPORT="$STATE/reports/$DAY-daily.md"
 {
   printf '# 崩溃 & 性能日报 · %s\n\n' "$DAY"
   printf '> **本报告只统计最新 %s 个版本**：iOS %s · Android %s\n' "$VERSION_COUNT" "$IOS_VER_SUM" "$AND_VER_SUM"
-  printf '> 性能 %sd：**%s**\n' "$PERF_DAYS" "$(win_full "$PERF_DAYS" "$DATA_UNTIL")"
-  printf '> 放量 %sd：**%s**\n' "$DAYS" "$(win_full "$DAYS" "$ADOPTION_UNTIL")"
-  printf '> 崩溃 %sd：**%s**\n' "$CRASH_DAYS" "$(win_full "$CRASH_DAYS" "$CRASH_UNTIL")"
+  printf '> 性能 %sd：**%s**\n' "$PERF_DAYS" "$(win_full "$RUN_EPOCH" "$TZ_LABEL" "$PERF_DAYS" "$DATA_UNTIL")"
+  printf '> 放量 %sd：**%s**\n' "$DAYS" "$(win_full "$RUN_EPOCH" "$TZ_LABEL" "$DAYS" "$ADOPTION_UNTIL")"
+  printf '> 崩溃 %sd：**%s**\n' "$CRASH_DAYS" "$(win_full "$RUN_EPOCH" "$TZ_LABEL" "$CRASH_DAYS" "$CRASH_UNTIL")"
   printf '> iOS %s · Android %s\n' "$IOS_TOP_NOTE" "$AND_TOP_NOTE"
   printf '> 窗口起点 = 本次跑批时刻 − N 天（SQL 下界）；终点 = 该表实际取到的最新数据，两者之差即数据滞后。\n\n'
 

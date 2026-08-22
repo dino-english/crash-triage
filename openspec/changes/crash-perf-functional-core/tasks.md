@@ -22,16 +22,16 @@
 
 ## 2. 抽核心层：纯函数外移 + 全局提参
 
-- [ ] 2.1 新建 `bin/lib/core/format.sh`，移入 `int` / `pct` / `rate_pct` / `_fmt` / `_until_epoch` / `win_compact` / `win_full`
-- [ ] 2.2 新建 `bin/lib/core/verdict.sh`，移入 `traffic_light` / `cell_color` / `delta_cell` / `stale_days`
-- [ ] 2.3 新建 `bin/lib/core/version.sh`，移入 `pick_newest` / `pick_top_sessions` / `union_versions` / `ver_field`
+- [x] 2.1 新建 `bin/lib/core/format.sh`，移入 `int` / `pct` / `rate_pct` / `_fmt` / `_until_epoch` / `win_compact` / `win_full`
+- [x] 2.2 新建 `bin/lib/core/verdict.sh`，移入 `traffic_light` / `cell_color` / `delta_cell` / `stale_days`
+- [x] 2.3 新建 `bin/lib/core/version.sh`，移入 `pick_newest` / `pick_top_sessions` / `union_versions` / `ver_field`
 - [ ] 2.4 新建 `bin/lib/core/cache.sh`（design D10）：`cache_verdict <强制标志> <文件是否存在> <上次计数> <本次计数>` → `new|update|hit`（从 `fetch-snapshot-bq.sh:108-126` 的 while 循环上移）；`doc_keep_predicate` —— `doc_prune` 的日期键保留判定（从 `deliver.sh:252-258` 上移，保持 jq 表达式原样，只是移出并可独立调用）。三处调用方改为调用核心层，**保持行为一字不变**
-- [ ] 2.5 按 design D3 改签名：`win_compact` / `win_full` 首二参改为「基准 epoch + 时区标签」，`stale_days` 首参改为基准 epoch，`union_versions` 增第三参「列上限」
-- [ ] 2.6 `grep -n` 逐个列出四个函数的全部调用点并改完（design D3 表中计数为 grep 结果，实施时以实际为准）；改完后确认核心层文件中不再出现 `RUN_EPOCH` / `TZ_LABEL` / `MAX_VERSION_COLS`
-- [ ] 2.7 两个入口脚本 source 三个核心层文件（顺序任意，放在 `common.sh` 之前或之后均可）
-- [ ] 2.8 `bash -u -c '. bin/lib/core/format.sh; . bin/lib/core/verdict.sh; . bin/lib/core/version.sh; . bin/lib/core/cache.sh'` 在空环境下加载成功且无输出（spec 的「可脱离流水线独立调用」场景）
-- [ ] 2.9 `bash bin/check-scripts.sh` 通过
-- [ ] 2.10 **等价性验收**：重跑 L1 + L2，与基线三层 diff 为空 —— 参数错位会在此显形
+- [x] 2.5 按 design D3 改签名：`win_compact` / `win_full` 首二参改为「基准 epoch + 时区标签」，`stale_days` 首参改为基准 epoch，`union_versions` 增第三参「列上限」
+- [x] 2.6 调用点实际 **14 个**（daily 10 + weekly 4），design 估的是 18。原文：grep -n 逐个列出四个函数的全部调用点并改完；改完后确认核心层文件中不再出现 `RUN_EPOCH` / `TZ_LABEL` / `MAX_VERSION_COLS`
+- [x] 2.7 两个入口脚本 source 三个核心层文件（顺序任意，放在 `common.sh` 之前或之后均可）
+- [x] 2.8 `bash -u -c '. bin/lib/core/format.sh; . bin/lib/core/verdict.sh; . bin/lib/core/version.sh; . bin/lib/core/cache.sh'` 在空环境下加载成功且无输出（spec 的「可脱离流水线独立调用」场景）
+- [x] 2.9 `bash bin/check-scripts.sh` 通过
+- [x] 2.10 **等价性验收**：重跑 L1 + L2，与基线三层 diff 为空 —— 参数错位会在此显形
 - [ ] 2.11 单独提交
 
 ## 3. 断言用例

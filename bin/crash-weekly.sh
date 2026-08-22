@@ -131,6 +131,12 @@ OUT_DIR="$STATE/runs/$DAY/L2/$TS"
 mkdir -p "$OUT_DIR"
 # shellcheck disable=SC1091
 . "$ROOT/bin/lib.sh"
+# 核心层（纯函数），与 L1 共用同一份实现——此前 _fmt / _until_epoch / win_* / stale_days
+# 在两个脚本里各存了一份，其中 stale_days 逐字节相同。
+for _c in format verdict version; do
+  # shellcheck disable=SC1090
+  . "$ROOT/bin/lib/core/${_c}.sh" || { echo "❌ 核心层缺失：bin/lib/core/${_c}.sh" >&2; exit 1; }
+done
 
 # 反扫提前到取数之前：它是纯 git、不依赖快照，而快照要用它填 fix_commit。
 LEDGER_DIR="$STATE/ledger"
@@ -380,22 +386,10 @@ fi
 # 只给趋势 / 可定位对象 / 下一步取证方向，不出根因与修复方案（硬约束，见 CLAUDE.md）。
 # 时间助手与 tbl_max 原本定义在下方「取数区间」段，为供本段的停更判定使用而前移（定义唯一，未复制）。
 RUN_EPOCH="$(date +%s)"
-_until_epoch() { local s="${1:-}"; s="${s% UTC}"
-  [ -n "$s" ] && [ "$s" != "—" ] || return 0
-  TZ=UTC date -j -f '%Y-%m-%d %H:%M' "$s" '+%s' 2>/dev/null || true; }
 tbl_max() { [ -n "$1" ] || { echo ""; return 0; }
   bq query --use_legacy_sql=false --format=csv \
     "SELECT FORMAT_TIMESTAMP('%Y-%m-%d %H:%M UTC', MAX(event_timestamp)) AS ts FROM \`$1\`" 2>/dev/null \
     | tail -n +2 | tail -1 || true; }
-# 表整体停更 = table_max 落在窗口起点之前（窗口内必然 0 行）。缺了这一判定，导出断更会被
-# 渲染成「该版本无数据」——新版刚发时的常态噪音，没人会追（2026-08-21：性能导出断 4 天无人察觉）。
-stale_days() { # $1=表 MAX 时间戳文本 $2=窗口天数 → 停更天数（未停更 / 无法解析 → 空）
-  local e
-  e="$(_until_epoch "$1")"
-  [ -n "$e" ] || { echo ""; return 0; }
-  [ "$e" -lt "$(( RUN_EPOCH - $2 * 86400 ))" ] || { echo ""; return 0; }
-  echo "$(( (RUN_EPOCH - e) / 86400 ))"
-}
 PERF_OK=0
 IOS_PERF_STALE=""; AND_PERF_STALE=""; IOS_PERF_MAX=""; AND_PERF_MAX=""   # bq 不可用时也要有定义（set -u）
 IOS_PERF_TBL="$PROJECT.firebase_performance.com_prime_dino_english_IOS"
@@ -453,8 +447,8 @@ if [ "$ADOPT_OK" = "1" ]; then
   }
   PERF_OK=1
   IOS_PERF_MAX="$(tbl_max "$IOS_PERF_TBL")"; AND_PERF_MAX="$(tbl_max "$AND_PERF_TBL")"
-  IOS_PERF_STALE="$(stale_days "$IOS_PERF_MAX" "$WEEK_DAYS")"
-  AND_PERF_STALE="$(stale_days "$AND_PERF_MAX" "$WEEK_DAYS")"
+  IOS_PERF_STALE="$(stale_days "$RUN_EPOCH" "$IOS_PERF_MAX" "$WEEK_DAYS")"
+  AND_PERF_STALE="$(stale_days "$RUN_EPOCH" "$AND_PERF_MAX" "$WEEK_DAYS")"
   [ -n "$IOS_PERF_STALE" ] && echo "  ⚠️ iOS 性能表已停更 ${IOS_PERF_STALE} 天（截至 ${IOS_PERF_MAX}）"
   [ -n "$AND_PERF_STALE" ] && echo "  ⚠️ Android 性能表已停更 ${AND_PERF_STALE} 天（截至 ${AND_PERF_MAX}）"
   while IFS= read -r v; do [ -n "$v" ] && perf_row "iOS" "$IOS_PERF_TBL" "$v"; done <<< "$IOS_TOP2_VERS"
@@ -476,21 +470,6 @@ fi
 # 终点 = sessions 活表实际取到的最新事件时间。起点是「查询下界」不是「首条数据时间」。
 # bq 不可用时整段降级为空字符串，周报照发（核心是 MCP 变化摘要）。
 TZ_LABEL="$(date '+%z')"
-_fmt() { if [ -n "${2:-}" ]; then TZ="$2" date -r "$1" '+%m-%d %H:%M' 2>/dev/null
-         else date -r "$1" '+%m-%d %H:%M' 2>/dev/null; fi; }
-win_compact() {
-  local se ue; se=$(( RUN_EPOCH - ${1:-0} * 86400 )); ue="$(_until_epoch "${2:-}")"
-  [ -n "$ue" ] || { printf '%s → —' "$(_fmt "$se")"; return 0; }
-  printf '%s → %s (%s) · %s → %s UTC' "$(_fmt "$se")" "$(_fmt "$ue")" \
-    "${TZ_LABEL%00}" "$(_fmt "$se" UTC)" "$(_fmt "$ue" UTC)"
-}
-win_full() {
-  local se ue; se=$(( RUN_EPOCH - ${1:-0} * 86400 )); ue="$(_until_epoch "${2:-}")"
-  [ -n "$ue" ] || { printf '%s UTC / %s %s → —' "$(_fmt "$se" UTC)" "$(_fmt "$se")" "$TZ_LABEL"; return 0; }
-  printf '%s UTC / %s %s → %s UTC / %s %s' \
-    "$(_fmt "$se" UTC)" "$(_fmt "$se")" "$TZ_LABEL" \
-    "$(_fmt "$ue" UTC)" "$(_fmt "$ue")" "$TZ_LABEL"
-}
 DATA_UNTIL="—"
 if [ "$ADOPT_OK" = "1" ]; then
   _MI="$(tbl_max "$PROJECT.firebase_sessions.com_prime_dino_english_IOS_REALTIME")"
@@ -498,8 +477,8 @@ if [ "$ADOPT_OK" = "1" ]; then
   DATA_UNTIL="$(printf '%s\n%s\n' "$_MI" "$_MA" | grep -v '^$' | sort -r | head -1 || true)"
   [ -n "$DATA_UNTIL" ] || DATA_UNTIL="—"
 fi
-WIN_COMPACT="$(win_compact "$WEEK_DAYS" "$DATA_UNTIL")"
-WIN_FULL="$(win_full "$WEEK_DAYS" "$DATA_UNTIL")"
+WIN_COMPACT="$(win_compact "$RUN_EPOCH" "$TZ_LABEL" "$WEEK_DAYS" "$DATA_UNTIL")"
+WIN_FULL="$(win_full "$RUN_EPOCH" "$TZ_LABEL" "$WEEK_DAYS" "$DATA_UNTIL")"
 echo "  取数区间 ${WEEK_DAYS}d：$WIN_COMPACT"
 
 # ── 6. 组装播报 ───────────────────────────────────────
