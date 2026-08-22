@@ -31,7 +31,7 @@ while IFS= read -r id; do
   if [ -n "$BASE" ] && [ -s "$BASE/$id.json" ]; then
     o="$(jq -r '.latest_event // ""' "$BASE/$id.json")"; c="$(jq -r '.latest_event // ""' "$f")"
     if [ -n "$o" ] && [[ "$c" < "$o" ]]; then
-      echo "❌ ${id:0:8} latest_event 倒退：$o → $c（必须取 max，窗口内 MAX 非单调）"; rc=1
+      echo "❌ ${id:0:8} latest_event 倒退：$o → ${c}（必须取 max，窗口内 MAX 非单调）"; rc=1
     fi
   fi
 done < <(jq -r '(.ios // [])[].id, (.android // [])[].id' "$SNAP" 2>/dev/null)

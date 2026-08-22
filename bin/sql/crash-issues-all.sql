@@ -23,5 +23,6 @@ FROM `{{TABLE}}`
 WHERE is_fatal = TRUE
   AND event_timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {{DAYS}} DAY)
 GROUP BY issue_id, issue_title
-ORDER BY events DESC
+  -- 并列时补确定性 tie-breaker，否则两次跑批行序会互换（见 crash-issues.sql 同处注释）
+ORDER BY events DESC, issue_id
 LIMIT {{LIMIT}}

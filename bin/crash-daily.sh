@@ -153,36 +153,25 @@ echo "=== 崩溃 & 性能日报 ${TS}（最新 $VERSION_COUNT 个版本口径）
 # ALERTED 防重复：fail() 已发过就不再由 trap 补发。
 # ⚠️ ALERTED 只在主进程有效：命令替换 / 管道都在子 shell 里跑，那里的 ALERTED=1 传不回来。
 # 2026-08-21 实测一次 grep 无匹配就在群里连发 8 张卡。去重改用文件标记，跑批开始时清一次。
-ALERTED=0
+# 五个共享函数（step / alert_once / err_stack / on_err / fail）已收口到 bin/lib/common.sh。
+# 两条链路仅有的差异用下面四个变量表达——此前为这三处不同，整整 5 个函数各存了一份。
 ALERT_FLAG="$STATE/.alerted-daily"
+ALERT_SOURCE="daily"
+ALERT_RUN_ID="$RUN_ID"
+HEALTH_FILE="$STATE/health-daily.json"
 rm -f "$ALERT_FLAG"
-CURRENT_STEP="启动"
-step() { CURRENT_STEP="$1"; echo "--- $1 ---"; }
-alert_once() { # $1=step $2=message $3=rc
-  [ "$ALERTED" = 1 ] && return 0
-  [ -e "$ALERT_FLAG" ] && return 0
-  ALERTED=1; : > "$ALERT_FLAG"
-  [ -x "$ROOT/bin/alert.sh" ] || return 0
-  # 输出一律走 stderr：ERR trap 可能在命令替换里触发，告警文案打到 stdout 会被当成取数结果
-  # captured 进变量（2026-08-21：`printf: 📣 已发送告警到 oc_…: invalid number`）。
-  "$ROOT/bin/alert.sh" --source daily --severity error --step "$1" \
-    --message "$2" --rc "${3:-1}" --run-id "$RUN_ID" --log "$LOG" >&2 || true
-}
-# 失败位置：脚本实际跑在 bash 3.2（macOS 系统 bash，`#!/usr/bin/env bash` → /bin/bash）。
-# **3.2 下没有任何一种取行号的路子是准的**（2026-08-20 逐个实测）：
-#   $LINENO 在函数内给的是函数定义行（第 12 行的失败报成第 8 行，也是「第 532 行」那条告警指错的原因）；
-#   顶层的 $LINENO 在 case/if 等复合命令下给的是语句首行（真实 17 报成 15）；
-#   BASH_LINENO 的调用点在简单调用下准，但在 for 循环里也偏（真实 586 报成 581）。
-# 所以不再输出行号假装精确，只报**函数调用链**——函数名本身就足以定位，且它是准的。
-err_stack() {
-  local i out
-  if [ "${#FUNCNAME[@]}" -le 3 ]; then printf 'main()'; return 0; fi
-  out="${FUNCNAME[2]}()"
-  for ((i=3; i<${#FUNCNAME[@]}; i++)); do out="${out} ← ${FUNCNAME[$i]}()"; done
-  printf '%s' "$out"
-}
-on_err() { local rc=$?; [ "$rc" -eq 0 ] && return 0
-  alert_once "$CURRENT_STEP" "以退出码 $rc 终止（未预期的失败）· 位置 $(err_stack)" "$rc"; }
+if [ -f "$ROOT/bin/lib/common.sh" ]; then
+  # shellcheck disable=SC1091
+  . "$ROOT/bin/lib/common.sh"
+else
+  # 与 lib.sh 同样的回落：文件缺失不阻塞主流程，退化成最小实现
+  ALERTED=0; CURRENT_STEP="启动"
+  step() { CURRENT_STEP="$1"; echo "--- $1 ---"; }
+  alert_once() { :; }
+  err_stack() { printf 'main()'; }
+  on_err() { :; }
+  fail() { echo "❌ $*"; exit 1; }
+fi
 set -o errtrace
 trap 'on_err' ERR   # 不传 ${LINENO}：bash 3.2 下它不准，位置改由 err_stack 的函数链给
 fail() { echo "❌ $*"; jq -n --arg t "$TS" --arg e "$*" '{last_run:$t,ok:false,error:$e}' > "$STATE/health-daily.json"; alert_once "$CURRENT_STEP" "$*" 1; exit 1; }
@@ -210,15 +199,39 @@ BQ_TIMEOUT="${BQ_TIMEOUT:-180}"      # 单条查询上限；正常查询 3s 内�
 mkdir -p "$STATE/logs"
 BQ_ERRLOG="$STATE/logs/bq-stderr-$TS.log"
 BQ_SQLTMP="$STATE/.bq-sql-$$.sql"
+# 查询缓存（**仅供等价性验收，生产默认关闭**）。
+# 起因：三层 diff 的验收方式在活数据上不成立——滚动窗口锚在跑批时刻，
+# 实测两次跑批相隔 6 分钟，sessions 就从 1108 变成 1107、非致命从 76 变 78。
+# 数据一直在动，diff 永远不为空，重构的真实回归就被淹没在漂移里。
+#
+# 打开 CRASH_REPORT_BQ_CACHE=<目录> 后，每条查询按「格式 + SQL 文本」的哈希缓存结果：
+# 首轮落盘、后续复用。于是验证跑批**完全复用同一批数据**，任何差异都只可能来自代码。
+# 这也顺带把「渲染层等价性」从取数层里隔离出来——正是重构要动的那一层。
+#
+# ⛔ 生产绝不开启：缓存会让报告呈现陈旧数据而毫无察觉。
+BQ_CACHE="${CRASH_REPORT_BQ_CACHE:-}"
+[ -n "$BQ_CACHE" ] && { mkdir -p "$BQ_CACHE"; echo "  🧊 bq 查询缓存已开启（${BQ_CACHE}）——仅供等价性验收，生产禁用"; }
+
 bqq() { # $1=csv|json  $2=SQL文本 → stdout；超时返回 124，失败返回 bq 退出码
-  local rc=0
+  local rc=0 ck=""
+  if [ -n "$BQ_CACHE" ]; then
+    ck="$BQ_CACHE/$(printf '%s|%s' "$1" "$2" | shasum -a 256 | cut -c1-32)"
+    [ -s "$ck" ] && { cat "$ck"; return 0; }
+  fi
   printf '%s\n' "$2" > "$BQ_SQLTMP"
-  run_with_timeout "$BQ_TIMEOUT" \
+  local out
+  # ⛔ 不要用「_bqq_raw() { bqq "$@"; } + 重定义 bqq」那种包装做缓存：
+  #    bash 在**调用时**解析函数名，_bqq_raw 会调到新的 bqq 上 → 无限递归。
+  #    实测第一条查询就挂死，整跑卡在「选表」。读写都放同一个函数里。
+  out="$(run_with_timeout "$BQ_TIMEOUT" \
     bash -c 'exec bq query --use_legacy_sql=false --format="$1" < "$2"' \
-    _ "$1" "$BQ_SQLTMP" 2>>"$BQ_ERRLOG" || rc=$?
+    _ "$1" "$BQ_SQLTMP" 2>>"$BQ_ERRLOG")" || rc=$?
   if [ "$rc" -eq 124 ]; then
     echo "  ⏱️ bq 查询超时 ${BQ_TIMEOUT}s，按缺数降级（详见 $(basename "${BQ_ERRLOG}")）" >&2
   fi
+  # 只缓存成功的查询——把失败/超时的空结果缓存下来等于把故障固化
+  [ -n "$ck" ] && [ "$rc" -eq 0 ] && printf '%s\n' "$out" > "$ck"
+  printf '%s\n' "$out"
   return "$rc"
 }
 trap 'rm -f "$BQ_SQLTMP"' EXIT

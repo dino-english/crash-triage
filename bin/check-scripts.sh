@@ -7,20 +7,24 @@
 set -uo pipefail
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 rc=0
-for f in "$SELF_DIR"/*.sh; do
+# ⚠️ **必须递归**：早先只扫 "$SELF_DIR"/*.sh，于是 bin/lib/ 与 bin/test/ 下的新代码
+# 完全不受任何检查——包括下面那条多字节变量 lint。实测第一个放进 bin/test/ 的脚本
+# 就带着 `$SCRIPT（` 这种写法通过了自检，运行时才炸。
+while IFS= read -r f; do
   [ "$(basename "$f")" = "check-scripts.sh" ] && continue
-  bash -n "$f" || { echo "❌ 语法: $(basename "$f")"; rc=1; }
-done
+  bash -n "$f" || { echo "❌ 语法: ${f#"$SELF_DIR"/}"; rc=1; }
+done < <(find "$SELF_DIR" -name '*.sh' -type f | sort)
 python3 - "$SELF_DIR" <<'PY' || rc=1
 import sys, re, pathlib
 bad = 0
 pat = re.compile(r'\$([A-Za-z_][A-Za-z0-9_]*)(?=[^\x00-\x7F])')
-for f in sorted(pathlib.Path(sys.argv[1]).glob('*.sh')):
+for f in sorted(pathlib.Path(sys.argv[1]).rglob('*.sh')):
     if f.name == 'check-scripts.sh':
         continue
     for n, line in enumerate(f.read_text(encoding='utf-8').splitlines(), 1):
         for m in pat.finditer(line):
-            print(f'❌ {f.name}:{n} 变量紧邻多字节字符，需写成 ${{{m.group(1)}}}：{line.strip()[:70]}')
+            rel = f.relative_to(pathlib.Path(sys.argv[1]))
+            print(f'❌ {rel}:{n} 变量紧邻多字节字符，需写成 ${{{m.group(1)}}}：{line.strip()[:70]}')
             bad = 1
 sys.exit(bad)
 PY

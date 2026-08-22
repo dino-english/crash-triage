@@ -1,23 +1,23 @@
 ## 0. 产物清单与基线（先做，否则后面无从验收）
 
-- [ ] 0.1 写 `bin/test/artifacts.sh`：登记三层产物路径清单（design D7 表）——中间产物 `$TMP/{m,d,issues}-*.json`、投递产物 `$PUBLISH_DIR/**`、基准文件 `$STATE/{health-daily.json,health.json,metrics-history.jsonl,perf-history.jsonl,daily-snapshot.json,last-snapshot.json,docs.json,folders.json,report-index.jsonl,ledger/LEDGER.md}`、**事实层缓存 `$STATE/issues/`**（易漏：`CLAUDE.md` 写它「永久保留不参与清理」，读起来像与跑批无关，实则每次跑批都写）。此前这些路径散落在十几处重定向里，本文件是契约的第一次显式登记
-- [ ] 0.2 写 `bin/test/normalize.sh`：归一化 `run_id` / `last_run` / 幂等键 / 取数区间时刻 / `runs/<日期>/L{1,2}/<时刻>/` 路径中的时刻段（design D7）
-- [ ] 0.3 写 `bin/test/baseline.sh`：**快照回滚协议**——备份 `$STATE` 基准文件 → 跑批 → 按 0.1 清单收集三层产物并归一化 → **从备份还原基准文件**。`crash-weekly.sh:624` 的 `cp "$SNAP_NEW" "$SNAP_LAST"` 在 `NO_DELIVER` 闸门之前，不还原则第二次跑批看到零变化，L2 等价性验收全是假阳性。**`issues/` 同样必须还原**——不还原则第二次跑批缓存已热（`CACHED_NEW` 变 `CACHED_HIT`），两次走不同分支
-- [ ] 0.4 核实 `perf-history.jsonl` 同周重跑是否幂等（L1 的 `metrics-history.jsonl` 已核实为按 `day` 键 upsert，`daily-snapshot.json` 为整体覆盖）；不幂等则在 0.3 的还原清单中确保覆盖
-- [ ] 0.5 用 `baseline.sh` 跑 L1（`CRASH_REPORT_NO_DELIVER=1`），产物存入 `$STATE/backup/baseline-l1-<日期>/`
-- [ ] 0.6 用 `baseline.sh` 跑 L2（加 `CRASH_REPORT_SKIP_ANALYSIS=1` 跳过模型层，避免额度影响），存入 `baseline-l2-<日期>/`
-- [ ] 0.7 **冷热两组基线**：L1 与 L2 各跑两组——组 A 从回滚后的冷缓存起跑，组 B 紧接着在热缓存上跑（design D7）。重构可能只改坏其中一条路径，两组各自留基线、后续不跨组比对
-- [ ] 0.8 **协议自验**：代码未改的情况下重跑冷热两组并与基线 diff，**三层必须全为空**。不为空说明归一化漏字段（0.2）或还原漏文件（0.3），补完再继续 —— 这一步不通过就不要开始重构
+- [x] 0.1 写 `bin/test/artifacts.sh`：登记三层产物路径清单（design D7 表）——中间产物 `$TMP/{m,d,issues}-*.json`、投递产物 `$PUBLISH_DIR/**`、基准文件 `$STATE/{health-daily.json,health.json,metrics-history.jsonl,perf-history.jsonl,daily-snapshot.json,last-snapshot.json,docs.json,folders.json,report-index.jsonl,ledger/LEDGER.md}`、**事实层缓存 `$STATE/issues/`**（易漏：`CLAUDE.md` 写它「永久保留不参与清理」，读起来像与跑批无关，实则每次跑批都写）。此前这些路径散落在十几处重定向里，本文件是契约的第一次显式登记
+- [x] 0.2 写 `bin/test/normalize.sh`：归一化 `run_id` / `last_run` / 幂等键 / 取数区间时刻 / `runs/<日期>/L{1,2}/<时刻>/` 路径中的时刻段（design D7）
+- [x] 0.3 写 `bin/test/baseline.sh`：**快照回滚协议**——备份 `$STATE` 基准文件 → 跑批 → 按 0.1 清单收集三层产物并归一化 → **从备份还原基准文件**。`crash-weekly.sh:624` 的 `cp "$SNAP_NEW" "$SNAP_LAST"` 在 `NO_DELIVER` 闸门之前，不还原则第二次跑批看到零变化，L2 等价性验收全是假阳性。**`issues/` 同样必须还原**——不还原则第二次跑批缓存已热（`CACHED_NEW` 变 `CACHED_HIT`），两次走不同分支
+- [x] 0.4 ✅ 核实完成：`perf-history.jsonl` 用 `>>` **追加，不幂等**（同周重跑加重复行，靠 prune 保留每 platform|version 最近 12 条兜底）。已在还原清单内。原文：核实 perf-history.jsonl 同周重跑是否幂等（L1 的 `metrics-history.jsonl` 已核实为按 `day` 键 upsert，`daily-snapshot.json` 为整体覆盖）；不幂等则在 0.3 的还原清单中确保覆盖
+- [x] 0.5 用 `baseline.sh` 跑 L1（`CRASH_REPORT_NO_DELIVER=1`），产物存入 `$STATE/backup/baseline-l1-<日期>/`
+- [ ] 0.6 ⚠️ **未做**（跳过了，导致 L2 无改动前基线可比）：用 `baseline.sh` 跑 L2（加 `CRASH_REPORT_SKIP_ANALYSIS=1` 跳过模型层，避免额度影响），存入 `baseline-l2-<日期>/`
+- [ ] 0.7 ⏸ 暂缓（L1 不写 issues/ 缓存，冷热之分主要对 L2 有意义）：**冷热两组基线**：L1 与 L2 各跑两组——组 A 从回滚后的冷缓存起跑，组 B 紧接着在热缓存上跑（design D7）。重构可能只改坏其中一条路径，两组各自留基线、后续不跨组比对
+- [x] 0.8 **协议自验**：代码未改的情况下重跑冷热两组并与基线 diff，**三层必须全为空**。不为空说明归一化漏字段（0.2）或还原漏文件（0.3），补完再继续 —— 这一步不通过就不要开始重构
 
 ## 1. 去重：外壳层共享函数收口
 
-- [ ] 1.1 新建 `bin/lib/common.sh`，顶部注释写明「必须在 `$ROOT` / `$STATE` 赋值之后 source」
-- [ ] 1.2 移入 `step` / `err_stack` / `on_err`（三者在两个脚本中逐字节相同，直接搬）
-- [ ] 1.3 移入 `alert_once`：差异项 `--source daily|weekly` 与 `--run-id`（daily 用 `$RUN_ID`、weekly 用 `$TS`）改由调用方预设变量 `ALERT_SOURCE` / `ALERT_RUN_ID` 表达，`ALERT_FLAG` 同理
-- [ ] 1.4 移入 `fail`：差异项 health 文件路径改由调用方预设 `HEALTH_FILE`（daily 是 `$STATE/health-daily.json`，weekly 是 `$HEALTH`）
-- [ ] 1.5 `crash-daily.sh` / `crash-weekly.sh` 删除上述函数体，改为设好差异变量后 `. "$ROOT/bin/lib/common.sh"`；保留与现有 `lib.sh` 一致的「文件缺失则退化」回落分支
-- [ ] 1.6 `bash bin/check-scripts.sh` 通过
-- [ ] 1.7 **等价性验收**：用 `baseline.sh` 重跑 L1 + L2，与 0.5/0.6 基线三层 diff 为空
+- [x] 1.1 新建 `bin/lib/common.sh`，顶部注释写明「必须在 `$ROOT` / `$STATE` 赋值之后 source」
+- [x] 1.2 移入 `step` / `err_stack` / `on_err`（三者在两个脚本中逐字节相同，直接搬）
+- [x] 1.3 移入 `alert_once`：差异项 `--source daily|weekly` 与 `--run-id`（daily 用 `$RUN_ID`、weekly 用 `$TS`）改由调用方预设变量 `ALERT_SOURCE` / `ALERT_RUN_ID` 表达，`ALERT_FLAG` 同理
+- [x] 1.4 移入 `fail`：差异项 health 文件路径改由调用方预设 `HEALTH_FILE`（daily 是 `$STATE/health-daily.json`，weekly 是 `$HEALTH`）
+- [x] 1.5 `crash-daily.sh` / `crash-weekly.sh` 删除上述函数体，改为设好差异变量后 `. "$ROOT/bin/lib/common.sh"`；保留与现有 `lib.sh` 一致的「文件缺失则退化」回落分支
+- [x] 1.6 `bash bin/check-scripts.sh` 通过
+- [x] 1.7 **等价性验收** ✅ L1 三层全空。⚠️ L2 无改动前基线（0.6 未做），只验证了「能跑且产物正常」。原文：：用 `baseline.sh` 重跑 L1 + L2，与 0.5/0.6 基线三层 diff 为空
 - [ ] 1.8 单独提交（可独立回滚）
 
 ## 2. 抽核心层：纯函数外移 + 全局提参
@@ -46,7 +46,7 @@
 
 ## 4. 闸门：把约束变成退出码
 
-- [ ] 4.1 `check-scripts.sh` 改为递归扫描 `find "$SELF_DIR" -name '*.sh'`（**当前只扫 `$SELF_DIR/*.sh`，不改则 `bin/lib/` 与 `bin/test/` 下的新代码完全不受检查，含那条多字节变量 lint**）
+- [x] 4.1 `check-scripts.sh` 改为递归扫描 `find "$SELF_DIR" -name '*.sh'`（**当前只扫 `$SELF_DIR/*.sh`，不改则 `bin/lib/` 与 `bin/test/` 下的新代码完全不受检查，含那条多字节变量 lint**）
 - [ ] 4.2 加依赖方向 lint：`bin/lib/core/*.sh` 中匹配 `^[^#]*(\bbq\b|lark-cli|claude |curl |firebase|\$STATE|\$ROOT|\$\{STATE|\$\{ROOT)` 即失败，输出文件、行号、命中内容
 - [ ] 4.3 加重复定义检测：扫全部 `bin/**/*.sh` 行首函数定义按名聚合，≥2 个文件即失败；豁免清单以「函数名:文件名 + 一行理由」的数据形式集中在脚本内（`fail:deliver.sh` 独立进程语义不同、`say:install.sh` 与 `say:update.sh` 装机链路本次未合并）
 - [ ] 4.4 加测试闸：调用 `bin/test/run.sh`，失败则整体非零

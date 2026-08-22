@@ -26,5 +26,8 @@ WHERE is_fatal = TRUE
   AND application.display_version IN ({{VERSIONS}})
   AND event_timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {{DAYS}} DAY)
 GROUP BY issue_id, issue_title
-ORDER BY users DESC, n DESC
+-- ⚠️ **必须有确定性 tie-breaker**：并列时 BigQuery 不保证行序。
+-- 实测两次跑批之间，events 与 users 都相同的两个 issue 位置互换了——
+-- 报告里 issue 顺序无故跳动，读者会以为「排名变了」；等价性 diff 也会被这种伪差异污染。
+ORDER BY users DESC, n DESC, issue_id
 LIMIT 20

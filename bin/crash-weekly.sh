@@ -78,35 +78,25 @@ echo "=== 崩溃周报 $TS ==="
 # ALERTED 防重复：fail() 已发过就不再由 trap 补发。
 # ⚠️ ALERTED 只在主进程有效：命令替换 / 管道都在子 shell 里跑，那里的 ALERTED=1 传不回来。
 # 去重改用文件标记，跑批开始时清一次（起因见 crash-daily.sh 同处注释）。
-ALERTED=0
+# 五个共享函数（step / alert_once / err_stack / on_err / fail）已收口到 bin/lib/common.sh。
+# 两条链路仅有的差异用下面四个变量表达——此前为这三处不同，整整 5 个函数各存了一份。
 ALERT_FLAG="$STATE/.alerted-weekly"
+ALERT_SOURCE="weekly"
+ALERT_RUN_ID="$TS"
+HEALTH_FILE="$HEALTH"
 rm -f "$ALERT_FLAG"
-CURRENT_STEP="启动"
-step() { CURRENT_STEP="$1"; echo "--- $1 ---"; }
-alert_once() { # $1=step $2=message $3=rc
-  [ "$ALERTED" = 1 ] && return 0
-  [ -e "$ALERT_FLAG" ] && return 0
-  ALERTED=1; : > "$ALERT_FLAG"
-  [ -x "$ROOT/bin/alert.sh" ] || return 0
-  # 输出一律走 stderr：ERR trap 可能在命令替换里触发，打到 stdout 会被 captured 进取数变量。
-  "$ROOT/bin/alert.sh" --source weekly --severity error --step "$1" \
-    --message "$2" --rc "${3:-1}" --run-id "$TS" --log "$LOG" >&2 || true
-}
-# 失败位置：脚本实际跑在 bash 3.2（macOS 系统 bash，`#!/usr/bin/env bash` → /bin/bash）。
-# **3.2 下没有任何一种取行号的路子是准的**（2026-08-20 逐个实测）：
-#   $LINENO 在函数内给的是函数定义行（第 12 行的失败报成第 8 行，也是「第 532 行」那条告警指错的原因）；
-#   顶层的 $LINENO 在 case/if 等复合命令下给的是语句首行（真实 17 报成 15）；
-#   BASH_LINENO 的调用点在简单调用下准，但在 for 循环里也偏（真实 586 报成 581）。
-# 所以不再输出行号假装精确，只报**函数调用链**——函数名本身就足以定位，且它是准的。
-err_stack() {
-  local i out
-  if [ "${#FUNCNAME[@]}" -le 3 ]; then printf 'main()'; return 0; fi
-  out="${FUNCNAME[2]}()"
-  for ((i=3; i<${#FUNCNAME[@]}; i++)); do out="${out} ← ${FUNCNAME[$i]}()"; done
-  printf '%s' "$out"
-}
-on_err() { local rc=$?; [ "$rc" -eq 0 ] && return 0
-  alert_once "$CURRENT_STEP" "以退出码 $rc 终止（未预期的失败）· 位置 $(err_stack)" "$rc"; }
+if [ -f "$ROOT/bin/lib/common.sh" ]; then
+  # shellcheck disable=SC1091
+  . "$ROOT/bin/lib/common.sh"
+else
+  # 与 lib.sh 同样的回落：文件缺失不阻塞主流程，退化成最小实现
+  ALERTED=0; CURRENT_STEP="启动"
+  step() { CURRENT_STEP="$1"; echo "--- $1 ---"; }
+  alert_once() { :; }
+  err_stack() { printf 'main()'; }
+  on_err() { :; }
+  fail() { echo "❌ $*"; exit 1; }
+fi
 set -o errtrace
 trap 'on_err' ERR   # 不传 ${LINENO}：bash 3.2 下它不准，位置改由 err_stack 的函数链给
 fail() { echo "❌ $*"; jq -n --arg t "$TS" --arg e "$*" '{last_run:$t,ok:false,error:$e}' > "$HEALTH"; alert_once "$CURRENT_STEP" "$*" 1; exit 1; }

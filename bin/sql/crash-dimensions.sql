@@ -42,7 +42,8 @@ SELECT
   -- 严重度完全不同，而只看事件数两者长得一样。
   ROUND(c.events / NULLIF(c.users, 0), 1)                            AS concentration
 FROM c LEFT JOIN s USING(dim)
-ORDER BY c.users DESC, c.events DESC
+  -- 并列时补确定性 tie-breaker，否则两次跑批行序会互换（见 crash-issues.sql 同处注释）
+ORDER BY c.users DESC, c.events DESC, c.dim
 LIMIT {{LIMIT}}
 -- ⛔ **不在 SQL 里按样本量过滤**（2026-08-22 实测后改）：Android 机型碎片化到无法过滤——
 -- 该版本 7 天内最大的机型桶只有 75 个会话，门槛设 50 只剩 1 行、设 100 一行不剩，

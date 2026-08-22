@@ -29,5 +29,6 @@ WHERE error_type = 'NON_FATAL'
   AND application.display_version IN ({{VERSIONS}})
   AND event_timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {{DAYS}} DAY)
 GROUP BY issue_id
-ORDER BY users DESC, n DESC
+  -- 并列时补确定性 tie-breaker，否则两次跑批行序会互换（见 crash-issues.sql 同处注释）
+ORDER BY users DESC, n DESC, issue_id
 LIMIT {{LIMIT}}
