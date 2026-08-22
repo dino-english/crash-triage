@@ -50,6 +50,39 @@ AND_REPO="$REPOS_ROOT/dino-english-android"
 # processState、breadcrumbs（含 firebase_screen_class）、issueVariant。current_screen 不可假设存在。
 FACT_FIELDS='threads, blameFrame, device, operatingSystem, memory, processState, breadcrumbs, issueVariant, customKeys'
 
+# 事实层缓存策略：**单一事实源**。两处 prompt（light / full 两种模式）都插值引用它。
+# ⛔ 不要把这段复制成两份——prompt 是自然语言，没有语法检查、没有 lint，
+#    改漏一份不会报错，只会让模型在某个模式下按旧策略执行（change crash-fact-cache-freshness D5）。
+#    「消除重复」而不是「检测重复」：用一个同样会被忘记的版本号去防止遗忘，等于没防。
+FACT_CACHE_POLICY="事实层缓存（${ISSUES_DIR}/<32位id>.json，一 issue 一文件，永久保留不清理）——
+对每一个 issue 执行**两个独立判定**，不要把它们挤在一起：
+
+【判定一：要不要抓取事件明细】——只决定是否调用 crashlytics_list_events（省的是真钱）
+  - 强制重抓：若环境要求 CRASH_REPORT_FORCE_REFETCH=${FORCE_REFETCH} 为 1，直接全量抓取。
+  - 先用 Read 工具读 ${ISSUES_DIR}/<该 issue 完整 32 位 id>.json。
+    - 文件不存在 → 全量抓取，事件按 ${FACT_FIELDS} 等原始字段保存
+      （尤其 threads 按原样存文本块，不要假设能拆成帧数组）。
+    - 线上计数 **大于** 文件里的 events_count_last_seen → 只抓这次返回的事件，
+      按唯一标识（无唯一 id 时用时间戳+blameFrame 组合）与已有 events 数组合并去重，
+      **已有事件记录原样保留、不改写**，只 append 新增的。
+    - 线上计数 **等于或小于** → **不抓取**（0 次额外 MCP 调用，这是本判定的核心目的）。
+      ⚠️ 小于是正常的：线上计数是**滚动窗口内**的取值，老事件出窗即下降，**它不是单调量**。
+      计数下降只意味着没有新事件，不意味着这个 issue 该被忽略。
+
+【判定二：要不要更新观测字段】——**无条件执行**，与判定一的结果无关
+  无论上面是否抓取，都必须把这些字段刷新为本轮观测值：
+    events_count_last_seen（本次计数）· users_last_seen · window_days（本次窗口天数）
+    · last_synced（本轮 ISO8601 时刻）
+  latest_event 特殊：取 **max(已存值, 本次观测值)**，只进不退。
+    ⚠️ 窗口内的最新事件时刻**同样非单调**——最新那条出窗后，剩余事件的最大时刻会比上一轮更早。
+    直接覆盖会让台账的「最近一次发生」倒退，读者据此判断「很久没出现了」，正好相反。
+  ⚠️ 跳过观测字段更新**省不下任何东西**，却会让「最近同步」停在历史某一刻——
+  一个正在衰减（= 正在被修好）的 issue 会看起来像「数据停更」，好消息被读成故障。
+
+抓取失败（MCP 调用报错/超时）：不中止整体流程，跳过该 issue 的事实层更新，
+在报告里标明该 issue 的事实层「抓取失败/不完整」（区分「已查证为空」与「未查」）。"
+
+
 if [ "$MODE" = "full" ]; then
 read -r -d '' PROMPT <<PROMPT_END || true
 你是崩溃排查执行器。调用本仓库 skill firebase-crash-triage 并按其完整工作流执行。
@@ -77,22 +110,7 @@ fix_commit 用 git -C 仓库 log --oneline --all --grep="完整id" 反查，找�
 ② ${OUT_DIR}/report.md —— 按 skill 报告模板写，含根因、版本流转、风险分级与修复方案。
 开头必须加一行：> 本报告由每周自动化流程生成，修复方案未经人工复核，落地前须验证。
 
-③ 事实层缓存（${ISSUES_DIR}/<32位id>.json，一 issue 一文件，永久保留不清理）——
-对 ① 中的**每一个** issue 执行命中判定：
-  - 强制重抓：若环境要求 CRASH_REPORT_FORCE_REFETCH=${FORCE_REFETCH} 为 1，跳过下面的判定，直接全量抓取。
-  - 先用 Read 工具尝试读 ${ISSUES_DIR}/<该 issue 完整 32 位 id>.json。
-    - 文件不存在 → **未命中**：调用 crashlytics_list_events 抓该 issue 全部事件，
-      写入新文件，结构：{"id":"<32位id>","platform":"ios"|"android","title":"...",
-      "events_count_last_seen":<本次 topIssues 返回的 events 计数>,
-      "events":[{每条事件保留 ${FACT_FIELDS} 等原始字段，尤其 threads 按原样存文本块，不要假设能拆成帧数组}],
-      "last_synced":"<ISO8601 时间戳>"}。
-    - 文件存在 → 比较文件里的 events_count_last_seen 与本次 topIssues 返回的 events 计数：
-      - 相等 → **命中**：跳过，不调用 crashlytics_list_events（这是本次判定的核心目的：0 次额外 MCP 调用）。
-      - 线上计数更大 → **部分命中**：调用 crashlytics_list_events 只抓这次返回的事件，
-        按事件唯一标识（无唯一 id 时用时间戳+blameFrame 组合去重）与已有 events 数组合并，
-        **已有事件记录原样保留、不改写**，只 append 新增的，然后更新 events_count_last_seen 与 last_synced。
-  - 抓取失败（MCP 调用报错/超时）：不中止整体流程，跳过该 issue 的事实层更新，
-    在 report.md 里标明该 issue 的事实层"抓取失败/不完整"（区分「已查证为空」与「未查」）。
+③ ${FACT_CACHE_POLICY}
 
 若某个仓库的 git 命令无法执行，必须在 report.md 顶部显式声明该平台反查未完成。
 不得让 null 冒充「查过没有」。
@@ -121,19 +139,7 @@ filter.issueErrorTypes=["FATAL"]，pageSize=20：
 把结果写到 ${OUT_DIR}/snapshot.json，结构严格如下，数字必须是 JSON 数字：
 {"ios":[{"id":"32位hex","title":"...","events":N,"users":N,"fix_commit":null,"fix_branches":[]}],"android":[同上结构]}
 
-事实层缓存（${ISSUES_DIR}/<32位id>.json，一 issue 一文件，永久保留不清理）——
-对每一个 issue 执行命中判定：
-  - 强制重抓：若环境要求 CRASH_REPORT_FORCE_REFETCH=${FORCE_REFETCH} 为 1，跳过下面的判定，直接全量抓取。
-  - 先用 Read 工具尝试读 ${ISSUES_DIR}/<该 issue 完整 32 位 id>.json。
-    - 文件不存在 → 调用 crashlytics_list_events 抓全部事件，写入新文件，结构：
-      {"id":"<32位id>","platform":"ios"|"android","title":"...",
-      "events_count_last_seen":<本次 topIssues 返回的 events 计数>,
-      "events":[{每条事件保留 ${FACT_FIELDS} 等原始字段}],"last_synced":"<ISO8601>"}。
-    - 文件存在且 events_count_last_seen 等于本次 topIssues 返回的 events 计数 → 跳过，不调用
-      crashlytics_list_events（0 次额外 MCP 调用）。
-    - 文件存在但线上计数更大 → 只抓这次事件，按唯一标识与已有 events 数组合并去重，
-      已有记录不改写，只 append 新增，更新 events_count_last_seen 与 last_synced。
-  - 抓取失败不中止流程，跳过该 issue，不写入不完整的事实层文件。
+${FACT_CACHE_POLICY}
 
 写完只回复 OK，附一行统计：
 "事实层：命中 N 个（跳过）· 部分命中 M 个（增量抓取）· 未命中 K 个（全量抓取）· 失败 F 个"。

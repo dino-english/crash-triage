@@ -246,6 +246,7 @@ fi
 
 LEDGER_TABLE_FILE="$OUT_DIR/ledger-table.md"
 LEDGER_TIMELINE_FILE="$OUT_DIR/ledger-timeline-delta.md"
+LEDGER_NF_FILE="$OUT_DIR/ledger-nonfatal-table.md"
 LEDGER_RENDER_OK=0
 if [ -x "$ROOT/bin/render-ledger.sh" ]; then
   # 周报文档 URL 此刻还不存在（由 deliver.sh 建文档后才知道），时间线先写占位符
@@ -258,6 +259,7 @@ if [ -x "$ROOT/bin/render-ledger.sh" ]; then
   if [ "$LEDGER_RENDER_OK" = "1" ]; then
     printf '%s' "$RENDER_OUT" | awk 'BEGIN{RS="\x1e"} NR==1' > "$LEDGER_TABLE_FILE"
     printf '%s' "$RENDER_OUT" | awk 'BEGIN{RS="\x1e"} NR==2' > "$LEDGER_TIMELINE_FILE"
+    printf '%s' "$RENDER_OUT" | awk 'BEGIN{RS="\x1e"} NR==3' > "$LEDGER_NF_FILE"
   fi
 else
   echo "  ⚠️ bin/render-ledger.sh 不存在，跳过台账渲染"
@@ -273,6 +275,15 @@ if [ "$LEDGER_RENDER_OK" = "1" ]; then
     skip { next }
     { print }
   ' "$LEDGER_LOCAL" > "$LEDGER_TMP" 2>/dev/null || cp "$LEDGER_LOCAL" "$LEDGER_TMP"
+  if [ -s "$LEDGER_NF_FILE" ]; then
+    LEDGER_TMPNF="$(mktemp)"
+    awk -v nf="$LEDGER_NF_FILE" '
+      /<!-- LEDGER:NONFATAL:BEGIN -->/ { print; while ((getline line < nf) > 0) print line; skip=1; next }
+      /<!-- LEDGER:NONFATAL:END -->/ { skip=0 }
+      skip { next }
+      { print }
+    ' "$LEDGER_TMP" > "$LEDGER_TMPNF" 2>/dev/null && mv "$LEDGER_TMPNF" "$LEDGER_TMP"
+  fi
   if [ -s "$LEDGER_TIMELINE_FILE" ]; then
     LEDGER_TMP2="$(mktemp)"
     awk -v tlf="$LEDGER_TIMELINE_FILE" '
@@ -295,7 +306,7 @@ SQL_DIR="${SQL_DIR:-$ROOT/bin/sql}"
 PROJECT="dino-english-497507"
 MIN_SESSIONS="${CRASH_REPORT_MIN_SESSIONS:-5}"
 WEEK_DAYS="${CRASH_REPORT_WEEK_DAYS:-7}"
-ADOPT_ROWS=""          # TSV：平台 \t 版本 \t 会话 \t 设备 \t 崩溃事件 \t 崩溃率
+ADOPT_ROWS=""          # TSV：平台 \t 版本 \t 会话 \t 设备 \t 崩溃事件 \t 崩溃率 \t crash-free \t ANR \t 非致命
 ADOPT_OK=0
 
 if command -v bq >/dev/null 2>&1 && bq query --use_legacy_sql=false --format=csv 'SELECT 1' >/dev/null 2>&1; then
@@ -306,7 +317,24 @@ if command -v bq >/dev/null 2>&1 && bq query --use_legacy_sql=false --format=csv
       "$SQL_DIR/latest-versions.sql" | bq query --use_legacy_sql=false --format=csv 2>/dev/null \
       | tail -n +2 | sort -t, -k2,2 -nr | head -2 || true
   }
-  ver_crash() { # $1=crashlytics表 $2=sessions表 $3=版本 → 「事件数,会话数」
+  # ANR 与 NON_FATAL 计数：两者 is_fatal 均为 FALSE，crash-rate.sql 取不到
+  # 影响面维度（change crash-impact-summary）：机型 / 系统版本 top3，用于跨周对比适配面变化。
+  # ⚠️ **只有系统版本给率**——Android 机型碎片化，单机型会话桶太小，率不可靠。
+  DIM_TOP_W="${CRASH_REPORT_DIM_TOP:-3}"
+  DIM_MIN_W="${CRASH_REPORT_DIM_MIN_SESSIONS:-200}"
+  ver_dim() { # $1=crash表 $2=sessions表 $3=版本 $4=维度表达式 → CSV（无表头）
+    sed -e "s|{{TABLE}}|$1|g" -e "s|{{SESSIONS_TABLE}}|$2|g" -e "s|{{DAYS}}|$WEEK_DAYS|g" \
+        -e "s|{{VERSIONS}}|\"$3\"|g" -e "s|{{DIM}}|$4|g" -e "s|{{SESS_DIM}}|$4|g" \
+        -e "s|{{LIMIT}}|$DIM_TOP_W|g" -e "s|{{MIN_SESSIONS}}|$DIM_MIN_W|g" \
+        "$SQL_DIR/crash-dimensions.sql" \
+      | bq query --use_legacy_sql=false --format=csv 2>/dev/null | tail -n +2 || true
+  }
+  ver_etypes() { # $1=crashlytics表 $2=版本 → 「anr事件,anr安装,非致命事件,非致命安装」
+    sed -e "s|{{TABLE}}|$1|g" -e "s|{{DAYS}}|$WEEK_DAYS|g" -e "s|{{VERSIONS}}|\"$2\"|g" \
+        "$SQL_DIR/crash-error-types.sql" \
+      | bq query --use_legacy_sql=false --format=csv 2>/dev/null | tail -n +2 | head -1 || true
+  }
+  ver_crash() { # $1=crashlytics表 $2=sessions表 $3=版本 → 「事件数,会话数,受影响安装,崩溃会话数」
     sed -e "s|{{TABLE}}|$1|g" -e "s|{{SESSIONS_TABLE}}|$2|g" -e "s|{{DAYS}}|$WEEK_DAYS|g" \
         -e "s|{{VERSIONS}}|\"$3\"|g" "$SQL_DIR/crash-rate.sql" \
       | bq query --use_legacy_sql=false --format=csv 2>/dev/null | tail -n +2 | head -1 || true
@@ -322,13 +350,34 @@ if command -v bq >/dev/null 2>&1 && bq query --use_legacy_sql=false --format=csv
 "; fi
       cr="$(ver_crash "$ctbl" "$stbl" "$ver")"
       cev="$(printf '%s' "$cr" | cut -d, -f1)"; csess="$(printf '%s' "$cr" | cut -d, -f2)"
+      ccs="$(printf '%s' "$cr" | cut -d, -f4)"
       rate="—"
       if [ -n "$cev" ] && [ -n "$csess" ] && [ "$csess" != "0" ]; then
         rate="$(awk -v e="$cev" -v s="$csess" 'BEGIN{printf "%.2f%%", e/s*100}')"
       fi
-      ADOPT_ROWS="${ADOPT_ROWS}${pname}	${ver}	${sess}	${dev}	${cev:-—}	${rate}
+      # crash-free 会话率。分母为 0 → 「无法计算」，⛔ 不得渲染成 100%
+      cfree="无法计算"
+      if [ -n "$ccs" ] && [ -n "$csess" ] && [ "$csess" != "0" ]; then
+        cfree="$(awk -v c="$ccs" -v s="$csess" 'BEGIN{printf "%.2f%%", 100 - c/s*100}')"
+      fi
+      et="$(ver_etypes "$ctbl" "$ver")"
+      anrev="$(printf '%s' "$et" | cut -d, -f1)"; nfev="$(printf '%s' "$et" | cut -d, -f3)"
+      # iOS 无 ANR 概念（数据源不产出该 error_type），不填 0——0 会被读成「iOS 没有卡死问题」
+      if [ "$pname" = "iOS" ]; then anrcell="— 无此概念"
+      else
+        anrcell="${anrev:-0} 次"
+        if [ -n "$anrev" ] && [ -n "$csess" ] && [ "$csess" != "0" ]; then
+          anrcell="$(awk -v e="$anrev" -v s="$csess" 'BEGIN{printf "%d 次 %.2f%%", e, e/s*100}')"
+        fi
+      fi
+      ADOPT_ROWS="${ADOPT_ROWS}${pname}	${ver}	${sess}	${dev}	${cev:-—}	${rate}	${cfree}	${anrcell}	${nfev:-0} 次
 "
-      echo "  ${pname} ${ver}：${sess} 会话 / ${dev} 设备 / 崩溃 ${cev:-—} 次 ${rate}"
+      echo "  ${pname} ${ver}：${sess} 会话 / ${dev} 设备 / 崩溃 ${cev:-—} 次 ${rate} / crash-free ${cfree} / ANR ${anrcell} / 非致命 ${nfev:-0} 次"
+      # 维度只在该版本确有崩溃事件时才查——零崩溃的版本查了必然全空，白花两次查询
+      if [ -n "$cev" ] && [ "$cev" != "0" ] && [ "$cev" != "—" ]; then
+        ver_dim "$ctbl" "$stbl" "$ver" "CONCAT(device.manufacturer,' ',device.model)" > "$OUT_DIR/dim-model-${pname}-${ver}.csv" || true
+        ver_dim "$ctbl" "$stbl" "$ver" "operating_system.display_version"             > "$OUT_DIR/dim-os-${pname}-${ver}.csv"    || true
+      fi
     done <<< "$(top2_versions "$stbl")"
   done
 else
@@ -512,14 +561,38 @@ if [ -n "$IOS_PERF_STALE" ] || [ -n "$AND_PERF_STALE" ]; then
   _ast="正常"; [ -n "$AND_PERF_STALE" ] && _ast="停更 ${AND_PERF_STALE} 天（截至 ${AND_PERF_MAX}）"
   PERF_STALE_NOTE="$(printf '\n🟡 **性能数据源停更** — iOS %s · Android %s；Firebase→BigQuery 导出未产出，非流水线故障，本周性能段不可读作「平稳」。' "$_ist" "$_ast")"
 fi
-NOTE_MD="$(printf '变化摘要口径：BigQuery 事件级（含已关闭 issue，全版本），近 %s 天窗，**纯脚本取数不经模型**。\n取数区间 %sd：%s\n主力版本 = 近 %s 天会话量 top2（日报看的是「版本号最新的 2 个版本」，两者互补，不可混比）。\n崩溃率 = 事件数/会话数（非 crash-free）· 对照分支：iOS %s · Android %s\n%s%s' \
+NOTE_MD="$(printf '变化摘要口径：BigQuery 事件级（含已关闭 issue，全版本），近 %s 天窗，**纯脚本取数不经模型**。\n取数区间 %sd：%s\n主力版本 = 近 %s 天会话量 top2（日报看的是「版本号最新的 2 个版本」，两者互补，不可混比）。\n崩溃率 = 事件数/会话数 · 对照分支：iOS %s · Android %s
+Crash-free 会话率 = 1 − 崩溃会话数/会话数，**会话口径**。⚠️ 与控制台首屏的**用户**口径不同、**不可直接对照**（用户率通常更低）；用户率不可得——两个数据源的用户标识不同源。本值为**下界估计**，真实值不低于所示数字。
+ANR 仅 Android（iOS 系统层无此概念）；ANR 率与崩溃率同分母，**与 Play 的用户感知 ANR 率口径不同，不可对照商店门槛**。非致命双端**不可比**（收口点覆盖不同）。\n%s%s' \
   "$WEEK_DAYS" "$WEEK_DAYS" "$WIN_COMPACT" "$WEEK_DAYS" "$IOS_BR" "$AND_BR" "$ANALYSIS_NOTE" "$PERF_STALE_NOTE")"
 
 # 主力版本表（markdown 与卡片共用同一批数据）
 adopt_md() {
   [ -n "$ADOPT_ROWS" ] || { printf '（本次未取到放量数据）\n'; return 0; }
-  printf '| 平台 | 版本 | 会话 | 设备 | 崩溃事件 | 崩溃率 |\n|---|---|---|---|---|---|\n'
-  printf '%s' "$ADOPT_ROWS" | awk -F'\t' 'NF>=6{printf "| %s | %s | %s | %s | %s | %s |\n",$1,$2,$3,$4,$5,$6}'
+  printf '| 平台 | 版本 | 会话 | 设备 | 崩溃事件 | 崩溃率 | Crash-free 会话 | ANR | 非致命 |\n|---|---|---|---|---|---|---|---|---|\n'
+  printf '%s' "$ADOPT_ROWS" | awk -F'\t' 'NF>=9{printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s |\n",$1,$2,$3,$4,$5,$6,$7,$8,$9}'
+}
+
+# 影响面维度段（change crash-impact-summary）。⛔ 与性能段同一条硬约束：只给可定位对象，不出根因——
+# 维度聚合只显示相关性，某机型崩溃率高仍可能源自该机型用户的网络环境或功能路径。
+dims_md() {
+  local any=0 f pname ver
+  for f in "$OUT_DIR"/dim-*.csv; do [ -s "$f" ] && any=1 && break; done
+  [ "$any" = 1 ] || { printf '（本周主力版本无崩溃事件，无维度分布）\n'; return 0; }
+  for kind in model os; do
+    [ "$kind" = model ] && printf '**机型**（绝对数，**未除以装机量**，不代表该机型更易崩）\n\n' \
+                        || printf '**系统版本**（含崩溃率，该维度会话桶足够大）\n\n'
+    for f in "$OUT_DIR"/dim-${kind}-*.csv; do
+      [ -s "$f" ] || continue
+      b="$(basename "$f" .csv)"; b="${b#dim-${kind}-}"
+      pname="${b%%-*}"; ver="${b#*-}"
+      printf '*%s %s*\n\n' "$pname" "$ver"
+      awk -F, -v sr="$([ "$kind" = os ] && echo 1 || echo 0)" -v minS="$DIM_MIN_W" '
+        NF>=6 { rate = ($5 == "" || $4 == "" || $4+0 < minS) ? "" : $5 "%"
+          printf "- %s · %s 事件 / %s 人 · 集中度 %s%s\n", $1, $2, $3, $6, (sr && rate != "" ? " · 崩溃率 " rate : "") }' "$f"
+      printf '\n'
+    done
+  done
 }
 
 # 性能段表（design D8/D9：只给趋势与对象，不出根因；不进台账，只在周报文档呈现）
@@ -547,9 +620,9 @@ MSG_END
 )"
 
 # 结构化卡片（CardKit v2，与日报同款；agent 原样投递，仅回填 __REPORT_URL__）
-ADOPT_JSON="$(printf '%s' "$ADOPT_ROWS" | awk -F'\t' 'NF>=6{printf "%s\t%s\t%s\t%s\t%s\t%s\n",$1,$2,$3,$4,$5,$6}' \
+ADOPT_JSON="$(printf '%s' "$ADOPT_ROWS" | awk -F'\t' 'NF>=9{printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",$1,$2,$3,$4,$5,$6,$7,$8,$9}' \
   | jq -Rsc 'split("\n") | map(select(length>0) | split("\t")
-      | {plat:.[0], ver:.[1], sess:.[2], dev:.[3], crash:.[4], rate:.[5]})')"
+      | {plat:.[0], ver:.[1], sess:.[2], dev:.[3], crash:.[4], rate:.[5], cfree:.[6], anr:.[7], nf:.[8]})')"
 # 只有真出现变化才红；基线与平稳周都是蓝——红色要留给「需要看一眼」的场合
 HEADER_COLOR="blue"; [ "$WEEK_STATE" = changed ] && HEADER_COLOR="red"
 CARD_JSON="$(jq -n \
@@ -571,7 +644,10 @@ CARD_JSON="$(jq -n \
                     {name:"sess",display_name:"会话",data_type:"text",width:"auto",horizontal_align:"left"},
                     {name:"dev",display_name:"设备",data_type:"text",width:"auto",horizontal_align:"left"},
                     {name:"crash",display_name:"崩溃",data_type:"text",width:"auto",horizontal_align:"left"},
-                    {name:"rate",display_name:"崩溃率",data_type:"lark_md",width:"auto",horizontal_align:"left"}],
+                    {name:"rate",display_name:"崩溃率",data_type:"lark_md",width:"auto",horizontal_align:"left"},
+                    {name:"cfree",display_name:"Crash-free",data_type:"text",width:"auto",horizontal_align:"left"},
+                    {name:"anr",display_name:"ANR",data_type:"text",width:"auto",horizontal_align:"left"},
+                    {name:"nf",display_name:"非致命",data_type:"text",width:"auto",horizontal_align:"left"}],
            rows:$rows}]
          else [{tag:"markdown",content:"（本次未取到放量数据）"}] end)
       + [{tag:"div",text:{tag:"plain_text",content:$nm,text_size:"notation",text_color:"grey"}},
@@ -587,13 +663,16 @@ REPORT="$STATE/reports/$DAY-weekly.md"
   adopt_md
   printf '\n> 日报盯的是「版本号最新的 2 个版本」（新版发得怎么样），本段盯的是「承载用户最多的版本」（盘子里的大头）。\n'
   printf '> 两段版本集常常不同，各自回答不同的问题，**不可混比**。\n\n'
-  printf '## 三、性能（近 %s 天，主力版本，双端分列）\n\n' "$WEEK_DAYS"
+  printf '## 三、影响面分布（近 %s 天，主力版本）\n\n' "$WEEK_DAYS"
+  printf '> ⛔ 只给可定位对象与取证方向，**不出根因**——维度聚合只显示相关性，与性能段同一条硬约束。\n\n'
+  dims_md
+  printf '\n## 四、性能（近 %s 天，主力版本，双端分列）\n\n' "$WEEK_DAYS"
   printf '> 取数区间 %sd：**%s**（与本文档同一套跑批时刻锚定，与一/二段共用）。\n' "$WEEK_DAYS" "$WIN_FULL"
   printf '> 性能是连续指标、无追踪 ID，**只给趋势、可定位对象与下一步取证方向，不出根因与修复方案**（硬约束）。\n'
   printf '> **本段不写入台账**（design D8：台账只收有唯一标识、可跨周追踪的崩溃 issue）。\n\n'
   perf_md
   printf '\n> 与日报口径互补但不可混比：日报是日维度当期值，本段是周维度趋势快照，窗口天数不同。\n\n'
-  printf '## 四、口径\n\n%s\n' "$NOTE_MD"
+  printf '## 五、口径\n\n%s\n' "$NOTE_MD"
   # 数据/分析分层的可见化：读者必须能一眼看出「本周没有根因分析」是模型不可用，
   # 而不是「本周没问题」。缺分析和无异常是两件完全不同的事。
   if [ "$ANALYSIS_OK" = "1" ]; then
@@ -670,9 +749,13 @@ fi
 #
 # 台账同步产物：现状表 + 时间线增量拷进 publish 目录，供 deliver.sh 走 sync_ledger()
 # 定点更新飞书文档（block_replace 现状表 + append 时间线，绝不 overwrite，见 deliver.sh D2/D3）。
-LEDGER_TABLE_PUB=""; LEDGER_TIMELINE_PUB=""
+LEDGER_TABLE_PUB=""; LEDGER_TIMELINE_PUB=""; LEDGER_NF_PUB=""
 if [ "${LEDGER_RENDER_OK:-0}" = "1" ] && [ -s "$LEDGER_TABLE_FILE" ]; then
   cp "$LEDGER_TABLE_FILE" "$PUBLISH_DIR/docs/ledger-table.md"
+  if [ -s "$LEDGER_NF_FILE" ]; then
+    cp "$LEDGER_NF_FILE" "$PUBLISH_DIR/docs/ledger-nonfatal-table.md"
+    LEDGER_NF_PUB="$PUBLISH_DIR/docs/ledger-nonfatal-table.md"
+  fi
   LEDGER_TABLE_PUB="$PUBLISH_DIR/docs/ledger-table.md"
   if [ -s "$LEDGER_TIMELINE_FILE" ]; then
     cp "$LEDGER_TIMELINE_FILE" "$PUBLISH_DIR/docs/ledger-timeline-delta.md"
@@ -696,12 +779,13 @@ jq -n \
   --argjson and "$(echo "$DIFF" | jq '.android.total')" \
   --arg ledger_table "$LEDGER_TABLE_PUB" \
   --arg ledger_timeline "$LEDGER_TIMELINE_PUB" \
+  --arg ledger_nf "$LEDGER_NF_PUB" \
   --arg ledger_local "$LEDGER_LOCAL" \
   '{type:"weekly", day:$day2, run_id:$run, chat_id:$chat, send:($send=="true"),
     message_file:$msg, card_file:$card,
     create_doc:(if $report != "" then {file:$report, xml_file:$reportxml, title:$title, label:"周报"} else null end),
     archive_append:(if $report != "" then {jsonl_file:$idx, type:"weekly", day:$day, ios:$ios, android:$and} else null end),
-    ledger_sync:(if $ledger_table != "" then {table_file:$ledger_table, timeline_file:$ledger_timeline, local_file:$ledger_local} else null end)}' \
+    ledger_sync:(if $ledger_table != "" then {table_file:$ledger_table, timeline_file:$ledger_timeline, nonfatal_file:$ledger_nf, local_file:$ledger_local} else null end)}' \
   > "$PUBLISH_DIR/manifest.json"
 
 echo "  ✅ 投递清单 $PUBLISH_DIR/manifest.json（发送=${SEND_FLAG}）"

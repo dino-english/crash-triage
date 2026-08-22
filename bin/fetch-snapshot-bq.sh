@@ -55,12 +55,28 @@ platform_rows() { # $1=平台键(ios/android) $2=crashlytics表 → JSON 数组
   bq_json "$sql"
 }
 
+# NON_FATAL（台账 NON_FATAL 现状表用）。**必须截断**：iOS 近 14 天 1020 条，
+# 全量写台账会把 FATAL 的十几条淹没在一千条里，台账随即失去用途。
+# 按受影响安装数取 top N（SQL 已按 users 排序），未呈现的数量由渲染层标注。
+NF_LIMIT="${CRASH_REPORT_LEDGER_NF_LIMIT:-10}"
+nonfatal_rows() { # $1=平台键 $2=crashlytics表 → JSON 数组
+  local sql
+  sql="$(sed -e "s|{{TABLE}}|$2|g" -e "s|{{DAYS}}|$DAYS|g" -e "s|{{LIMIT}}|$NF_LIMIT|g" \
+           -e 's|{{VERSIONS}}|{{ALLVER}}|g' "$SQL_DIR/crash-nonfatal-issues.sql")"
+  # 台账跨版本追踪，与 crash-issues-all.sql 同理**刻意不加版本过滤**——
+  # 加了会让「上一版修好、这版没复发」的 issue 从现状表凭空消失、时间线断档。
+  sql="$(printf '%s' "$sql" | sed -e '/AND application.display_version IN ({{ALLVER}})/d')"
+  bq_json "$sql"
+}
+
 IOS_TBL="$PROJECT.firebase_crashlytics.com_prime_dino_english_IOS_REALTIME"
 AND_TBL="$PROJECT.firebase_crashlytics.com_prime_dino_english_ANDROID_REALTIME"
 
 echo "--- L2 数据层：bq 取崩溃 issue（${DAYS}d 窗口，全版本口径）---"
 IOS_RAW="$(platform_rows ios "$IOS_TBL")"
 AND_RAW="$(platform_rows android "$AND_TBL")"
+IOS_NF="$(nonfatal_rows ios "$IOS_TBL")"
+AND_NF="$(nonfatal_rows android "$AND_TBL")"
 
 # 两端都空 = bq 真出了问题（正常情况下至少一端有数据）。这里必须失败，
 # 否则会把「取数挂了」渲染成「本周零崩溃」——那是最坏的一种错误报告。
@@ -71,6 +87,7 @@ if [ "$IOS_N" -eq 0 ] && [ "$AND_N" -eq 0 ]; then
   exit 1
 fi
 echo "  iOS $IOS_N 类 · Android $AND_N 类"
+echo "  NON_FATAL（台账用，按影响面取前 ${NF_LIMIT}）：iOS $(printf '%s' "$IOS_NF" | jq 'length' 2>/dev/null || echo 0) 类 · Android $(printf '%s' "$AND_NF" | jq 'length' 2>/dev/null || echo 0) 类"
 
 # fix_commit / fix_branches 从 fixmap.json 填充（scan-fix-commits.sh 的产物，纯 git）。
 # 键是 8 位短 id，与反扫的 commit message 约定 [crash:<8位id>] 对齐。
@@ -80,6 +97,7 @@ if [ -n "$FIXMAP" ] && [ -s "$FIXMAP" ]; then
 fi
 
 jq -n --argjson ios "$IOS_RAW" --argjson android "$AND_RAW" \
+      --argjson iosnf "$IOS_NF" --argjson andnf "$AND_NF" \
       --argjson fixmap "$FIXMAP_JSON" '
   def norm($plat):
     map({
@@ -91,40 +109,67 @@ jq -n --argjson ios "$IOS_RAW" --argjson android "$AND_RAW" \
       fix_commit:   ($fixmap[(.id[0:8])].commit  // null),
       fix_branches: ($fixmap[(.id[0:8])].branches // null)
     });
-  {ios: ($ios | norm("ios")), android: ($android | norm("android"))}
+  {ios: ($ios | norm("ios")), android: ($android | norm("android")),
+   nonfatal: {ios: $iosnf, android: $andnf}}
 ' > "$SNAP"
 
 jq -e '.ios and .android' "$SNAP" >/dev/null || { echo "  ❌ snapshot.json 结构异常" >&2; exit 1; }
 
 # ── 事实层缓存（$STATE/issues/<32位id>.json，一 issue 一文件，永久保留不清理）──
-# 判定：文件不存在 → 写入；events 变大 → 更新计数与时间戳；相等 → 跳过。
-# bq 路径拿不到 events 明细（那要 crashlytics_list_events），所以这里存的是
-# 聚合事实而非事件数组——模型路径写的文件结构更丰富，两者用 source 字段区分，
-# 谁也不覆盖谁的 events 键。
-CACHED_NEW=0; CACHED_UPD=0; CACHED_HIT=0
+#
+# **两个判定必须拆开**（change crash-fact-cache-freshness D1）：
+#   ① 抓取判定：要不要发起事件明细抓取。计数没变或下降 → 没有新事件 → 跳过，这是**正确的**。
+#   ② 记录更新：观测字段（计数 / 最近事件 / 最近同步）**每轮无条件刷新**。
+#
+# 旧实现把两者挤在一个 if/else 里，于是「跳过抓取」连带跳过了记录，导致：
+#   · `latest_event` 冻结 → 台账的「最近一次发生」停在历史峰值那天，直接误导处置判断；
+#   · `last_synced` 冻结 → 正在衰减（= 正在被修好）的 issue 看起来像「数据停更」，好消息读成故障。
+#
+# ⚠️ 根因是**口径错配**：`crash-issues-all.sql` 的 events 是**滚动窗口内**的 COUNT(*)，
+#    老事件出窗即下降，**不是单调量**；而 `-gt` 判定是从 MCP topIssues 时代原样搬来的。
+#
+# ⚠️ bq 路径的「跳过」本来就省不了任何东西——那一行数据已经在 $SNAP 里（就是 bq 查询的结果），
+#    跳过只避免了一次 jq + mv。是模型路径（fetch-snapshot.sh）才真省一次昂贵的 MCP 调用。
+FETCH_NEW=0; FETCH_APPEND=0; FETCH_SKIP=0; REC_UPDATED=0
 while IFS=$'\t' read -r iid plat title events users latest; do
   [ -n "$iid" ] || continue
   f="$ISSUES_DIR/$iid.json"
+  now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+  # ── ① 抓取判定（bq 路径下「抓取」退化为空操作，但语义与模型路径保持一致）──
   if [ "$FORCE_REFETCH" = "1" ] || [ ! -f "$f" ]; then
-    jq -n --arg id "$iid" --arg p "$plat" --arg t "$title" --arg l "$latest" \
-          --argjson e "$events" --argjson u "$users" \
-          --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-      '{id:$id, platform:$p, title:$t, events_count_last_seen:$e, users_last_seen:$u,
-        latest_event:$l, source:"bigquery", last_synced:$ts}' > "$f"
-    CACHED_NEW=$((CACHED_NEW+1))
+    verdict=new
   else
     prev="$(jq -r '.events_count_last_seen // 0' "$f" 2>/dev/null || echo 0)"
-    if [ "$events" -gt "$prev" ] 2>/dev/null; then
-      tmp="$(mktemp)"
-      jq --argjson e "$events" --argjson u "$users" --arg l "$latest" \
-         --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-        '.events_count_last_seen=$e | .users_last_seen=$u | .latest_event=$l | .last_synced=$ts' \
-        "$f" > "$tmp" && mv "$tmp" "$f"
-      CACHED_UPD=$((CACHED_UPD+1))
-    else
-      CACHED_HIT=$((CACHED_HIT+1))
-    fi
+    if [ "$events" -gt "$prev" ] 2>/dev/null; then verdict=append; else verdict=skip; fi
   fi
+  case "$verdict" in
+    new)    FETCH_NEW=$((FETCH_NEW+1));;
+    append) FETCH_APPEND=$((FETCH_APPEND+1));;
+    skip)   FETCH_SKIP=$((FETCH_SKIP+1));;
+  esac
+
+  # ── ② 记录更新：无条件执行 ──
+  # ⛔ 更新分支**不碰 `.source`**：该字段区分「只有聚合事实」（bigquery）与「有完整事件数组」（模型路径），
+  # 由创建者写死。更新时改写它会把模型路径记录的来源标签抹掉——events 数组还在，标签却说没有。
+  # latest_event 取 max(已存, 本次)：窗口内的 MAX(event_timestamp) **同样非单调**——
+  # 最新那条事件出窗后，剩余事件的 MAX 会比上一轮更早。直接覆盖会把「冻结」换成更糟的「倒退」
+  # （倒退会让台账显示一个比真实「最近一次发生」更早的时刻，读者据此判断「很久没出现了」，正好相反）。
+  if [ "$verdict" = new ]; then
+    jq -n --arg id "$iid" --arg p "$plat" --arg t "$title" --arg l "$latest" \
+          --argjson e "$events" --argjson u "$users" --argjson w "$DAYS" --arg ts "$now" \
+      '{id:$id, platform:$p, title:$t, events_count_last_seen:$e, users_last_seen:$u,
+        latest_event:$l, window_days:$w, source:"bigquery", last_synced:$ts}' > "$f"
+  else
+    tmp="$(mktemp)"
+    jq --argjson e "$events" --argjson u "$users" --arg l "$latest" \
+       --argjson w "$DAYS" --arg ts "$now" \
+      '.events_count_last_seen=$e | .users_last_seen=$u
+       | .latest_event=(if ((.latest_event // "") < $l) then $l else .latest_event end)
+       | .window_days=$w | .last_synced=$ts' \
+      "$f" > "$tmp" && mv "$tmp" "$f"
+  fi
+  REC_UPDATED=$((REC_UPDATED+1))
 done < <(jq -r '
   (.ios     | map([.id,"ios",     .title, (.events|tostring), (.users|tostring), (.latest // "")] | @tsv) | .[]),
   (.android | map([.id,"android", .title, (.events|tostring), (.users|tostring), (.latest // "")] | @tsv) | .[])
@@ -133,5 +178,8 @@ done < <(jq -r '
 # ⛔ 多字节字符不能紧跟 ${var}：bash 会把全角括号的后续字节并进变量名，
 # set -u 下报 `FORCE_REFETCH?: unbound variable`（CLAUDE.md 记过这条，这里又踩了两次）。
 # 最省事的解法是这类位置一律用 ASCII 括号，别跟全角字符较劲。
-echo "  事实层缓存: 新增 $CACHED_NEW · 更新 $CACHED_UPD · 命中跳过 $CACHED_HIT (FORCE_REFETCH=$FORCE_REFETCH)"
+# 措辞区分两件事：「抓取」的三态是判定结果，「记录」是无条件的。
+# 旧文案「命中跳过 N」在 bq 路径上会造成歧义——每条记录其实都写了，跳过的只是抓取。
+echo "  事实层缓存 · 抓取: 新建 $FETCH_NEW / 增量 $FETCH_APPEND / 跳过 $FETCH_SKIP (FORCE_REFETCH=$FORCE_REFETCH)"
+echo "  事实层缓存 · 记录: 更新 $REC_UPDATED 条 (观测字段每轮无条件刷新，window_days=$DAYS)"
 echo "  → $SNAP"

@@ -403,83 +403,101 @@ fi
 # 旧内容原样保留在其上方，由人工核实后另行清理（design D2：不使用 overwrite，任何阶段都不用）。
 # 之后每一轮跑批，标题已存在，走正常的 block_replace + append 定点更新路径。
 LEDGER_HEADING_TEXT="${CRASH_REPORT_LEDGER_HEADING:-Issue 现状表}"
-sync_ledger() { # $1=doc_id(URL或token) $2=table内容文件(xml优先) $3=table格式(xml|markdown)
-                # $4=timeline增量文件(可空=无新增) $5=timeline格式(xml|markdown)
-                # $6=本地台账全文文件(可空，仅 bootstrap 分支用)
-  local doc="$1" table_file="$2" table_fmt="${3:-markdown}" tl_file="${4:-}" tl_fmt="${5:-markdown}" full_file="${6:-}"
+LEDGER_NF_HEADING_TEXT="${CRASH_REPORT_LEDGER_NF_HEADING:-NON_FATAL 现状表}"
+
+# 按标题文本定位标题块 id。⛔ 只认标题标签（h1-h6），不接受「第一个带 id 的对象」——
+# keyword 检索会命中正文里**提到**同名文字的引用块（2026-08-20 实测因此误判「标题不存在」，
+# 退回 bootstrap 把四段结构重复 append 了两遍）。同名标题多个时取**最后一个**：
+# 旧结构（历史遗留）在上、本流水线建的新结构在下。
+_ledger_heading_id() { # $1=doc $2=标题文本 → stdout: block id（找不到则空）
+  local doc="$1" text="$2" outline hid
+  outline="$("${LK[@]}" docs +fetch --doc "$doc" --scope outline --max-depth 6 \
+              --as "$LARK_AS" --format json 2>&1)" || outline=""
+  hid="$(printf '%s' "$outline" | json_only | jq -r '.data.document.content // ""' 2>/dev/null \
+    | grep -oE "<h[1-6] id=\"[^\"]*\">${text}<" \
+    | sed -E 's/^<h[1-6] id="([^"]*)">.*/\1/' | tail -1 || true)"
+  if [ -z "$hid" ]; then
+    outline="$("${LK[@]}" docs +fetch --doc "$doc" --scope keyword --keyword "$text" \
+                --detail with-ids --as "$LARK_AS" --format json 2>&1)" || outline=""
+    hid="$(printf '%s' "$outline" | json_only | jq -r '.data.document.content // ""' 2>/dev/null \
+      | grep -oE "<h[1-6] id=\"[^\"]*\">${text}<" \
+      | sed -E 's/^<h[1-6] id="([^"]*)">.*/\1/' | tail -1 || true)"
+  fi
+  printf '%s' "$hid"
+}
+
+# 在标题块之下定位表格并 block_replace。
+# ⚠️ 不缓存表格 id：block_replace 每次都会让表格拿到新 id，跨轮必须重查（design D3 第 6 点）。
+# ⚠️ section 返回的是 DocxXML 文本不是块结构 JSON——在 JSON 里找 type=="table" 永远落空。
+_ledger_replace_table() { # $1=doc $2=heading_id $3=内容文件 $4=格式 $5=日志标签 → 0成功/1失败
+  local doc="$1" hid="$2" f="$3" fmt="${4:-markdown}" label="$5" section tid
+  section="$("${LK[@]}" docs +fetch --doc "$doc" --scope section --start-block-id "$hid" \
+              --detail with-ids --as "$LARK_AS" --format json 2>&1)" || section=""
+  tid="$(printf '%s' "$section" | json_only | jq -r '.data.document.content // ""' 2>/dev/null \
+    | grep -oE '<table id="[^"]*"' | head -1 | sed -E 's/^<table id="([^"]*)"/\1/' || true)"
+  if [ -z "$tid" ]; then
+    echo "  ❌ 台账同步失败：「${label}」下定位不到表格 block，中止（不退化为 overwrite）" >&2
+    return 1
+  fi
+  if ! (cd "$(dirname "$f")" && "${LK[@]}" docs +update --command block_replace \
+        --doc "$doc" --block-id "$tid" --doc-format "$fmt" \
+        --content "@$(basename "$f")" --as "$LARK_AS" --format json >/dev/null); then
+    echo "  ❌ 台账同步失败：block_replace「${label}」出错（block-id=${tid}），中止（不退化为 overwrite）" >&2
+    return 1
+  fi
+  echo "  ✅ 台账「${label}」已同步（block_replace，block-id=${tid}）" >&2
+  return 0
+}
+sync_ledger() { # $1=doc_id  $2=FATAL现状表文件  $3=表格式(xml|markdown)
+                # $4=timeline增量文件(可空)  $5=timeline格式  $6=本地台账全文(可空，仅 bootstrap)
+                # $7=NON_FATAL现状表文件(可空)
+  local doc="$1" table_file="$2" table_fmt="${3:-markdown}" tl_file="${4:-}" tl_fmt="${5:-markdown}" full_file="${6:-}" nf_file="${7:-}"
   [ -n "$doc" ] || { echo "  ⚠️ 台账同步跳过：未配置台账文档 ID" >&2; return 1; }
   [ -s "$table_file" ] || { echo "  ⚠️ 台账同步跳过：现状表内容为空（${table_file}）" >&2; return 1; }
 
   if [ "$DRY_RUN" = "1" ]; then
     echo "  [dry-run] 台账同步：定位「${LEDGER_HEADING_TEXT}」→ block_replace 现状表（找不到则 bootstrap append 全文）" >&2
+    [ -s "$nf_file" ] && echo "  [dry-run] 台账同步：定位「${LEDGER_NF_HEADING_TEXT}」→ block_replace NON_FATAL 现状表" >&2
     [ -s "$tl_file" ] && echo "  [dry-run] 台账同步：append 时间线增量（$(wc -l < "$tl_file" | tr -d ' ') 行）" >&2
     return 0
   fi
 
-  # ── 1. 定位「Issue 现状表」标题的 block id ──
-  # ⛔ 只认标题块（h1-h6）。2026-08-20 实测：keyword 检索会命中正文里**提到**这几个字的
-  # 引用块（文档开头那段说明就写着「同步到飞书文档…Issue 现状表」），而旧实现取的是
-  # 「第一个带 id 的对象」，于是拿到引用块 id → 找不到表格 → 误判「标题不存在」→
-  # 每轮都退回 bootstrap append，台账被追加了两份四段结构。
-  local outline heading_id
-  outline="$("${LK[@]}" docs +fetch --doc "$doc" --scope outline --max-depth 6 \
-              --as "$LARK_AS" --format json 2>&1)" || outline=""
-  # outline 返回 DocxXML 文本，直接按 <hN id="..."> 标签匹配同名标题，取最后一个——
-  # 旧结构（历史遗留的「Issue 台账」等）在文档上方，新结构在下方，取最后一个才是本流水线建的那份。
-  heading_id="$(printf '%s' "$outline" | json_only | jq -r '.data.document.content // ""' 2>/dev/null \
-    | grep -oE "<h[1-6] id=\"[^\"]*\">${LEDGER_HEADING_TEXT}<" \
-    | sed -E 's/^<h[1-6] id="([^"]*)">.*/\1/' | tail -1 || true)"
-  # 兜底：outline 拿不到（接口变更 / 文档结构异常）时退回 keyword 检索，
-  # 同样只认标题标签，不再接受任意带 id 的块。
-  if [ -z "$heading_id" ]; then
-    outline="$("${LK[@]}" docs +fetch --doc "$doc" --scope keyword --keyword "$LEDGER_HEADING_TEXT" \
-                --detail with-ids --as "$LARK_AS" --format json 2>&1)" || outline=""
-    heading_id="$(printf '%s' "$outline" | json_only | jq -r '.data.document.content // ""' 2>/dev/null \
-      | grep -oE "<h[1-6] id=\"[^\"]*\">${LEDGER_HEADING_TEXT}<" \
-      | sed -E 's/^<h[1-6] id="([^"]*)">.*/\1/' | tail -1 || true)"
-  fi
+  local heading_id nf_heading_id
+  heading_id="$(_ledger_heading_id "$doc" "$LEDGER_HEADING_TEXT")"
 
   if [ -z "$heading_id" ]; then
     # ── Bootstrap：新结构标题不存在 → append 本地台账全文，旧内容保留在上方 ──
     if [ -n "$full_file" ] && [ -s "$full_file" ]; then
-      echo "  ℹ️ 台账首次同步：目标文档暂无「${LEDGER_HEADING_TEXT}」标题，改用 append 建立新四段结构（旧内容保留，不 overwrite）" >&2
+      echo "  ℹ️ 台账首次同步：目标文档暂无「${LEDGER_HEADING_TEXT}」标题，改用 append 建立新结构（旧内容保留，不 overwrite）" >&2
       if ! (cd "$(dirname "$full_file")" && "${LK[@]}" docs +update --command append \
             --doc "$doc" --doc-format markdown --content "@$(basename "$full_file")" \
             --as "$LARK_AS" --format json >/dev/null); then
         echo "  ❌ 台账首次同步失败：append 全文出错，中止（不退化为 overwrite）" >&2
         return 1
       fi
-      echo "  ✅ 台账新四段结构已 append 建立；下一轮起可 block_replace 定点更新现状表" >&2
+      echo "  ✅ 台账新结构已 append 建立；下一轮起可 block_replace 定点更新两张现状表" >&2
       return 0
     fi
     echo "  ❌ 台账同步失败：定位不到「${LEDGER_HEADING_TEXT}」标题块，且无本地全文可 bootstrap，中止（不退化为 overwrite）" >&2
     return 1
   fi
 
-  # ── 2. 以标题 id 为锚点 section-fetch，在其下找当次现查的表格 block id ─────
-  # 不复用/缓存表格 id：block_replace 每次都会让表格拿到新 id，跨轮必须重查（design D3 第 6 点）。
-  # 与标题定位同理：section 返回的是 DocxXML 文本，不是块结构 JSON——
-  # 旧实现在 JSON 里找 type=="table" 永远落空（2026-08-20 实测）。按 <table id="..."> 标签取。
-  local section table_id
-  section="$("${LK[@]}" docs +fetch --doc "$doc" --scope section --start-block-id "$heading_id" \
-              --detail with-ids --as "$LARK_AS" --format json 2>&1)" || section=""
-  table_id="$(printf '%s' "$section" | json_only | jq -r '.data.document.content // ""' 2>/dev/null \
-    | grep -oE '<table id="[^"]*"' | head -1 | sed -E 's/^<table id="([^"]*)"/\1/' || true)"
-  if [ -z "$table_id" ]; then
-    echo "  ❌ 台账同步失败：标题「${LEDGER_HEADING_TEXT}」下定位不到表格 block，中止同步（不退化为 overwrite）" >&2
-    return 1
+  _ledger_replace_table "$doc" "$heading_id" "$table_file" "$table_fmt" "$LEDGER_HEADING_TEXT" || return 1
+
+  # NON_FATAL 现状表：与 FATAL **分两张表**，不加「类型」列混排——单表混排时两类交错，
+  # 读者无法一眼看出「有几个致命问题」，而那是台账最主要的用途。
+  # ⚠️ 标题不存在时**只警告不中止**：FATAL 表已同步成功，因一张新表让整个同步失败会连带丢掉已成功的那半。
+  if [ -n "$nf_file" ] && [ -s "$nf_file" ]; then
+    nf_heading_id="$(_ledger_heading_id "$doc" "$LEDGER_NF_HEADING_TEXT")"
+    if [ -z "$nf_heading_id" ]; then
+      echo "  ⚠️ 台账「${LEDGER_NF_HEADING_TEXT}」标题尚不存在，本轮跳过（FATAL 现状表已同步）。首次需在台账文档中加入该标题与一张占位表格。" >&2
+    else
+      _ledger_replace_table "$doc" "$nf_heading_id" "$nf_file" markdown "$LEDGER_NF_HEADING_TEXT" \
+        || echo "  ⚠️ NON_FATAL 现状表同步失败（FATAL 现状表已同步成功，不影响主链路）" >&2
+    fi
   fi
 
-  # ── 3. block_replace 现状表（定点覆盖，不影响文档其余部分包括时间线历史）───
-  if ! (cd "$(dirname "$table_file")" && "${LK[@]}" docs +update --command block_replace \
-        --doc "$doc" --block-id "$table_id" --doc-format "$table_fmt" \
-        --content "@$(basename "$table_file")" --as "$LARK_AS" --format json >/dev/null); then
-    echo "  ❌ 台账同步失败：block_replace 现状表出错（block-id=${table_id}），中止（不退化为 overwrite）" >&2
-    return 1
-  fi
-  echo "  ✅ 台账现状表已同步（block_replace，block-id=${table_id}）" >&2
-
-  # ── 4. append 时间线增量（只增不改；无增量则跳过，不产生空 append）────────
+  # ── append 时间线增量（只增不改；无增量则跳过，不产生空 append）────────
   if [ -s "$tl_file" ]; then
     if (cd "$(dirname "$tl_file")" && "${LK[@]}" docs +update --command append \
           --doc "$doc" --doc-format "$tl_fmt" --content "@$(basename "$tl_file")" \
@@ -577,10 +595,31 @@ case "$TYPE" in
     LEDGER_TABLE_FILE="$(m ledger_sync.table_file)"
     LEDGER_TIMELINE_FILE="$(m ledger_sync.timeline_file)"
     LEDGER_LOCAL_FILE="$(m ledger_sync.local_file)"
-    if [ -n "$LEDGER_TABLE_FILE" ] && [ "$IS_PROD" != "1" ]; then
+    LEDGER_NF_FILE="$(m ledger_sync.nonfatal_file)"
+    # 自测闸门：非群投递默认跳过台账同步——两台机器的 docs.json 指向**同一份**台账文档，
+    # 从开发机同步会把测试结论写进群里那份。
+    #
+    # **但这个理由只在「目标就是那份文档」时成立。** 显式指定另一份文档时风险不存在，
+    # 而台账同步是整条链路里唯一无法在开发机验证的一段（block_replace 定位、
+    # 时间线不被覆盖、两张现状表各自替换——这些只有真同步才验得到）。
+    # 故开一个**比闸门更窄**的口子：非群投递时，仅当 CRASH_REPORT_LEDGER_DOC_ID
+    # 被显式设置**且与 docs.json 里那份不同**才放行。指成生产台账照样拒绝。
+    LEDGER_DOC_ID="${CRASH_REPORT_LEDGER_DOC_ID:-$(doc_get ledger)}"
+    LEDGER_ALLOW=0
+    if [ "$IS_PROD" = "1" ]; then
+      LEDGER_ALLOW=1
+    elif [ -n "${CRASH_REPORT_LEDGER_DOC_ID:-}" ]; then
+      if [ "$CRASH_REPORT_LEDGER_DOC_ID" != "$(doc_get ledger)" ]; then
+        LEDGER_ALLOW=1
+        echo "  🧪 自测台账同步：目标是显式指定的另一份文档（非 docs.json 里那份），放行"
+      else
+        echo "  ⛔ 拒绝：CRASH_REPORT_LEDGER_DOC_ID 指向的正是 docs.json 里那份生产台账，自测模式下不放行"
+      fi
+    fi
+    if [ -n "$LEDGER_TABLE_FILE" ] && [ "$LEDGER_ALLOW" != "1" ]; then
       echo "  ⏭️ 自测模式，跳过台账同步（它是群里那份固定文档，测试结论不得写入）"
+      echo "     要验证同步逻辑：CRASH_REPORT_LEDGER_DOC_ID=<另建一份测试文档> 重跑 deliver.sh"
     elif [ -n "$LEDGER_TABLE_FILE" ]; then
-      LEDGER_DOC_ID="${CRASH_REPORT_LEDGER_DOC_ID:-$(doc_get ledger)}"
       if [ -z "$LEDGER_DOC_ID" ]; then
         echo "  ⚠️ 台账同步跳过：未配置台账文档（CRASH_REPORT_LEDGER_DOC_ID 或 docs.json 的 ledger 键）"
       else
@@ -591,10 +630,10 @@ case "$TYPE" in
           [ -s "$LEDGER_LOCAL_FILE" ] && fill "$LEDGER_LOCAL_FILE" "__REPORT_URL__" "$URL_REPORT"
         fi
         if [ -s "$LEDGER_TIMELINE_FILE" ]; then
-          sync_ledger "$LEDGER_DOC_ID" "$LEDGER_TABLE_FILE" markdown "$LEDGER_TIMELINE_FILE" markdown "$LEDGER_LOCAL_FILE" \
+          sync_ledger "$LEDGER_DOC_ID" "$LEDGER_TABLE_FILE" markdown "$LEDGER_TIMELINE_FILE" markdown "$LEDGER_LOCAL_FILE" "$LEDGER_NF_FILE" \
             || echo "  ⚠️ 台账同步未完成（详见上方日志），数据已落本地 ${LEDGER_LOCAL_FILE}，下次跑批会重试"
         else
-          sync_ledger "$LEDGER_DOC_ID" "$LEDGER_TABLE_FILE" markdown "" markdown "$LEDGER_LOCAL_FILE" \
+          sync_ledger "$LEDGER_DOC_ID" "$LEDGER_TABLE_FILE" markdown "" markdown "$LEDGER_LOCAL_FILE" "$LEDGER_NF_FILE" \
             || echo "  ⚠️ 台账同步未完成（详见上方日志），数据已落本地 ${LEDGER_LOCAL_FILE}，下次跑批会重试"
         fi
       fi

@@ -9,6 +9,10 @@
 -- 也不等于 user.id（Android 不上报 user.id）。
 --
 -- 取 {{LIMIT}} 条：与 topIssues 一样只关心头部，长尾进台账只会稀释信噪比。
+--
+-- **只统计致命崩溃**：`is_fatal = TRUE` 等价于 `error_type = 'FATAL'`。ANR 与 NON_FATAL 的
+-- is_fatal 均为 FALSE，由 crash-error-types.sql / crash-nonfatal-issues.sql 覆盖。
+-- 台账的 FATAL 现状表源自本文件；NON_FATAL 现状表源自 crash-nonfatal-issues.sql，两表分列。
 SELECT
   issue_id                                                       AS id,
   issue_title                                                    AS title,

@@ -5,7 +5,8 @@
 # 纯函数：只读输入、只写 stdout，不碰任何持久文件——持久化由调用方负责。
 #
 # 用法：render-ledger.sh <snapshot.json> <fixmap.json> <prev_table.md或空> <diff.json> <day> <report_url>
-# 输出：两段用 \x1e（record separator）分隔写到 stdout —— 第一段现状表 markdown，第二段时间线 markdown。
+# 输出：**三段**用 \x1e（record separator）分隔写到 stdout：
+#   ① FATAL 现状表 markdown  ② 变更时间线 markdown  ③ NON_FATAL 现状表 markdown
 set -euo pipefail
 
 SNAPSHOT="${1:?用法：render-ledger.sh <snapshot.json> <fixmap.json> <prev_table.md或空> <diff.json> <day> <report_url>}"
@@ -90,6 +91,33 @@ build_rows() { # $1=平台标签(iOS|Android) $2=snapshot key(ios|android)
 TABLE_MD="$(cat /tmp/.render-ledger-table.$$)"
 rm -f /tmp/.render-ledger-table.$$
 
+# ── NON_FATAL 现状表 ────────────────────────────────────
+# **与 FATAL 分两张表，不加「类型」列混排**：单表混排时两类交错，读者无法一眼看出
+# 「有几个致命问题」——而那是台账最主要的用途。
+# **必须截断**：取数层已按受影响安装数取 top N；此处标注未呈现的数量，不静默丢弃。
+NF_TABLE=""
+nf_rows() { # $1=平台标签 $2=snapshot key
+  # 空标题必须渲染成「—」：iOS 存在 issue_title 为空的记录（实测 a7cb1856），
+  # 空单元格会被读成「渲染坏了」。`// "—"` 挡不住空字符串，必须显式判空。
+  jq -r --arg label "$1" --arg key "$2" '
+    ((.nonfatal[$key]) // [])[] |
+    "| \($label) | \(.issue_id[0:8]) | \(if (.title // "") == "" then "—" else .title end) | \(if (.subtitle // "") == "" then "—" else .subtitle end) | \(.n) | \(.users) | \(.latest) |"
+  ' "$SNAPSHOT" 2>/dev/null || true
+}
+NF_N_IOS="$(jq -r '((.nonfatal.ios) // []) | length' "$SNAPSHOT" 2>/dev/null || echo 0)"
+NF_N_AND="$(jq -r '((.nonfatal.android) // []) | length' "$SNAPSHOT" 2>/dev/null || echo 0)"
+if [ "$NF_N_IOS" != "0" ] || [ "$NF_N_AND" != "0" ]; then
+  NF_TABLE="$({
+    printf '| 平台 | Issue ID | 位置 | 异常 | 事件 | 影响安装 | 最新 |\n'
+    printf '|---|---|---|---|---|---|---|\n'
+    nf_rows "iOS" ios
+    nf_rows "Android" android
+    # ⛔ **只输出表格本身，不带说明文字**：deliver.sh 的 block_replace 替换的是飞书文档里的
+    # 单个 <table> 块，把说明一起塞进去会把段落挤进表格位置。说明常驻在文档/LEDGER.md 的
+    # 标题下方（静态内容，不参与同步），与 FATAL 现状表同一套做法。
+  })"
+fi
+
 # ── 变更时间线：只记录真正的变化（新增/消失/暴涨/反扫命中的状态变更），平稳周不追加 ──
 TIMELINE_LINES=""
 add_line() { TIMELINE_LINES="${TIMELINE_LINES}- ${DAY}：$1$([ -n "$REPORT_URL" ] && printf ' · [周报](%s)' "$REPORT_URL")
@@ -119,4 +147,4 @@ while IFS=$'\t' read -r id plat status commit subject; do
   add_line "🛠️ [$plat] $status ${subject}（${commit}，issue ${id:0:8}）"
 done < <(jq -r '.mapped // {} | to_entries[] | [.key, .value.platform, .value.status, .value.commit, .value.subject] | @tsv' "$FIXMAP" 2>/dev/null || true)
 
-printf '%s\x1e%s' "$TABLE_MD" "$TIMELINE_LINES"
+printf '%s\x1e%s\x1e%s' "$TABLE_MD" "$TIMELINE_LINES" "$NF_TABLE"
