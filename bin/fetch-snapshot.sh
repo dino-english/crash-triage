@@ -152,19 +152,65 @@ fi
 # --add-dir 必须带 Android 仓库与 ${STATE}（事实层缓存读写落在 $STATE/issues/，不在两个业务仓库下），
 # 否则 git 反查 / 事实层文件访问被权限边界拦下、静默产出未验证的 null。
 cd "$IOS_REPO"
-AGENT_RC=0
-"${AGENT_CMD:-claude}" -p "$PROMPT" \
-  --add-dir "$AND_REPO" \
-  --add-dir "$STATE" \
-  --allowedTools \
-    "mcp__firebase__crashlytics_get_report" \
-    "mcp__firebase__crashlytics_get_issue" \
-    "mcp__firebase__crashlytics_list_events" \
-    "mcp__firebase__crashlytics_batch_get_events" \
-    "Read" "Write" "Grep" "Glob" \
-    "Bash(git log:*)" "Bash(git -C:*)" "Bash(git branch:*)" "Bash(git show:*)" \
-  --mcp-config "$ROOT/bin/mcp.json" \
-  < /dev/null || AGENT_RC=$?
+
+# ── 模型调用：一次重试 + 产物校验 + 失败诊断（2026-08-23）────────
+# 起因：同日实测同一条命令首次退出码 1、**stdout 与 stderr 全空**，原样重跑即成功。
+# 这个失败模式不留任何诊断信息，后果却是静默的——crash-weekly.sh 拿到非零退出码后
+# 只在周报与卡片上标一行「本周无深度分析」，整跑照常「成功」退出，没人会去追。
+#
+# ⛔ **成功判据不能只看退出码**：那次失败里 snapshot.json 写出来了、report.md 没有。
+#    只看退出码的话，一个「rc=0 但少写一份产物」的变体会直接溜过去，
+#    而下游 crash-weekly.sh 判的是 `[ -s "$OUT_DIR/analysis/report.md" ]`——
+#    两处判据不一致，正是「静默降级」的温床。
+#
+# 重试次数保守取 2：观测到的失败第二次即成功；模型调用不便宜，且 crash-weekly.sh
+# 外层还有 TRIAGE_TIMEOUT 兜着，无限重试会把整跑拖成超时（超时的诊断价值更低）。
+AGENT_LOG_BASE="$OUT_DIR/agent"
+ATTEMPTS="${CRASH_REPORT_AGENT_ATTEMPTS:-2}"
+AGENT_RC=1
+
+# allowedTools 必须逐个列只读工具（理由见上方注释块）。
+run_agent() { # $1=尝试序号；输出同时进 stdout（跑批日志）与 agent-<N>.log（事后排查）
+  "${AGENT_CMD:-claude}" -p "$PROMPT" \
+    --add-dir "$AND_REPO" \
+    --add-dir "$STATE" \
+    --allowedTools \
+      "mcp__firebase__crashlytics_get_report" \
+      "mcp__firebase__crashlytics_get_issue" \
+      "mcp__firebase__crashlytics_list_events" \
+      "mcp__firebase__crashlytics_batch_get_events" \
+      "Read" "Write" "Grep" "Glob" \
+      "Bash(git log:*)" "Bash(git -C:*)" "Bash(git branch:*)" "Bash(git show:*)" \
+    --mcp-config "$ROOT/bin/mcp.json" \
+    < /dev/null 2>&1 | tee "${AGENT_LOG_BASE}-$1.log"
+}
+
+# 产物齐全才算成功；full 模式多要一份 report.md（与 crash-weekly.sh 的判据对齐）。
+artifacts_ok() {
+  [ -s "$OUT_DIR/snapshot.json" ] || return 1
+  if [ "$MODE" = "full" ]; then [ -s "$OUT_DIR/report.md" ] || return 1; fi
+  return 0
+}
+
+# ⚠️ 不能写成 `wc -c < "$1" 2>/dev/null`：`<` 的失败发生在 shell 展开阶段、早于 wc 启动，
+# wc 的 2>/dev/null 压不住它——文件不存在时会漏出一行 "No such file or directory"，
+# 而这个函数正是在「产物缺失」的失败路径上被调用的，等于每次都吐一行噪声。
+_bytes() { if [ -f "$1" ]; then wc -c < "$1" | tr -d ' '; else printf '0'; fi; }
+
+for _try in $(seq 1 "$ATTEMPTS"); do
+  _t0="$(date +%s)"
+  AGENT_RC=0
+  run_agent "$_try" || AGENT_RC=$?
+  _el="$(( $(date +%s) - _t0 ))"
+  if [ "$AGENT_RC" = 0 ] && artifacts_ok; then
+    if [ "$_try" -gt 1 ]; then echo "  ✅ 分析层第 $_try 次尝试成功（耗时 ${_el}s）" >&2; fi
+    break
+  fi
+  # 这三行正是上次失败时**全都缺失**的信息：退出码 / 模型输出量 / 产物落盘情况
+  echo "  ⚠️ 分析层第 $_try/$ATTEMPTS 次失败：退出码 $AGENT_RC · 耗时 ${_el}s · 模型输出 $(_bytes "${AGENT_LOG_BASE}-$_try.log") 字节" >&2
+  echo "     产物 snapshot.json $(_bytes "$OUT_DIR/snapshot.json") 字节 · report.md $(_bytes "$OUT_DIR/report.md") 字节（完整输出见 ${AGENT_LOG_BASE}-$_try.log）" >&2
+  if [ "$AGENT_RC" = 0 ]; then AGENT_RC=1; fi   # rc=0 但产物不全，同样判失败
+done
 
 # ── 事实层落盘校验（2026-08-23）─────────────────────────
 # 这些文件由模型用 Write 工具**直接写盘**，shell 侧没有写入点可以校验，唯一能挂的位置是这里。
