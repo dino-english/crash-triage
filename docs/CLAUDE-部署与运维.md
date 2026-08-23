@@ -122,3 +122,67 @@ scp dino911@dino911s-mac-mini:.local/state/crash-triage/report-index.jsonl repor
   在本机补投。样例见 [bin/local.env.example](bin/local.env.example)。起因是 2026-08-20 一次测试
   命令行直接写了正式群 ID。
 
+
+## 链路对照（拆分前 CLAUDE.md「这是什么」全表）
+
+两条独立链路（详见 [bin/INSTALL.md](bin/INSTALL.md) §0）：
+
+| | L1 日报 `crash-daily.sh` | L2 周报 `crash-weekly.sh` |
+|---|---|---|
+| 定时 | 每天 07:00（Hermes cron） | 每周一 05:30（Hermes cron） |
+| 数据源 | BigQuery（crashlytics / sessions / performance） | BigQuery（`fetch-snapshot-bq.sh`）+ git 反查 |
+| 用不用模型 | 否（`fetch-snapshot.sh` light 对照除外） | **数据层否**；仅分析层（`report.md` 根因/方案）用模型，失败只降级 |
+| 职责 | **高频数据呈现**，不做分析、不碰结论 | **分析与结论沉淀** |
+| 产出 | 群卡片 + 日报 + 索引页（**不含台账**，change `crash-ledger-l2-ownership`） | 周报文档 + 群卡片 + 索引页归档 + **台账同步** |
+| 性能 | 日维度当期值 | 周维度趋势 + WoW（不出根因） |
+| 版本口径 | **只统计最新 2 个版本**（按版本号），按版本分列 + 版本间对比 | **主力版本**（近 7 天会话量 top2） |
+
+**两条链路都只读业务仓库，不 commit / 不 push / 不改业务代码。**
+
+## 常用命令（完整版，含 SQL 手工验证示例）
+
+## 常用命令
+
+```bash
+# DRY RUN（投递目标由 local.env 定，不用传 CHAT_ID；ROOT 自动探测）
+CRASH_REPORT_DRY_RUN=1 bash bin/crash-daily.sh
+CRASH_REPORT_DRY_RUN=1 bash bin/crash-weekly.sh
+
+# ⚠️ DRY_RUN 在打完卡片预览后就 exit 0，**跑不到 build_index / manifest**。
+#    要验索引页或投递清单，用 NO_DELIVER（走完整链路，只是不投）：
+CRASH_REPORT_NO_DELIVER=1 bash bin/crash-daily.sh
+
+# ⚠️ 整跑要 5 分钟以上。别给它设短超时——进程被信号杀掉会触发 ERR trap，
+#    把「被杀」当成故障告警发出去（2026-08-20 因 2 分钟超时误报进群）。
+
+# 单条 SQL 手工验证（脚本用 sed 替换占位符再喂 bq）
+sed -e "s|{{TABLE}}|dino-english-497507.firebase_performance.com_prime_dino_english_IOS|g" \
+    -e "s|{{DAYS}}|3|g" -e 's|{{VERSIONS}}|"1.5.4"|g' \
+    bin/sql/perf-screens.sql | bq query --use_legacy_sql=false --format=csv
+
+# 装机 / 换机后重探工具路径（换过 node/brew 位置后必须重跑，否则 cron job 起不来）
+bash bin/setup.sh
+
+# 一键装机（探路径 + 授权自检 + 生成 wrapper + 注册 cron）／更新（拉代码 + 重探 + 自检）
+bash bin/install.sh
+bash bin/update.sh
+
+# 改脚本后的唯一自动检查，写完立刻跑
+bash bin/check-scripts.sh
+
+# 事实层缓存的产物断言（prompt 类代码唯一可靠的测试形式）
+FACT_CACHE_BASELINE=<跑批前的 issues 快照目录> bash bin/test/assert-fact-cache.sh
+
+# 运维
+hermes cron list                                # 两个 job 的调度 / 上次状态
+hermes cron edit 92d0ff92e222 --schedule '0 7 * * *'   # 改时间（job id 见 list）
+hermes cron pause <job_id>                      # 停掉
+STATE="${XDG_STATE_HOME:-$HOME/.local/state}/crash-triage"
+cat "$STATE/health-daily.json"                  # L1；L2 是 health.json
+ls -t "$STATE/logs" | head                      # 日志保留 60 天
+sqlite3 ~/.hermes/cron/executions.db \
+  "SELECT job_id,status,claimed_at,finished_at FROM executions ORDER BY claimed_at DESC LIMIT 5;"
+```
+
+> ⚠️ `hermes cron run <id>` 手工触发**总是打印 `Ran now: failed`**，与实际成败无关——Hermes 后台派发路径只设 `executed=True` 却漏设 `execution_success`（`tools/cronjob_tools.py:1347` vs `hermes_cli/cron.py:476`）。**以 `executions.db` 的 status 和脚本日志为准**，别追这个假故障（2026-08-18 踩过）。
+
