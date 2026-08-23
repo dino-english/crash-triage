@@ -49,3 +49,22 @@ cleanup_old_runs() {
   # rmdir 只删空目录、非空目录原样跳过，失败（如目录非空）忽略不中止脚本。
   find "$state/runs" -mindepth 1 -type d -empty -exec rmdir {} + 2>/dev/null || true
 }
+
+# 审计事件（change crash-perf-execution-audit-log）：一行一条完整 JSON，append-only，
+# 落 ${AUDIT_FILE}。三条纪律：
+#   1. 写入失败不得影响主链路（整组 || true）——审计只记录、不 gating；
+#   2. AUDIT_FILE 未设时静默跳过——未接入的进程（deliver.sh 等）调用共享函数不受影响；
+#   3. seq 用文件行数不用 shell 变量自增——事件常在命令替换的子 shell 里落
+#      （取数都是 rows="$(q …)" 形态），子 shell 里的自增传不回主进程
+#      （同 common.sh 里 ALERTED 的坑），文件行数则天然跨子 shell 单调。
+audit() { # $1=type $2=step $3=payload（JSON 对象文本，可省=空对象）
+  [ -n "${AUDIT_FILE:-}" ] || return 0
+  {
+    local seq payload
+    payload="${3:-}"; [ -n "$payload" ] || payload='{}'
+    if [ -f "$AUDIT_FILE" ]; then seq=$(( $(wc -l < "$AUDIT_FILE") + 1 )); else seq=1; fi
+    jq -c -n --argjson seq "$seq" --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+      --arg run "${RUN_ID:-${TS:-}}" --arg type "$1" --arg step "${2:-}" --argjson payload "$payload" \
+      '{seq:$seq, ts:$ts, run_id:$run, type:$type, step:$step, payload:$payload}' >> "$AUDIT_FILE"
+  } 2>/dev/null || true
+}

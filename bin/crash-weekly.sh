@@ -63,6 +63,12 @@ LOG="$STATE/logs/weekly-$TS.log"
 SNAP_NEW="$STATE/snapshot-$TS.json"
 SNAP_LAST="$STATE/last-snapshot.json"
 HEALTH="$STATE/health.json"
+RUN_ID="$TS"
+# 审计事件流（change crash-perf-execution-audit-log）：命名同 logs/ 的 weekly- 前缀，
+# 与 L1 共用 audit/ 目录，不带前缀会让同日重复检测把对方误判成重复
+AUDIT_DIR="$STATE/audit"
+AUDIT_FILE="$AUDIT_DIR/weekly-$RUN_ID.events.jsonl"
+mkdir -p "$AUDIT_DIR"
 
 # ── 配置 ───────────────────────────────────────────────
 CHAT_ID="${CRASH_REPORT_CHAT_ID:?未设置 CRASH_REPORT_CHAT_ID}"   # 目标群；先用私聊验证再换群
@@ -99,7 +105,6 @@ else
 fi
 set -o errtrace
 trap 'on_err' ERR   # 不传 ${LINENO}：bash 3.2 下它不准，位置改由 err_stack 的函数链给
-fail() { echo "❌ $*"; jq -n --arg t "$TS" --arg e "$*" '{last_run:$t,ok:false,error:$e}' > "$HEALTH"; alert_once "$CURRENT_STEP" "$*" 1; exit 1; }
 
 # ── 1. 凭证探活（端到端真调，不猜状态字符串）──────────
 # 飞书投递已改由 Hermes agent 经 lark-mcp 完成，此处只探 firebase。
@@ -143,6 +148,11 @@ done
 . "$ROOT/bin/lib/bq.sh" || { echo "❌ 外壳层缺失：bin/lib/bq.sh" >&2; exit 1; }
 bq_init
 trap 'rm -f "$BQ_SQLTMP"' EXIT
+
+# run.start 与同日重复 run 检测（design D5：只记录不中止——同日重跑常是人工补救）
+audit run.start "" "$(jq -cn --arg day "$DAY" --arg sha "$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo '?')" '{day:$day,git:$sha}')"
+_PRIOR_RUNS="$(find "$AUDIT_DIR" -maxdepth 1 -name "weekly-${RUN_ID%%-*}-*.events.jsonl" ! -name "weekly-${RUN_ID}.events.jsonl" 2>/dev/null | sed 's|.*/||; s|\.events\.jsonl$||' | sort | paste -sd, - || true)"
+[ -z "$_PRIOR_RUNS" ] || audit duplicate_run "" "$(jq -cn --arg p "$_PRIOR_RUNS" '{prior_runs:$p}')"
 
 # 反扫提前到取数之前：它是纯 git、不依赖快照，而快照要用它填 fix_commit。
 LEDGER_DIR="$STATE/ledger"
@@ -669,7 +679,8 @@ REPORT="$STATE/reports/$DAY-weekly.md"
 {
   printf '# 崩溃周报 · %s %s\n\n' "$DAY" "$WEEK_TAG"
   printf '> 取数区间 %sd：**%s**\n' "$WEEK_DAYS" "$WIN_FULL"
-  printf '> 窗口起点 = 本次跑批时刻 − %s 天（SQL 下界）；终点 = sessions 活表实际取到的最新数据。\n\n' "$WEEK_DAYS"
+  printf '> 窗口起点 = 本次跑批时刻 − %s 天（SQL 下界）；终点 = sessions 活表实际取到的最新数据。\n' "$WEEK_DAYS"
+  printf '> 本次运行 %s · 审计 $STATE/audit/weekly-%s.events.jsonl\n\n' "$RUN_ID" "$RUN_ID"
   printf '## 一、本周变化\n\n%s\n\n' "$CHANGES_MD"
   printf '## 二、主力版本（近 %s 天会话量 top2）\n\n' "$WEEK_DAYS"
   adopt_md
@@ -811,7 +822,8 @@ if [ "${CRASH_REPORT_NO_DELIVER:-0}" != "1" ] && [ -x "$ROOT/bin/deliver.sh" ]; 
 fi
 
 # ── 8. 收尾 ───────────────────────────────────────────
-jq -n --arg t "$TS" --argjson c "$CHANGED" '{last_run:$t,ok:true,changes:$c}' > "$HEALTH"
+jq -n --arg t "$TS" --argjson c "$CHANGED" '{last_run:$t,run_id:$t,ok:true,changes:$c}' > "$HEALTH"
+audit run.end "" '{"ok":true}'
 
 # latest 软链指向本次跑批产物，供 2.4/2.5 回归对比与人工排查使用（ln -sfn 覆盖式，指向相对路径避免机器间路径漂移）
 ln -sfn "$TS" "$STATE/runs/$DAY/L2/latest"

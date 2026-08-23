@@ -72,9 +72,12 @@ TS_HM="$(date +%H:%M)"
 DAY="$(date +%Y-%m-%d)"
 LOG="$STATE/logs/daily-$TS.log"
 RUN_ID="$TS"
+# 审计事件流（change crash-perf-execution-audit-log）：每 run 一个 JSONL，
+# 只记录不 gating。文件名带 daily-/weekly- 前缀（同 logs/ 命名）——两条链路共用
+# audit/ 目录，不带前缀会让同日重复 run 检测把对方误判成重复。
 AUDIT_DIR="$STATE/audit"
-AUDIT_FILE="$AUDIT_DIR/$RUN_ID.events.jsonl"
-SEQ=0
+AUDIT_FILE="$AUDIT_DIR/daily-$RUN_ID.events.jsonl"
+mkdir -p "$AUDIT_DIR"
 SQL_DIR="${SQL_DIR:-$ROOT/bin/sql}"
 PROJECT="dino-english-497507"
 
@@ -174,7 +177,6 @@ else
 fi
 set -o errtrace
 trap 'on_err' ERR   # 不传 ${LINENO}：bash 3.2 下它不准，位置改由 err_stack 的函数链给
-fail() { echo "❌ $*"; jq -n --arg t "$TS" --arg e "$*" '{last_run:$t,ok:false,error:$e}' > "$STATE/health-daily.json"; alert_once "$CURRENT_STEP" "$*" 1; exit 1; }
 
 # ── bq 超时护栏（2026-08-19 事故修复）─────────────────
 # 事故：07:00 那次 L1 卡在「逐版本取数」，日志 07:06 起再无输出，3600s 后被 cron 判超时，
@@ -210,6 +212,11 @@ done
 bq_init
 trap 'rm -f "$BQ_SQLTMP"' EXIT
 
+# run.start 与同日重复 run 检测（design D5：只记录不中止——同日重跑常是人工补救）
+audit run.start "" "$(jq -cn --arg day "$DAY" --arg sha "$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo '?')" '{day:$day,git:$sha}')"
+_PRIOR_RUNS="$(find "$AUDIT_DIR" -maxdepth 1 -name "daily-${RUN_ID%%-*}-*.events.jsonl" ! -name "daily-${RUN_ID}.events.jsonl" 2>/dev/null | sed 's|.*/||; s|\.events\.jsonl$||' | sort | paste -sd, - || true)"
+[ -z "$_PRIOR_RUNS" ] || audit duplicate_run "" "$(jq -cn --arg p "$_PRIOR_RUNS" '{prior_runs:$p}')"
+
 # ── 探活 ──────────────────────────────────────────────
 # 飞书投递已改由 Hermes agent 经 lark-mcp 完成（脚本只产出内容、不再直连飞书），此处只探数据源。
 bqq csv 'SELECT 1' >/dev/null 2>&1 \
@@ -222,29 +229,60 @@ mkdir -p "$TMP"
 vlist() { printf '"%s"' "$1"; }   # 单版本 → "1.5.4"（多版本形式保留给未来 N>1 的合并查询）
 
 q() { # $1=sql文件 $2=表名 $3=窗口天数 $4=版本 → CSV（无表头）
-  bqq csv "$(sed -e "s|{{TABLE}}|$2|g" -e "s|{{DAYS}}|$3|g" -e "s|{{VERSIONS}}|$(vlist "$4")|g" "$SQL_DIR/$1")" \
-    | tail -n +2 || true
+  local _t0=$SECONDS _rc=0 _out
+  _out="$(bqq csv "$(sed -e "s|{{TABLE}}|$2|g" -e "s|{{DAYS}}|$3|g" -e "s|{{VERSIONS}}|$(vlist "$4")|g" "$SQL_DIR/$1")" \
+    | tail -n +2)" || _rc=$?
+  audit query q "$(jq -cn --arg sql "$1" --arg tbl "$2" --arg days "$3" --arg ver "$4" \
+    --argjson rows "$(printf '%s' "$_out" | grep -c . || true)" --argjson secs "$((SECONDS - _t0))" --argjson rc "$_rc" \
+    '{fn:"q",sql:$sql,table:$tbl,days:$days,version:$ver,rows:$rows,secs:$secs,rc:$rc}')"
+  [ -n "$_out" ] && printf '%s\n' "$_out"
+  return 0
 }
 qc() { # $1=sql文件 $2=crashlytics表 $3=sessions表 $4=窗口天数 $5=版本 → JSON
   # 崩溃查询用 --format=json + jq 渲染：issue 标题是自由文本可能含逗号，CSV+awk 会错列。
-  bqq json "$(sed -e "s|{{TABLE}}|$2|g" -e "s|{{SESSIONS_TABLE}}|$3|g" -e "s|{{DAYS}}|$4|g" \
-                  -e "s|{{VERSIONS}}|$(vlist "$5")|g" -e "s|{{LIMIT}}|${ISSUE_LIMIT:-20}|g" "$SQL_DIR/$1")" || true
+  local _t0=$SECONDS _rc=0 _out
+  _out="$(bqq json "$(sed -e "s|{{TABLE}}|$2|g" -e "s|{{SESSIONS_TABLE}}|$3|g" -e "s|{{DAYS}}|$4|g" \
+                  -e "s|{{VERSIONS}}|$(vlist "$5")|g" -e "s|{{LIMIT}}|${ISSUE_LIMIT:-20}|g" "$SQL_DIR/$1")")" || _rc=$?
+  audit query qc "$(jq -cn --arg sql "$1" --arg tbl "$2" --arg days "$4" --arg ver "$5" \
+    --argjson rows "$(printf '%s' "$_out" | jq 'length' 2>/dev/null || echo -1)" --argjson secs "$((SECONDS - _t0))" --argjson rc "$_rc" \
+    '{fn:"qc",sql:$sql,table:$tbl,days:$days,version:$ver,rows:$rows,secs:$secs,rc:$rc}')"
+  [ -n "$_out" ] && printf '%s\n' "$_out"
+  return 0
 }
 # 维度查询：crash-dimensions.sql 需要额外的 {{DIM}} / {{SESS_DIM}} / {{SESSIONS_TABLE}} / {{MIN_SESSIONS}}，
 # 与 q()/qc() 的占位符集合不同，单独一个助手，不把 q() 撑成万能函数。
 qdim() { # $1=crash表 $2=sessions表 $3=版本 $4=维度表达式 $5=取几条 → CSV（无表头）
-  bqq csv "$(sed -e "s|{{TABLE}}|$1|g" -e "s|{{SESSIONS_TABLE}}|$2|g" -e "s|{{DAYS}}|$CRASH_DAYS|g" \
+  local _t0=$SECONDS _rc=0 _out
+  _out="$(bqq csv "$(sed -e "s|{{TABLE}}|$1|g" -e "s|{{SESSIONS_TABLE}}|$2|g" -e "s|{{DAYS}}|$CRASH_DAYS|g" \
                  -e "s|{{VERSIONS}}|$(vlist "$3")|g" -e "s|{{DIM}}|$4|g" -e "s|{{SESS_DIM}}|$4|g" \
                  -e "s|{{LIMIT}}|$5|g" -e "s|{{MIN_SESSIONS}}|$DIM_MIN_SESSIONS|g" \
-                 "$SQL_DIR/crash-dimensions.sql")" | tail -n +2 || true
+                 "$SQL_DIR/crash-dimensions.sql")" | tail -n +2)" || _rc=$?
+  audit query qdim "$(jq -cn --arg tbl "$1" --arg ver "$3" --arg dim "$4" \
+    --argjson rows "$(printf '%s' "$_out" | grep -c . || true)" --argjson secs "$((SECONDS - _t0))" --argjson rc "$_rc" \
+    '{fn:"qdim",sql:"crash-dimensions.sql",table:$tbl,version:$ver,dim:$dim,rows:$rows,secs:$secs,rc:$rc}')"
+  [ -n "$_out" ] && printf '%s\n' "$_out"
+  return 0
 }
 qhours() { # $1=crash表 $2=版本 → CSV（无表头）
-  bqq csv "$(sed -e "s|{{TABLE}}|$1|g" -e "s|{{DAYS}}|$CRASH_DAYS|g" \
-                 -e "s|{{VERSIONS}}|$(vlist "$2")|g" "$SQL_DIR/crash-hours.sql")" | tail -n +2 || true
+  local _t0=$SECONDS _rc=0 _out
+  _out="$(bqq csv "$(sed -e "s|{{TABLE}}|$1|g" -e "s|{{DAYS}}|$CRASH_DAYS|g" \
+                 -e "s|{{VERSIONS}}|$(vlist "$2")|g" "$SQL_DIR/crash-hours.sql")" | tail -n +2)" || _rc=$?
+  audit query qhours "$(jq -cn --arg tbl "$1" --arg ver "$2" \
+    --argjson rows "$(printf '%s' "$_out" | grep -c . || true)" --argjson secs "$((SECONDS - _t0))" --argjson rc "$_rc" \
+    '{fn:"qhours",sql:"crash-hours.sql",table:$tbl,version:$ver,rows:$rows,secs:$secs,rc:$rc}')"
+  [ -n "$_out" ] && printf '%s\n' "$_out"
+  return 0
 }
 q1d() { # $1=sql文件 $2=表名 $3=距今天数 $4=版本 → 单行 JSON 对象（无数据/超时 → {}）
-  bqq json "$(sed -e "s|{{TABLE}}|$2|g" -e "s|{{DAYS}}|$3|g" -e "s|{{VERSIONS}}|$(vlist "$4")|g" "$SQL_DIR/$1")" \
-    | jq -c '.[0] // {}' 2>/dev/null || echo '{}'
+  local _t0=$SECONDS _rc=0 _out
+  _out="$(bqq json "$(sed -e "s|{{TABLE}}|$2|g" -e "s|{{DAYS}}|$3|g" -e "s|{{VERSIONS}}|$(vlist "$4")|g" "$SQL_DIR/$1")" \
+    | jq -c '.[0] // {}' 2>/dev/null)" || _rc=$?
+  [ -n "$_out" ] || _out='{}'
+  audit query q1d "$(jq -cn --arg sql "$1" --arg tbl "$2" --arg days "$3" --arg ver "$4" \
+    --argjson empty "$([ "$_out" = "{}" ] && echo true || echo false)" --argjson secs "$((SECONDS - _t0))" --argjson rc "$_rc" \
+    '{fn:"q1d",sql:$sql,table:$tbl,days:$days,version:$ver,empty:$empty,secs:$secs,rc:$rc}')"
+  printf '%s\n' "$_out"
+  return 0
 }
 m1() { printf '%s' "${1:-}" | jq -r --arg k "$2" '.[$k] // empty' 2>/dev/null || echo ""; }
 
@@ -259,23 +297,39 @@ table_exists() { # $1=project.dataset.table → 0=存在 / 1=确证不存在
   for attempt in 1 2 3; do
     rc=0
     out="$(run_with_timeout "$BQ_TIMEOUT" bq show --format=none "$tbl" 2>&1)" || rc=$?
-    [ "$rc" -eq 0 ] && return 0
+    if [ "$rc" -eq 0 ]; then
+      audit query table_exists "$(jq -cn --arg t "$1" --argjson a "$attempt" '{fn:"table_exists",table:$t,attempt:$a,verdict:"exists"}')"
+      return 0
+    fi
     if printf '%s' "$out" | grep -qi 'not found'; then
+      audit query table_exists "$(jq -cn --arg t "$1" --argjson a "$attempt" '{fn:"table_exists",table:$t,attempt:$a,verdict:"not_found"}')"
       return 1
     fi
+    audit query table_exists "$(jq -cn --arg t "$1" --argjson a "$attempt" --argjson rc "$rc" '{fn:"table_exists",table:$t,attempt:$a,rc:$rc,verdict:"transient_retry"}')"
     if [ "$attempt" -lt 3 ]; then sleep "$((attempt * 2))"; fi
   done
+  audit query table_exists "$(jq -cn --arg t "$1" '{fn:"table_exists",table:$t,verdict:"assumed_exists"}')"
   return 0
 }
 # 表最新 event_timestamp。**刻意不带版本过滤**：它服务于「表整体是否停更」的判定（data_state 第 2 态），
 # 带上版本过滤会把「新版还没产生数据」误判成「数据源故障」，天天误报（design D6）。
 table_max() { [ -n "$1" ] || { echo ""; return 0; }
-  bqq csv "SELECT FORMAT_TIMESTAMP('%Y-%m-%d %H:%M UTC', MAX(event_timestamp)) AS ts FROM \`$1\`" \
-    | tail -n +2 | tail -1 || true; }
+  local _t0=$SECONDS _rc=0 _out
+  _out="$(bqq csv "SELECT FORMAT_TIMESTAMP('%Y-%m-%d %H:%M UTC', MAX(event_timestamp)) AS ts FROM \`$1\`" \
+    | tail -n +2 | tail -1)" || _rc=$?
+  audit query table_max "$(jq -cn --arg tbl "$1" --arg max "$_out" --argjson secs "$((SECONDS - _t0))" --argjson rc "$_rc" \
+    '{fn:"table_max",table:$tbl,max:$max,secs:$secs,rc:$rc}')"
+  [ -n "$_out" ] && printf '%s\n' "$_out"
+  return 0; }
 # 性能表「该版本最新可用单日」距今天数（1=昨日）；无数据 → 空。带版本过滤：不同版本的最新可用日不同。
 perf_day_offset() { [ -n "$1" ] && [ -n "$2" ] || { echo ""; return 0; }
-  bqq csv "SELECT DATE_DIFF(CURRENT_DATE(), MAX(DATE(event_timestamp)), DAY) AS off FROM \`$1\` WHERE app_display_version = '$2'" \
-    | tail -n +2 | tail -1 || true; }
+  local _t0=$SECONDS _rc=0 _out
+  _out="$(bqq csv "SELECT DATE_DIFF(CURRENT_DATE(), MAX(DATE(event_timestamp)), DAY) AS off FROM \`$1\` WHERE app_display_version = '$2'" \
+    | tail -n +2 | tail -1)" || _rc=$?
+  audit query perf_day_offset "$(jq -cn --arg tbl "$1" --arg ver "$2" --arg off "$_out" --argjson secs "$((SECONDS - _t0))" --argjson rc "$_rc" \
+    '{fn:"perf_day_offset",table:$tbl,version:$ver,offset:$off,secs:$secs,rc:$rc}')"
+  [ -n "$_out" ] && printf '%s\n' "$_out"
+  return 0; }
 
 # ── 三态数据判定（design D6，顺序不可颠倒）────────────────────────
 # 1 表不存在 → table_missing；2 表整体窗口内无数据 → stale；3 表有数据但该版本 0 行 → no_version
@@ -1631,7 +1685,8 @@ REPORT="$STATE/reports/$DAY-daily.md"
   printf '> 放量 %sd：**%s**\n' "$DAYS" "$(win_full "$RUN_EPOCH" "$TZ_LABEL" "$DAYS" "$ADOPTION_UNTIL")"
   printf '> 崩溃 %sd：**%s**\n' "$CRASH_DAYS" "$(win_full "$RUN_EPOCH" "$TZ_LABEL" "$CRASH_DAYS" "$CRASH_UNTIL")"
   printf '> iOS %s · Android %s\n' "$IOS_TOP_NOTE" "$AND_TOP_NOTE"
-  printf '> 窗口起点 = 本次跑批时刻 − N 天（SQL 下界）；终点 = 该表实际取到的最新数据，两者之差即数据滞后。\n\n'
+  printf '> 窗口起点 = 本次跑批时刻 − N 天（SQL 下界）；终点 = 该表实际取到的最新数据，两者之差即数据滞后。\n'
+  printf '> 本次运行 %s · 审计 $STATE/audit/daily-%s.events.jsonl\n\n' "$RUN_ID" "$RUN_ID"
 
   printf '## 一、汇总\n\n'
   printf '%s\n\n' "$STATUS_MD"
@@ -1762,6 +1817,7 @@ if [ "$DRY_RUN" = "1" ]; then
   jq empty "$STATE/publish/card.json" && echo "  ✅ card.json 合法（jq empty 通过）"
   echo "  card.json 字节数：$(wc -c < "$STATE/publish/card.json" | tr -d ' ')"
   echo "（完整报告见 $REPORT · 快照与历史未写入，不影响明日基准）"
+  audit run.end "" '{"ok":true,"dry_run":true}'
   exit 0
 fi
 
@@ -1879,6 +1935,7 @@ build_report_xml() {
       "$VERSION_COUNT" "$(printf '%s' "$IOS_VER_SUM" | xesc)" "$(printf '%s' "$AND_VER_SUM" | xesc)"
     printf '  <p><span text-color="gray">iOS %s · Android %s</span></p>\n' \
       "$(printf '%s' "$IOS_TOP_NOTE" | xesc)" "$(printf '%s' "$AND_TOP_NOTE" | xesc)"
+    printf '  <p><span text-color="gray">run %s · 审计 audit/daily-%s.events.jsonl</span></p>\n' "$RUN_ID" "$RUN_ID"
     printf '</callout>\n'
 
     printf '<h1>一、汇总</h1>\n'
@@ -2073,8 +2130,11 @@ cleanup_old_runs "$STATE"
 # 日志按文件名前缀分别删，正是漏网的成因：bq-stderr-*.log 既不叫 daily-* 也不叫 weekly-*，
 # 从 L1/L2 两张网中间漏过去，永不清理（2026-08-20 盘出 20 个陈年文件）。改成整目录按 mtime 清。
 find "$STATE/logs" -type f -mtime +60 -delete 2>/dev/null || true
+# 审计事件流 60 天（design D9），与 logs 同步清理
+find "$STATE/audit" -type f -mtime +60 -delete 2>/dev/null || true
 # 日报/周报 markdown 本地副本与文档台账同寿（deliver.sh 的 DOC_KEEP_DAYS 默认 90 天）
 find "$STATE/reports" -type f -name '*.md' -mtime +90 -delete 2>/dev/null || true
 # 被 kill 的跑批留下的 SQL 临时文件：上方 bq_init 后挂的 EXIT trap 对 SIGKILL / cron 超时杀进程不生效
 find "$STATE" -maxdepth 1 -type f -name '.bq-sql-*.sql' -mtime +1 -delete 2>/dev/null || true
+audit run.end "" '{"ok":true}'
 echo "=== 完成 ==="

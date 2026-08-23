@@ -18,7 +18,9 @@
 ALERTED=0
 CURRENT_STEP="启动"
 
-step() { CURRENT_STEP="$1"; echo "--- $1 ---"; }
+step() { CURRENT_STEP="$1"; echo "--- $1 ---"
+  # 审计只记录不 gating；audit 未定义（lib.sh 未加载）或未接入（无 AUDIT_FILE）都静默跳过
+  { declare -F audit >/dev/null && audit step.start "$1"; } 2>/dev/null || true; }
 
 # 告警去重：ALERTED 只在主进程有效——命令替换 / 管道都在子 shell 里跑，
 # 那里的 ALERTED=1 传不回来（2026-08-21 实测一次 grep 无匹配就在群里连发 8 张卡）。
@@ -53,7 +55,9 @@ on_err() { local rc=$?; [ "$rc" -eq 0 ] && return 0
 
 fail() {
   echo "❌ $*"
-  jq -n --arg t "$TS" --arg e "$*" '{last_run:$t,ok:false,error:$e}' > "$HEALTH_FILE"
+  # run.end{ok:false} 先于 health：审计流是排障第一入口，health 只是最后状态
+  { declare -F audit >/dev/null && audit run.end "$CURRENT_STEP" "$(jq -cn --arg e "$*" '{ok:false,error:$e}')"; } 2>/dev/null || true
+  jq -n --arg t "$TS" --arg e "$*" '{last_run:$t,run_id:$t,ok:false,error:$e}' > "$HEALTH_FILE"
   alert_once "$CURRENT_STEP" "$*" 1
   exit 1
 }
