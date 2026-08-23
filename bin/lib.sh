@@ -26,8 +26,11 @@ run_with_timeout() {
       wait "$pid" 2>/dev/null || true
       return 124
     fi
-    sleep 5
-    waited=$((waited + 5))
+    # 轮询 1s 不是 5s（findings F6）：bq 查询典型 2-3s 返回，5s 粒度让每条查询
+    # 都被垫到 ~5s，乘上 L1 的 ~77 条就是整跑时长的大头。超时后的 TERM→5s→KILL
+    # 收尾逻辑不变，只提高「发现子进程已结束」的及时性与超时判定精度。
+    sleep 1
+    waited=$((waited + 1))
   done
 
   wait "$pid"; rc=$?
