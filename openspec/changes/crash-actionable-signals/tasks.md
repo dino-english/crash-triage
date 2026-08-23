@@ -36,5 +36,5 @@
 ## 5. 收尾
 
 - [x] 5.1 `CLAUDE.md` 增：归因维度的含义与禁止表述、生命周期三态与基准结构、卡片两个 crash-free 的口径
-- [ ] 5.2 `CLAUDE.md` 的 `daily-snapshot.json` 说明更新（新增 `issue_seen` 键与保留期）
+- [x] 5.2 ✅ 已更新（2026-08-23）：`daily-snapshot.json` 那一行改写为 `issue_seen` 的完整说明——键结构、BigQuery 数据源、`HISTORY_KEEP`(90 天) 滚动清理、`ios_ids`/`android_ids` 是 MCP 遗留空字段、「上一轮」取最大日期而非昨天、基准为空只建基线。
 - [x] 5.3 记录灰度关联不可用的实测结论，避免下一个人重复调研

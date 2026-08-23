@@ -475,7 +475,7 @@ $STATE/                          # ${XDG_STATE_HOME:-~/.local/state}/crash-triag
 
 | 文件 | 作用 |
 |---|---|
-| `daily-snapshot.json` | 明日「新增 issue」判定基准（MCP ids）+ 当日版本集回溯 |
+| `daily-snapshot.json` | issue 生命周期判定基准 + 当日版本集回溯。核心键是 `issue_seen: {"<32位id>": "<末次出现日期>"}`，**数据源是 BigQuery issue id**，随 `HISTORY_KEEP`(90 天) 滚动清理（末次出现早于保留期起点即丢弃）。⚠️ 同文件里的 `ios_ids` / `android_ids` 来自 MCP 且**长期为空数组**，是迁移前的遗留字段，生命周期判定已不读它们。⚠️ 判「上一轮」取 `issue_seen` 里的**最大日期**而非「昨天」——漏跑一天时按「昨天」会把所有 issue 误判成回归。基准为空时**只建基线不标新增**。 |
 | `metrics-history.jsonl` | 天级单日值滚动 **90 天**（`HISTORY_KEEP`，**按版本存储**）；无 `versions` 键的旧口径行读取时自动丢弃并提示 |
 | `perf-history.jsonl` | L2 性能周维度趋势，滚动 **12 周**（`PERF_HISTORY_KEEP`，约一季度）；WoW 对比的基准 |
 | `docs.json` | 文档台账：决定覆盖还是新建。带日期后缀的键保留 90 天（`DOC_KEEP_DAYS`），`index` / `ledger` 无日期后缀、永不清理 |

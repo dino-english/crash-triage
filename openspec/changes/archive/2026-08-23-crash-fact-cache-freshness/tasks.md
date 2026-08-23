@@ -27,7 +27,7 @@
 - [x] 4.3 抽查 `latest_event`：与 1.1 的基线逐条比对，**不得有任何一条变早**
 - [x] 4.4 抽查 `window_days` 已写入且与本轮实际窗口一致
 - [x] 4.5 **产物断言**（design D6：prompt 类代码唯一可靠的测试形式）：写一段校验，对本轮观测到的每个 issue 断言 `last_synced` = 本轮时刻、`latest_event` 未倒退、`window_days` 已写入。**断言对象是落盘产物，不是 prompt 文本**——两份 prompt 都改对了模型仍可能没照做
-- [ ] 4.6 ⛔ **未验证** 模型路径：本轮全部验证走 `SKIP_ANALYSIS=1`，prompt 改动未经真实执行。需跑一轮 full 模式（调 `claude -p` 与 MCP）后执行 `bin/test/assert-fact-cache.sh`。原文：模型路径验证：`CRASH_REPORT_SKIP_ANALYSIS` 不设、跑一轮 full 模式（或单独跑 `bin/fetch-snapshot.sh <目录> full`），确认模型路径写出的文件同样满足 4.2–4.4。**若额度受限跳过此项，在 `findings.md` 标明模型路径未验证**
+- [x] 4.6 ✅ **已验证**（2026-08-23）：MacBook 上跑 `fetch-snapshot.sh <out> full`（真调 `claude -p` + firebase MCP，产出 report.md 14KB、snapshot.json 6 个 issue），随后 `FACT_CACHE_BASELINE=<跑批前 issues 快照> bin/test/assert-fact-cache.sh` → 「✅ 事实层产物断言通过（6 个 issue）」。⚠️ 首次调用偶发失败（退出码 1、stdout/stderr 全空），同命令重跑即成功——分析层缺重试与诊断输出，另记。
 - [x] 4.7 抓取收益保住 ✅ 实测「抓取: 新建 0 / 增量 0 / 跳过 14」——记录全部更新的同时，一次抓取都没多发——抓取判定的收益必须保住（design Goals）。核对 4.6 那轮的日志抓取计数与改动前同口径的一轮
 
 ## 5. 联动与收尾
