@@ -152,6 +152,7 @@ fi
 # --add-dir 必须带 Android 仓库与 ${STATE}（事实层缓存读写落在 $STATE/issues/，不在两个业务仓库下），
 # 否则 git 反查 / 事实层文件访问被权限边界拦下、静默产出未验证的 null。
 cd "$IOS_REPO"
+AGENT_RC=0
 "${AGENT_CMD:-claude}" -p "$PROMPT" \
   --add-dir "$AND_REPO" \
   --add-dir "$STATE" \
@@ -163,4 +164,28 @@ cd "$IOS_REPO"
     "Read" "Write" "Grep" "Glob" \
     "Bash(git log:*)" "Bash(git -C:*)" "Bash(git branch:*)" "Bash(git show:*)" \
   --mcp-config "$ROOT/bin/mcp.json" \
-  < /dev/null
+  < /dev/null || AGENT_RC=$?
+
+# ── 事实层落盘校验（2026-08-23）─────────────────────────
+# 这些文件由模型用 Write 工具**直接写盘**，shell 侧没有写入点可以校验，唯一能挂的位置是这里。
+# 起因：2026-08-21 07:06 那一批 20 个文件里有 12 个是非法 JSON（breadcrumbs 数组多一个 `]`）。
+# 事实层「一次抓永久留、不参与清理」，所以坏文件**不会自愈**：此后每一轮跑批的每个下游
+# 都在 `jq: parse error` 上静默降级——实测 scan-fix-commits.sh 整个反扫失败，
+# 台账「处置状态」列停更，而流水线退出码是 0、卡片上一个字都没提。
+#
+# 隔离而不是删除：坏文件是模型行为的物证，删掉就再也查不出它当时想写成什么样。
+# 隔离后下一轮该 issue 会被判定为「文件不存在」而全量重抓，自动补回。
+# 校验放在 AGENT_RC 捕获之后：模型调用失败时更需要校验（半截写入正是坏文件的来源）。
+CORRUPT_DIR="$STATE/backup/corrupt-issues-$(date -u +%Y%m%d-%H%M%S)"
+CORRUPT_N=0
+for f in "$ISSUES_DIR"/*.json; do
+  [ -e "$f" ] || continue
+  if jq empty "$f" 2>/dev/null; then continue; fi
+  mkdir -p "$CORRUPT_DIR"
+  if mv "$f" "$CORRUPT_DIR/"; then CORRUPT_N=$((CORRUPT_N + 1)); fi
+done
+if [ "$CORRUPT_N" -gt 0 ]; then
+  echo "  ⚠️ 事实层落盘校验：$CORRUPT_N 个文件不是合法 JSON，已隔离到 ${CORRUPT_DIR}（下轮自动重抓）" >&2
+fi
+
+exit "$AGENT_RC"

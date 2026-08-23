@@ -6,7 +6,7 @@
 # 两份都改对了模型仍可能没照做。唯一可靠的检查是断言**落盘产物**。
 #
 # 用法：assert-fact-cache.sh [快照 json]（默认取最近一次 L2 跑批的 snapshot.json）
-#   对快照里出现的每个 issue 断言：last_synced 是本轮时刻 · window_days 已写入 · latest_event 未倒退。
+#   对快照里出现的每个 issue 断言：文件是合法 JSON · last_synced 是本轮时刻 · window_days 已写入 · latest_event 未倒退。
 # 退出码：0 全通过 / 1 有断言失败
 set -uo pipefail
 STATE="${CRASH_REPORT_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/crash-triage}"
@@ -21,6 +21,12 @@ while IFS= read -r id; do
   f="$STATE/issues/$id.json"
   n=$((n + 1))
   if [ ! -s "$f" ]; then echo "❌ ${id:0:8} 事实层文件缺失"; rc=1; continue; fi
+  # 合法性先于语义：文件解析不了时下面每一条 jq 都返回空串，断言会**静默全过**——
+  # 2026-08-21 那 12 个非法 JSON 就是这样绕过本脚本、一路坏到反扫失败的。
+  if ! jq empty "$f" 2>/dev/null; then
+    echo "❌ ${id:0:8} 事实层文件不是合法 JSON（下游 jq 全线静默降级，见 fetch-snapshot.sh 落盘校验）"
+    rc=1; continue
+  fi
 
   ls_="$(jq -r '.last_synced // ""' "$f")"
   case "$ls_" in "$TODAY"*) ;; *) echo "❌ ${id:0:8} last_synced=$ls_ 不是本轮（观测字段应无条件刷新）"; rc=1;; esac
