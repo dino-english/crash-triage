@@ -47,7 +47,7 @@
 - [x] 6.2 L1 整跑 ✅ 汇总段三块齐全。集中度已逐行呈现；**离群标记未做**——当前数据集中度普遍 1.0–2.4，无离群项，不凭空造阈值（findings F5）
 - [x] 6.3 崩溃率、崩溃次数、受影响安装三行与改动前一致（口径未动的验收）
 - [x] 6.4 `CRASH_REPORT_NO_DELIVER=1 CRASH_REPORT_SKIP_ANALYSIS=1 bash bin/crash-weekly.sh` 整跑
-- [ ] 6.5 抽查 2–3 个维度数值与 Firebase 控制台对得上
+- [x] 6.5 抽查 2–3 个维度数值与 Firebase 控制台对得上 —— 2026-08-23 裸调 Crashlytics API（控制台同源）三组比对全过，见 findings F5
 
 ## 7. 收尾
 
