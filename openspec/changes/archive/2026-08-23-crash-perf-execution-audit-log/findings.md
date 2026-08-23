@@ -23,3 +23,8 @@ printf 的格式串是单引号，变量不展开。`git log -S` 定位为 2303d
 恰好躲过了 `^[a-zA-Z_]` 锚定的检测——两层巧合叠出的盲区）。已删除两处遮蔽，
 行为逐字相同（写的正是各自预设的 HEALTH_FILE）。副作用：common.sh 缺失的降级路径下
 fail 不再写 health/发告警（原遮蔽版在该路径下仍全功能）——双重故障场景，接受。
+
+> **F2 已补（2026-08-23 当日）**：在 bqq 单点埋传输层事件 `bq.call`（与语义层 `query`
+> 类型不同，不构成重复计数），weekly `export AUDIT_FILE RUN_ID` 让子进程汇入同一时间线。
+> 实测：L1/L2 冻结缓存改前改后产物逐字节一致；weekly 流 37 条 bq.call 含 2 个 pid
+> （父 + fetch-snapshot-bq）；L1 的 77 条 bq.call 对 72 条 query——5 条差值正是原盲区。

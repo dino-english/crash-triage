@@ -48,11 +48,24 @@ bq_init() { # 初始化 bqq 的全局；调用方预设过的变量一律不覆�
   return 0
 }
 
+# 传输层审计事件 bq.call（archived change crash-perf-execution-audit-log findings F2）：
+# 取数已全部收口到 bqq，在这一个咽喉埋点即可覆盖三个取数进程（L1 / L2 / fetch-snapshot-bq），
+# 含包装函数层拿不到的信息：缓存命中与否、行数、pid（区分父子进程）。
+# 与 L1 包装函数的语义层 query 事件**类型不同**，各记各的，不构成重复计数。
+# audit 未定义（lib.sh 未加载）或未接入（无 AUDIT_FILE）都静默跳过；绝不影响主链路。
+_bqq_audit() { # $1=format $2=SQL文本 $3=cache标记 $4=行数 $5=秒 $6=rc
+  { declare -F audit >/dev/null && audit bq.call "" "$(jq -cn --arg f "$1" \
+      --arg sha "$(printf '%s|%s' "$1" "$2" | shasum -a 256 | cut -c1-12)" \
+      --arg h "$(printf '%s' "$2" | tr '\n\t' '  ' | cut -c1-80)" \
+      --arg cache "$3" --argjson lines "$4" --argjson secs "$5" --argjson rc "$6" --argjson pid "$$" \
+      '{format:$f,sql_sha:$sha,sql_head:$h,cache:$cache,lines:$lines,secs:$secs,rc:$rc,pid:$pid}')"; } 2>/dev/null || true
+}
+
 bqq() { # $1=csv|json  $2=SQL文本 → stdout；超时返回 124，失败返回 bq 退出码
-  local rc=0 ck=""
+  local rc=0 ck="" _t0=$SECONDS
   if [ -n "$BQ_CACHE" ]; then
     ck="$BQ_CACHE/$(printf '%s|%s' "$1" "$2" | shasum -a 256 | cut -c1-32)"
-    [ -s "$ck" ] && { cat "$ck"; return 0; }
+    [ -s "$ck" ] && { cat "$ck"; _bqq_audit "$1" "$2" hit 0 0 0; return 0; }
   fi
   printf '%s\n' "$2" > "$BQ_SQLTMP"
   local out
@@ -67,6 +80,8 @@ bqq() { # $1=csv|json  $2=SQL文本 → stdout；超时返回 124，失败返回
   fi
   # 只缓存成功的查询——把失败/超时的空结果缓存下来等于把故障固化
   [ -n "$ck" ] && [ "$rc" -eq 0 ] && printf '%s\n' "$out" > "$ck"
+  _bqq_audit "$1" "$2" "$([ -n "$BQ_CACHE" ] && echo miss || echo off)" \
+    "$(printf '%s' "$out" | grep -c . || true)" "$((SECONDS - _t0))" "$rc"
   printf '%s\n' "$out"
   return "$rc"
 }

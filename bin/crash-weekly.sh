@@ -69,6 +69,9 @@ RUN_ID="$TS"
 AUDIT_DIR="$STATE/audit"
 AUDIT_FILE="$AUDIT_DIR/weekly-$RUN_ID.events.jsonl"
 mkdir -p "$AUDIT_DIR"
+# export：子进程 fetch-snapshot-bq.sh 的 bq.call 事件汇入同一条时间线（父进程等它跑完，
+# 无并发写；seq 取文件行数，跨进程天然单调）。函数不跨进程，环境变量跨。
+export AUDIT_FILE RUN_ID
 
 # ── 配置 ───────────────────────────────────────────────
 CHAT_ID="${CRASH_REPORT_CHAT_ID:?未设置 CRASH_REPORT_CHAT_ID}"   # 目标群；先用私聊验证再换群
