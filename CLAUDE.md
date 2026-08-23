@@ -137,6 +137,38 @@ bin/crash-{daily,weekly}.sh                编排（imperative shell）
 - ⛔ **渲染层拆分与表名参数化是刻意的 Non-goal**，不是遗漏：三种渲染共享 `cell()` / `delta_of()` 的判定，
   拆分需要逐段对照，与「零行为变更」的验收目标冲突；表名硬编码 16 处则属于投机抽象（12 个月内不接第三个 app）。
 
+### 跨进程边界：8 个子脚本，一种形状
+
+编排层（`crash-daily.sh` / `crash-weekly.sh`）与这 8 个脚本之间是**进程边界**，不是函数调用：
+
+| 脚本 | 进 | 出 |
+|---|---|---|
+| `alert.sh` | argv | 飞书卡片 + 退出码 |
+| `scan-fix-commits.sh` | argv（STATE / 两个仓库 / 天数） | `fixmap.json` + 退出码 |
+| `fetch-snapshot-bq.sh` | `export` 环境变量 | `snapshot.json` / `issues/*.json` + 退出码 |
+| `fetch-snapshot.sh` | argv + `export`（尤其 `REPOS_ROOT`） | `snapshot.json` / `report.md` / `issues/*.json` + 退出码 |
+| `render-ledger.sh` | argv | 台账 markdown（stdout，`\x1e` 分段） |
+| `split-fix-list.py` | stdin | stdout |
+| `md2docx.py` | argv | DocxXML（stdout） |
+| `deliver.sh` | argv（manifest 路径） | 飞书产物 + `docs.json` / 归档 JSONL |
+
+**统一形状：`export` 环境变量 + argv 进，文件 + 退出码出。** 三条推论都踩过：
+
+- ⚠️ **函数不跨进程**。核心层要在**每个**子脚本里各自 `.` 一次——`fetch-snapshot-bq.sh` 与
+  `deliver.sh` 各有自己的加载行，不能指望编排层 export 函数（2026-08-23 加 `cache.sh` 时的约束）。
+- ⚠️ **普通赋值不跨进程，必须 `export`**。`REPOS_ROOT` 漏 export 那次，子进程退回自己的默认值
+  `$ROOT/repos`（不存在），周报整跑失败、日报被误判成「超时」。
+- ⚠️ **退出码是唯一的失败信号**，所以「成功」的判据必须两端一致：`fetch-snapshot.sh` 曾出现
+  退出码 1 但 `snapshot.json` 已写、`report.md` 没写，而下游判的是 `[ -s report.md ]`——
+  判据不一致正是静默降级的温床（2026-08-23 已改成两端都要求产物齐全）。
+
+产物清单集中登记在 [bin/test/artifacts.sh](bin/test/artifacts.sh)（三层：中间产物 / 投递产物 / 基准文件）。
+
+⛔ **一处已知未修的重复**：`fetch-snapshot.sh` 的 `FACT_CACHE_POLICY` 用**自然语言在 prompt 里**
+复述了 `fetch-snapshot-bq.sh` 的同一套事实层缓存策略。这是跨语言、跨执行模型的重复——
+`check-scripts.sh` 的重复定义检测只扫 bash 函数，抓不到；模型那份也无法断言。
+唯一的检查手段是对产物断言（`bin/test/assert-fact-cache.sh`）。统一它要改运行时行为，留作后续 change。
+
 **等价性验收**（`bin/test/`）：三层产物 diff —— 中间产物（取数层）/ 投递产物（渲染层）/ 基准文件（状态写入）。
 `baseline.sh` 走**快照回滚协议**：不还原则 L2 的基线提升会让第二次跑批看到零变化、`issues/` 缓存会从冷变热走不同分支。
 ⚠️ 活数据上 diff 永远不为空（滚动窗口锚在跑批时刻，实测 6 分钟内 sessions 就变），故用

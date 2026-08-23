@@ -59,7 +59,7 @@
 
 - [x] 5.1 `CLAUDE.md` 的「常用命令」增 `bash bin/test/run.sh`；并说明 `check-scripts.sh` 已从两项检查扩为五项（原文明确写着「是**两项**检查」，不改会与实际不符）
 - [x] 5.2 `CLAUDE.md` 的「架构要点」增一节：分层与依赖方向（核心层无副作用、外壳层编排、lint 如何强制），并写明**渲染层拆分与表名参数化是刻意的 Non-goal**及其理由，避免下一个读者以为是遗漏
-- [ ] 5.3 `CLAUDE.md` 记下 8 个跨进程边界（`alert.sh` / `scan-fix-commits.sh` / `fetch-snapshot-bq.sh` / `fetch-snapshot.sh` / `render-ledger.sh` / `split-fix-list.py` / `md2docx.py` / `deliver.sh`）及其统一形状「`export` 环境变量 + argv 进，文件 + 退出码出」，并指向 `bin/test/artifacts.sh` 的产物清单（design D9）；同时登记一处**已知未修缺口**：`fetch-snapshot.sh:80-135` 用自然语言在 prompt 里复述了 `fetch-snapshot-bq.sh` 的同一套缓存策略，重复定义检测抓不到、模型那份不可断言（design D10）
+- [x] 5.3 ✅ 已完成（2026-08-23）：`CLAUDE.md` 增「跨进程边界：8 个子脚本，一种形状」一节——8 个脚本的进/出对照表、统一形状「`export` 环境变量 + argv 进，文件 + 退出码出」、三条踩过的推论（函数不跨进程 / 普通赋值必须 export / 退出码判据两端必须一致），并指向 `bin/test/artifacts.sh` 的三层产物清单；同时登记 `FACT_CACHE_POLICY` 那处 prompt 与 shell 的跨语言重复（重复定义检测抓不到、模型那份不可断言）。
 - [x] 5.4 `bin/INSTALL.md` 说明 bats / shellcheck 均为可选、生产机无需安装
 - [ ] 5.5 最终验收：`bash bin/check-scripts.sh` → `bash bin/test/run.sh` → `bin/test/baseline.sh` 跑 L1 与 L2（走快照回滚协议），与 0.5/0.6 基线三层 diff 为空
 - [ ] 5.6 若 `findings.md` 有条目（3.6 的意图不符项、4.5 的 shellcheck 数量），在归档前逐条与人确认处置
