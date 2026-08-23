@@ -88,7 +88,7 @@ cat "$STATE/health-daily.json"   # L1 健康（L2 是 health.json）；日志在
 
 ### 模型与环境
 
-- **`--allowedTools` 禁止前缀通配**——`mcp__firebase` 会放行写操作，2026-08-06 误关过线上 issue
+- **`--allowedTools` 禁止前缀通配，必须逐个列只读工具**——`mcp__firebase` 会放行写操作 `crashlytics_update_issue`，2026-08-06 误关过线上 issue
 - **跨仓库 git 反查必须带 `--add-dir`**——否则被权限边界拦下、静默产出未验证的 null
 - **L2 根因边界**：崩溃段可出但必须标「未经复核」并区分「✅钻取确认」与「⚠️聚合推断」；**性能段不出根因**；台账只收结论
 - **`claude -p` 必须 `< /dev/null`**，`--mcp-config` 显式传
