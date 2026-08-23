@@ -1702,6 +1702,8 @@ REPORT="$STATE/reports/$DAY-daily.md"
   printf '> 而只看事件数两者长得一样。\n\n'
 
   printf '### 集中在哪\n\n'
+  printf '> **本节口径 = FATAL + ANR**（影响面需覆盖卡死，ANR 事件量与崩溃持平）——与上表「影响多少人」\n'
+  printf '> （仅 FATAL）**不可直接相加对照**；对照控制台需把事件类型勾成「崩溃 + ANR」。\n'
   printf '> **机型只给绝对数**：Android 机型碎片化，单机型会话量太小（实测最大桶 75 会话），率不可靠。\n'
   printf '> **未除以装机量，不代表该机型更易崩。** 系统版本维度桶足够大，给崩溃率。\n'
   printf '> ⛔ 维度分布只显示相关性，**不是根因**——需要钻取确认，见周报。\n\n'
@@ -1952,7 +1954,7 @@ build_report_xml() {
     printf '<callout background-color="light-blue"><p>集中度 = 事件 / 受影响安装。9 次崩溃影响 1 台设备（9.0）与 14 次影响 7 台（2.0）严重度完全不同，而只看事件数两者长得一样。</p></callout>\n'
 
     printf '<h2>集中在哪</h2>\n'
-    printf '<callout background-color="light-yellow"><p><b>机型只给绝对数</b>：Android 机型碎片化，单机型会话量太小（实测最大桶 75 会话），率不可靠——<b>未除以装机量，不代表该机型更易崩</b>。系统版本维度桶足够大，给崩溃率。维度分布只显示相关性，<b>不是根因</b>。</p></callout>\n'
+    printf '<callout background-color="light-yellow"><p><b>本节口径 = FATAL + ANR</b>（影响面需覆盖卡死，ANR 事件量与崩溃持平）——与「影响多少人」表（仅 FATAL）<b>不可直接相加对照</b>。<b>机型只给绝对数</b>：Android 机型碎片化，单机型会话量太小（实测最大桶 75 会话），率不可靠——<b>未除以装机量，不代表该机型更易崩</b>。系统版本维度桶足够大，给崩溃率。维度分布只显示相关性，<b>不是根因</b>。</p></callout>\n'
     printf '<h3>机型</h3>\n'
     xml_csv_table "$TMP/sum-dim-model.csv" '平台,版本,机型,事件,影响安装,集中度' '1,2,3,4,5,6'
     printf '<h3>系统版本</h3>\n'
