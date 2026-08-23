@@ -325,6 +325,15 @@ if command -v bq >/dev/null 2>&1 && bq query --use_legacy_sql=false --format=csv
         "$SQL_DIR/crash-dimensions.sql" \
       | bq query --use_legacy_sql=false --format=csv 2>/dev/null | tail -n +2 || true
   }
+  # 归因分布（change crash-actionable-signals 1.5，与日报汇总段同源同 SQL）。
+  # ⚠️ 与 ver_dim 不同：crash-blame.sql 不需要 sessions 表——归因不给率，只给绝对数。
+  #    给率要除以「该归因方的会话数」，而会话表里根本没有归因维度，除不出来。
+  ver_blame() { # $1=crash表 $2=版本 → CSV「归因方,代码库,事件,影响安装」（无表头）
+    sed -e "s|{{TABLE}}|$1|g" -e "s|{{DAYS}}|$WEEK_DAYS|g" \
+        -e "s|{{VERSIONS}}|\"$2\"|g" -e "s|{{LIMIT}}|$DIM_TOP_W|g" \
+        "$SQL_DIR/crash-blame.sql" \
+      | bq query --use_legacy_sql=false --format=csv 2>/dev/null | tail -n +2 || true
+  }
   ver_etypes() { # $1=crashlytics表 $2=版本 → 「anr事件,anr安装,非致命事件,非致命安装」
     sed -e "s|{{TABLE}}|$1|g" -e "s|{{DAYS}}|$WEEK_DAYS|g" -e "s|{{VERSIONS}}|\"$2\"|g" \
         "$SQL_DIR/crash-error-types.sql" \
@@ -373,6 +382,7 @@ if command -v bq >/dev/null 2>&1 && bq query --use_legacy_sql=false --format=csv
       if [ -n "$cev" ] && [ "$cev" != "0" ] && [ "$cev" != "—" ]; then
         ver_dim "$ctbl" "$stbl" "$ver" "CONCAT(device.manufacturer,' ',device.model)" > "$OUT_DIR/dim-model-${pname}-${ver}.csv" || true
         ver_dim "$ctbl" "$stbl" "$ver" "operating_system.display_version"             > "$OUT_DIR/dim-os-${pname}-${ver}.csv"    || true
+        ver_blame "$ctbl" "$ver"                                                       > "$OUT_DIR/blame-${pname}-${ver}.csv"     || true
       fi
     done <<< "$(top2_versions "$stbl")"
   done
@@ -561,6 +571,34 @@ dims_md() {
           printf "- %s · %s 事件 / %s 人 · 集中度 %s%s\n", $1, $2, $3, $6, (sr && rate != "" ? " · 崩溃率 " rate : "") }' "$f"
       printf '\n'
     done
+  done
+  blame_md
+}
+
+# 归因块（change crash-actionable-signals 1.5，与日报汇总段同一口径与同一条警告）。
+# ⛔ owner 与 library **必须一起呈现**：实测最有信息量的一行是
+#    `SYSTEM · com.prime.dino.english`——归因方是系统、库却是自家包名，那是系统帧被自家代码调用。
+#    只看 owner 会读成「系统的问题，与我无关」；只看 library 会读成「自家代码崩了」。两者都不对。
+blame_md() {
+  local any=0 f b pname ver
+  for f in "$OUT_DIR"/blame-*.csv; do [ -s "$f" ] && any=1 && break; done
+  [ "$any" = 1 ] || return 0
+  printf '**归因**（责任帧属于谁，绝对数）\n\n'
+  printf '> ⛔ 归因方标识的是崩溃栈中**被判定为责任帧的那一帧属于谁**，**不是「谁触发了这次崩溃」**。\n'
+  printf '> 归因方是「系统」或「三方」**不等于非自家问题**——实测存在「系统帧 + 自家包名」的组合，\n'
+  printf '> 那是系统帧被自家代码调用。归因方与代码库必须一起读。\n\n'
+  for f in "$OUT_DIR"/blame-*.csv; do
+    [ -s "$f" ] || continue
+    b="$(basename "$f" .csv)"; b="${b#blame-}"
+    pname="${b%%-*}"; ver="${b#*-}"
+    printf '*%s %s*\n\n' "$pname" "$ver"
+    awk -F, 'NF>=4 {
+      o=$1
+      if (o=="DEVELOPER") o="自家代码"
+      else if (o=="THIRD_PARTY") o="三方 SDK"
+      else if (o=="SYSTEM") o="系统"
+      printf "- %s · %s · %s 事件 / %s 人\n", o, $2, $3, $4 }' "$f"
+    printf '\n'
   done
 }
 
