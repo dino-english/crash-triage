@@ -137,6 +137,12 @@ for _c in format verdict version cache; do
   # shellcheck disable=SC1090
   . "$ROOT/bin/lib/core/${_c}.sh" || { echo "❌ 核心层缺失：bin/lib/core/${_c}.sh" >&2; exit 1; }
 done
+# bq 查询唯一通道（findings F1/F5 收口）：本文件十处直连全部改走 bqq——
+# 直连绕过 CRASH_REPORT_BQ_CACHE，L2 的三层等价性 diff 因此永远不为空。
+# shellcheck disable=SC1091
+. "$ROOT/bin/lib/bq.sh" || { echo "❌ 外壳层缺失：bin/lib/bq.sh" >&2; exit 1; }
+bq_init
+trap 'rm -f "$BQ_SQLTMP"' EXIT
 
 # 反扫提前到取数之前：它是纯 git、不依赖快照，而快照要用它填 fix_commit。
 LEDGER_DIR="$STATE/ledger"
@@ -305,12 +311,12 @@ WEEK_DAYS="${CRASH_REPORT_WEEK_DAYS:-7}"
 ADOPT_ROWS=""          # TSV：平台 \t 版本 \t 会话 \t 设备 \t 崩溃事件 \t 崩溃率 \t crash-free \t ANR \t 非致命
 ADOPT_OK=0
 
-if command -v bq >/dev/null 2>&1 && bq query --use_legacy_sql=false --format=csv 'SELECT 1' >/dev/null 2>&1; then
+if command -v bq >/dev/null 2>&1 && bqq csv 'SELECT 1' >/dev/null 2>&1; then
   ADOPT_OK=1
   step "主力版本放量（bq）"
   top2_versions() { # $1=sessions表 → 「版本,会话,设备」前两行（按会话量降序）
-    sed -e "s|{{TABLE}}|$1|g" -e "s|{{DAYS}}|$WEEK_DAYS|g" -e "s|{{MIN_SESSIONS}}|$MIN_SESSIONS|g" \
-      "$SQL_DIR/latest-versions.sql" | bq query --use_legacy_sql=false --format=csv 2>/dev/null \
+    bqq csv "$(sed -e "s|{{TABLE}}|$1|g" -e "s|{{DAYS}}|$WEEK_DAYS|g" -e "s|{{MIN_SESSIONS}}|$MIN_SESSIONS|g" \
+      "$SQL_DIR/latest-versions.sql")" \
       | tail -n +2 | sort -t, -k2,2 -nr | head -2 || true
   }
   # ANR 与 NON_FATAL 计数：两者 is_fatal 均为 FALSE，crash-rate.sql 取不到
@@ -319,30 +325,30 @@ if command -v bq >/dev/null 2>&1 && bq query --use_legacy_sql=false --format=csv
   DIM_TOP_W="${CRASH_REPORT_DIM_TOP:-3}"
   DIM_MIN_W="${CRASH_REPORT_DIM_MIN_SESSIONS:-200}"
   ver_dim() { # $1=crash表 $2=sessions表 $3=版本 $4=维度表达式 → CSV（无表头）
-    sed -e "s|{{TABLE}}|$1|g" -e "s|{{SESSIONS_TABLE}}|$2|g" -e "s|{{DAYS}}|$WEEK_DAYS|g" \
+    bqq csv "$(sed -e "s|{{TABLE}}|$1|g" -e "s|{{SESSIONS_TABLE}}|$2|g" -e "s|{{DAYS}}|$WEEK_DAYS|g" \
         -e "s|{{VERSIONS}}|\"$3\"|g" -e "s|{{DIM}}|$4|g" -e "s|{{SESS_DIM}}|$4|g" \
         -e "s|{{LIMIT}}|$DIM_TOP_W|g" -e "s|{{MIN_SESSIONS}}|$DIM_MIN_W|g" \
-        "$SQL_DIR/crash-dimensions.sql" \
-      | bq query --use_legacy_sql=false --format=csv 2>/dev/null | tail -n +2 || true
+        "$SQL_DIR/crash-dimensions.sql")" \
+      | tail -n +2 || true
   }
   # 归因分布（change crash-actionable-signals 1.5，与日报汇总段同源同 SQL）。
   # ⚠️ 与 ver_dim 不同：crash-blame.sql 不需要 sessions 表——归因不给率，只给绝对数。
   #    给率要除以「该归因方的会话数」，而会话表里根本没有归因维度，除不出来。
   ver_blame() { # $1=crash表 $2=版本 → CSV「归因方,代码库,事件,影响安装」（无表头）
-    sed -e "s|{{TABLE}}|$1|g" -e "s|{{DAYS}}|$WEEK_DAYS|g" \
+    bqq csv "$(sed -e "s|{{TABLE}}|$1|g" -e "s|{{DAYS}}|$WEEK_DAYS|g" \
         -e "s|{{VERSIONS}}|\"$2\"|g" -e "s|{{LIMIT}}|$DIM_TOP_W|g" \
-        "$SQL_DIR/crash-blame.sql" \
-      | bq query --use_legacy_sql=false --format=csv 2>/dev/null | tail -n +2 || true
+        "$SQL_DIR/crash-blame.sql")" \
+      | tail -n +2 || true
   }
   ver_etypes() { # $1=crashlytics表 $2=版本 → 「anr事件,anr安装,非致命事件,非致命安装」
-    sed -e "s|{{TABLE}}|$1|g" -e "s|{{DAYS}}|$WEEK_DAYS|g" -e "s|{{VERSIONS}}|\"$2\"|g" \
-        "$SQL_DIR/crash-error-types.sql" \
-      | bq query --use_legacy_sql=false --format=csv 2>/dev/null | tail -n +2 | head -1 || true
+    bqq csv "$(sed -e "s|{{TABLE}}|$1|g" -e "s|{{DAYS}}|$WEEK_DAYS|g" -e "s|{{VERSIONS}}|\"$2\"|g" \
+        "$SQL_DIR/crash-error-types.sql")" \
+      | tail -n +2 | head -1 || true
   }
   ver_crash() { # $1=crashlytics表 $2=sessions表 $3=版本 → 「事件数,会话数,受影响安装,崩溃会话数」
-    sed -e "s|{{TABLE}}|$1|g" -e "s|{{SESSIONS_TABLE}}|$2|g" -e "s|{{DAYS}}|$WEEK_DAYS|g" \
-        -e "s|{{VERSIONS}}|\"$3\"|g" "$SQL_DIR/crash-rate.sql" \
-      | bq query --use_legacy_sql=false --format=csv 2>/dev/null | tail -n +2 | head -1 || true
+    bqq csv "$(sed -e "s|{{TABLE}}|$1|g" -e "s|{{SESSIONS_TABLE}}|$2|g" -e "s|{{DAYS}}|$WEEK_DAYS|g" \
+        -e "s|{{VERSIONS}}|\"$3\"|g" "$SQL_DIR/crash-rate.sql")" \
+      | tail -n +2 | head -1 || true
   }
   IOS_TOP2_VERS=""; AND_TOP2_VERS=""   # 供 6. 性能段复用同一批主力版本（不重复解析）
   for entry in "iOS|$PROJECT.firebase_sessions.com_prime_dino_english_IOS_REALTIME|$PROJECT.firebase_crashlytics.com_prime_dino_english_IOS_REALTIME" \
@@ -397,8 +403,7 @@ fi
 # 时间助手与 tbl_max 原本定义在下方「取数区间」段，为供本段的停更判定使用而前移（定义唯一，未复制）。
 RUN_EPOCH="$(date +%s)"
 tbl_max() { [ -n "$1" ] || { echo ""; return 0; }
-  bq query --use_legacy_sql=false --format=csv \
-    "SELECT FORMAT_TIMESTAMP('%Y-%m-%d %H:%M UTC', MAX(event_timestamp)) AS ts FROM \`$1\`" 2>/dev/null \
+  bqq csv "SELECT FORMAT_TIMESTAMP('%Y-%m-%d %H:%M UTC', MAX(event_timestamp)) AS ts FROM \`$1\`" \
     | tail -n +2 | tail -1 || true; }
 PERF_OK=0
 IOS_PERF_STALE=""; AND_PERF_STALE=""; IOS_PERF_MAX=""; AND_PERF_MAX=""   # bq 不可用时也要有定义（set -u）
@@ -412,12 +417,12 @@ if [ "$ADOPT_OK" = "1" ]; then
   step "性能段（bq，窗口 ${WEEK_DAYS}d）"
   perf_row() { # $1=平台标签 $2=perf表 $3=版本 → 一行 TSV（失败字段留空，由调用方判定缺数原因）
     local pname="$1" tbl="$2" ver="$3" traces screens net p50 p95 wscreen wslow frozen neterr
-    traces="$(sed -e "s|{{TABLE}}|$tbl|g" -e "s|{{DAYS}}|$WEEK_DAYS|g" -e "s|{{VERSIONS}}|\"$ver\"|g" \
-      "$SQL_DIR/perf-traces.sql" | bq query --use_legacy_sql=false --format=csv 2>/dev/null | tail -n +2 || true)"
-    screens="$(sed -e "s|{{TABLE}}|$tbl|g" -e "s|{{DAYS}}|$WEEK_DAYS|g" -e "s|{{VERSIONS}}|\"$ver\"|g" \
-      "$SQL_DIR/perf-screens.sql" | bq query --use_legacy_sql=false --format=csv 2>/dev/null | tail -n +2 || true)"
-    net="$(sed -e "s|{{TABLE}}|$tbl|g" -e "s|{{DAYS}}|$WEEK_DAYS|g" -e "s|{{VERSIONS}}|\"$ver\"|g" \
-      "$SQL_DIR/perf-network.sql" | bq query --use_legacy_sql=false --format=csv 2>/dev/null | tail -n +2 || true)"
+    traces="$(bqq csv "$(sed -e "s|{{TABLE}}|$tbl|g" -e "s|{{DAYS}}|$WEEK_DAYS|g" -e "s|{{VERSIONS}}|\"$ver\"|g" \
+      "$SQL_DIR/perf-traces.sql")" | tail -n +2 || true)"
+    screens="$(bqq csv "$(sed -e "s|{{TABLE}}|$tbl|g" -e "s|{{DAYS}}|$WEEK_DAYS|g" -e "s|{{VERSIONS}}|\"$ver\"|g" \
+      "$SQL_DIR/perf-screens.sql")" | tail -n +2 || true)"
+    net="$(bqq csv "$(sed -e "s|{{TABLE}}|$tbl|g" -e "s|{{DAYS}}|$WEEK_DAYS|g" -e "s|{{VERSIONS}}|\"$ver\"|g" \
+      "$SQL_DIR/perf-network.sql")" | tail -n +2 || true)"
     # `|| true`：性能表停更时 traces 为空，grep 无匹配返回 1，pipefail 让赋值整体失败，
     # set -e 直接杀掉整跑（同源问题在 L1 是误报告警，见 crash-daily.sh collect_window）。
     p50="$(printf '%s\n' "$traces" | grep '^_app_start,' | cut -d, -f3 | head -1 || true)"

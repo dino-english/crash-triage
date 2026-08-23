@@ -101,7 +101,7 @@ sqlite3 ~/.hermes/cron/executions.db \
 
 没有单元测试。验收链：`check-scripts.sh` → DRY RUN → 抽查 2–3 个数值与 Firebase 控制台对得上（[bin/INSTALL.md](bin/INSTALL.md) §6）。
 
-⛔ `check-scripts.sh` 是**六项**检查（2026-08-23 起，change `crash-perf-functional-core`）：
+⛔ `check-scripts.sh` 是**七项**检查（2026-08-23 起，change `crash-perf-functional-core`）：
 
 1. `bash -n` 语法
 2. **`$VAR` 紧邻多字节字符** —— 反复踩的那个坑（`"${miss:+（$miss）}"` 在 `set -u` 下报
@@ -109,7 +109,9 @@ sqlite3 ~/.hermes/cron/executions.db \
 3. `md2docx.py` 语法
 4. **依赖方向 lint** —— `bin/lib/core/` 出现 `bq` / `lark-cli` / `$STATE` / `$ROOT` 即失败
 5. **重复定义检测** —— 同名函数出现在两个及以上文件即失败（豁免清单以数据形式集中在脚本内）
-6. **纯函数断言** —— `bin/test/run.sh`，39 条
+6. **bq 直连收口 lint** —— `bq query` 出现在 `bin/lib/bq.sh` 之外即失败（豁免 `install.sh` 探活）。
+   findings F5 的护栏：没有它时每个照着旧写法新增的取数函数都在扩大等价性缓存的缺口
+7. **纯函数断言** —— `bin/test/run.sh`，51 条
 
 外加可选的 ShellCheck（未安装则跳过，不影响退出码——生产机不该为开发期工具多一项装机步骤）。
 
@@ -123,8 +125,9 @@ sqlite3 ~/.hermes/cron/executions.db \
 （bash 无类型系统兜底，接口反转只有成本没有强制力）。
 
 ```
-bin/lib/core/{format,verdict,version}.sh   纯函数：格式化 / 阈值判定 / 版本挑选
+bin/lib/core/{format,verdict,version,cache}.sh   纯函数：格式化 / 阈值判定 / 版本挑选 / 缓存判定
 bin/lib/common.sh                          外壳层共享：step / alert_once / err_stack / on_err / fail
+bin/lib/bq.sh                              外壳层：bqq（bq 查询唯一通道，等价性缓存在此）
 bin/lib.sh                                 编排辅助：run_with_timeout / cleanup_old_runs
 bin/crash-{daily,weekly}.sh                编排（imperative shell）
 ```
@@ -173,8 +176,9 @@ bin/crash-{daily,weekly}.sh                编排（imperative shell）
 `baseline.sh` 走**快照回滚协议**：不还原则 L2 的基线提升会让第二次跑批看到零变化、`issues/` 缓存会从冷变热走不同分支。
 ⚠️ 活数据上 diff 永远不为空（滚动窗口锚在跑批时刻，实测 6 分钟内 sessions 就变），故用
 `CRASH_REPORT_BQ_CACHE=<目录>` 按 SQL 哈希冻结数据——**生产禁用**。
-⚠️ 该缓存只包住 `bqq`（L1 的助手），`crash-weekly.sh` 有 9 处直连 `bq query` 绕过它，
-故 L2 目前只能做「数字盲比对」验结构。
+取数已全部收口到 `bqq`（`bin/lib/bq.sh`，2026-08-23 起——此前 `crash-weekly.sh` 十处直连
+绕过缓存，L2 只能做「数字盲比对」验结构），三个取数进程（L1 / L2 / `fetch-snapshot-bq.sh`）
+各自 source + `bq_init`。新增直连会被 `check-scripts.sh` 第 6 项 lint 当场拦下。
 
 ## 架构要点
 

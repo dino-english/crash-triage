@@ -49,8 +49,24 @@ FORCE_REFETCH="${CRASH_REPORT_FORCE_REFETCH:-0}"
 
 SNAP="$OUT_DIR/snapshot.json"
 
+# 外壳层：bq 查询唯一通道（findings F1/F5 收口）。本脚本是独立进程，必须自己加载——
+# 函数不跨进程；lib.sh 提供 bqq 依赖的 run_with_timeout。
+# shellcheck disable=SC1091
+. "$ROOT/bin/lib.sh" || { echo "❌ 外壳层缺失：bin/lib.sh" >&2; exit 1; }
+# shellcheck disable=SC1091
+. "$ROOT/bin/lib/bq.sh" || { echo "❌ 外壳层缺失：bin/lib/bq.sh" >&2; exit 1; }
+# 沿用原有 stderr 汇集位置（随 runs/ 留存作跑批物证）。⚠️ 这行预设同时是承重墙：
+# bq_init 的默认分支引用 $TS，而本脚本不定义 TS——删掉这行会死于 unbound variable。
+BQ_ERRLOG="$OUT_DIR/bq-stderr.log"
+bq_init
+trap 'rm -f "$BQ_SQLTMP"' EXIT
+
 bq_json() { # $1=SQL文本 → JSON 数组（失败返回空数组，由调用方判定）
-  printf '%s' "$1" | bq query --use_legacy_sql=false --format=json 2>>"$OUT_DIR/bq-stderr.log" || echo '[]'
+  # 用变量接住再输出：bqq 失败时 stdout 是一个空行，直接 `bqq || echo '[]'` 会把
+  # 空行混在 [] 前面，破坏「失败输出恰为 []」的契约
+  local out
+  out="$(bqq json "$1")" || { echo '[]'; return 0; }
+  printf '%s\n' "$out"
 }
 
 platform_rows() { # $1=平台键(ios/android) $2=crashlytics表 → JSON 数组

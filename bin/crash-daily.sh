@@ -202,45 +202,12 @@ for _c in format verdict version cache; do
   . "$ROOT/bin/lib/core/${_c}.sh" || { echo "❌ 核心层缺失：bin/lib/core/${_c}.sh" >&2; exit 1; }
 done
 
-BQ_TIMEOUT="${BQ_TIMEOUT:-180}"      # 单条查询上限；正常查询 3s 内返回，180s 已是极宽松
-mkdir -p "$STATE/logs"
-BQ_ERRLOG="$STATE/logs/bq-stderr-$TS.log"
-BQ_SQLTMP="$STATE/.bq-sql-$$.sql"
-# 查询缓存（**仅供等价性验收，生产默认关闭**）。
-# 起因：三层 diff 的验收方式在活数据上不成立——滚动窗口锚在跑批时刻，
-# 实测两次跑批相隔 6 分钟，sessions 就从 1108 变成 1107、非致命从 76 变 78。
-# 数据一直在动，diff 永远不为空，重构的真实回归就被淹没在漂移里。
-#
-# 打开 CRASH_REPORT_BQ_CACHE=<目录> 后，每条查询按「格式 + SQL 文本」的哈希缓存结果：
-# 首轮落盘、后续复用。于是验证跑批**完全复用同一批数据**，任何差异都只可能来自代码。
-# 这也顺带把「渲染层等价性」从取数层里隔离出来——正是重构要动的那一层。
-#
-# ⛔ 生产绝不开启：缓存会让报告呈现陈旧数据而毫无察觉。
-BQ_CACHE="${CRASH_REPORT_BQ_CACHE:-}"
-[ -n "$BQ_CACHE" ] && { mkdir -p "$BQ_CACHE"; echo "  🧊 bq 查询缓存已开启（${BQ_CACHE}）——仅供等价性验收，生产禁用"; }
-
-bqq() { # $1=csv|json  $2=SQL文本 → stdout；超时返回 124，失败返回 bq 退出码
-  local rc=0 ck=""
-  if [ -n "$BQ_CACHE" ]; then
-    ck="$BQ_CACHE/$(printf '%s|%s' "$1" "$2" | shasum -a 256 | cut -c1-32)"
-    [ -s "$ck" ] && { cat "$ck"; return 0; }
-  fi
-  printf '%s\n' "$2" > "$BQ_SQLTMP"
-  local out
-  # ⛔ 不要用「_bqq_raw() { bqq "$@"; } + 重定义 bqq」那种包装做缓存：
-  #    bash 在**调用时**解析函数名，_bqq_raw 会调到新的 bqq 上 → 无限递归。
-  #    实测第一条查询就挂死，整跑卡在「选表」。读写都放同一个函数里。
-  out="$(run_with_timeout "$BQ_TIMEOUT" \
-    bash -c 'exec bq query --use_legacy_sql=false --format="$1" < "$2"' \
-    _ "$1" "$BQ_SQLTMP" 2>>"$BQ_ERRLOG")" || rc=$?
-  if [ "$rc" -eq 124 ]; then
-    echo "  ⏱️ bq 查询超时 ${BQ_TIMEOUT}s，按缺数降级（详见 $(basename "${BQ_ERRLOG}")）" >&2
-  fi
-  # 只缓存成功的查询——把失败/超时的空结果缓存下来等于把故障固化
-  [ -n "$ck" ] && [ "$rc" -eq 0 ] && printf '%s\n' "$out" > "$ck"
-  printf '%s\n' "$out"
-  return "$rc"
-}
+# bq 查询唯一通道已收口到 bin/lib/bq.sh（findings F1/F5：直连绕过等价性缓存，
+# 冻结面出洞）。缓存与超时的说明见该文件顶部。缺失直接失败不退化——
+# bqq 是取数唯一通道，退化实现会静默丢掉超时与缓存。
+# shellcheck disable=SC1091
+. "$ROOT/bin/lib/bq.sh" || { echo "❌ 外壳层缺失：bin/lib/bq.sh" >&2; exit 1; }
+bq_init
 trap 'rm -f "$BQ_SQLTMP"' EXIT
 
 # ── 探活 ──────────────────────────────────────────────
@@ -2108,6 +2075,6 @@ cleanup_old_runs "$STATE"
 find "$STATE/logs" -type f -mtime +60 -delete 2>/dev/null || true
 # 日报/周报 markdown 本地副本与文档台账同寿（deliver.sh 的 DOC_KEEP_DAYS 默认 90 天）
 find "$STATE/reports" -type f -name '*.md' -mtime +90 -delete 2>/dev/null || true
-# 被 kill 的跑批留下的 SQL 临时文件：第 165 行的 EXIT trap 对 SIGKILL / cron 超时杀进程不生效
+# 被 kill 的跑批留下的 SQL 临时文件：上方 bq_init 后挂的 EXIT trap 对 SIGKILL / cron 超时杀进程不生效
 find "$STATE" -maxdepth 1 -type f -name '.bq-sql-*.sql' -mtime +1 -delete 2>/dev/null || true
 echo "=== 完成 ==="

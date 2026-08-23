@@ -64,12 +64,31 @@ if [ -n "$dup" ]; then
   rc=1
 fi
 
-# ── 5. 纯函数断言 ────────────────────────────────────────────────
+# ── 5. bq 直连收口 lint（findings F1/F5 的护栏）──────────────────
+# `bq query` 只允许出现在 bin/lib/bq.sh（bqq，全仓唯一取数通道）。直连会绕过
+# CRASH_REPORT_BQ_CACHE，在等价性验收的「冻结面」上开洞——F5 实测：没有这条 lint，
+# 每个照着旧写法新增的取数函数都在扩大缺口（9 处 → 10 处）。豁免清单（带理由）：
+#   install.sh  装机自检探活，跑在 STATE 尚未建立时，且探活本就不该吃缓存
+bq_direct="$(
+  find "$SELF_DIR" -name '*.sh' -type f | sort | while IFS= read -r f; do
+    rel="${f#"$SELF_DIR"/}"
+    # 模式带前导 (：bash 3.2 在 $( ) 里会把 case 模式的裸 ) 当成命令替换终点，当场语法炸
+    case "$rel" in (lib/bq.sh|install.sh|check-scripts.sh) continue;; esac
+    grep -nE '^[^#]*\bbq query\b' "$f" | sed "s|^|   ${rel}:|" || true
+  done
+)"
+if [ -n "$bq_direct" ]; then
+  echo "❌ bq query 直连（应走 bin/lib/bq.sh 的 bqq，否则绕过等价性验收缓存）："
+  printf '%s\n' "$bq_direct"
+  rc=1
+fi
+
+# ── 6. 纯函数断言 ────────────────────────────────────────────────
 if [ -x "$SELF_DIR/test/run.sh" ]; then
   bash "$SELF_DIR/test/run.sh" || rc=1
 fi
 
-# ── 6. ShellCheck（可选依赖）─────────────────────────────────────
+# ── 7. ShellCheck（可选依赖）─────────────────────────────────────
 # 生产机是无人值守的 Mac mini，不该为开发期工具多一项装机步骤。
 # 未安装 → 跳过并提示，**不影响退出码**；已安装 → 计入。
 if command -v shellcheck >/dev/null 2>&1; then
