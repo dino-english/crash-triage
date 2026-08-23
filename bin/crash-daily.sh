@@ -1263,11 +1263,12 @@ HEADER_TITLE="📊 ${DAY:5} $TS_HM 崩溃 & 性能"
 HEADER_COLOR="blue"; [ -n "$ALERTS" ] && HEADER_COLOR="red"
 SESS_FALLBACK_NOTE=""
 { [ "$SESS_IOS_FALLBACK" = 1 ] || [ "$SESS_AND_FALLBACK" = 1 ]; } && SESS_FALLBACK_NOTE="；⚠️ 放量回退批量表（可能停更）"
-NOTE_MD="$(printf '本报告只统计最新 %s 个版本（会话量 top2 不在其中时补「主力」列）；跨版本合计值不再输出。\n取数区间 性能 %sd：%s\n取数区间 放量 %sd：%s\n取数区间 崩溃 %sd：%s%s\n崩溃=BigQuery 事件级（含已关闭 issue）· 崩溃率=事件数/会话数 · Crash-free=会话口径（**与控制台的用户口径不可比**，且为下界估计）· 卡死信号行**双端指标不同不可比**：Android=ANR 率（${CRASH_DAYS}d，与 Play 门槛口径亦不同），iOS=冻结帧率（${PERF_DAYS}d，系统层无 ANR 概念）· 非致命双端不可比 · 慢帧>16ms / 冻结>700ms 为帧级占比\n格内对比 = 最新版 − 上一版（箭头跟数值方向、颜色跟好坏）；表头括号内为该版本的 **会话数/设备数**（设备数才是「多少人在用」，会话数会被同一人反复启动放大）；影响集中行取该端事件最多的版本；同版本 DoD/WoW 与完整 13 项指标见日报文档' \
+NOTE_MD="$(printf '本报告只统计最新 %s 个版本（会话量 top2 不在其中时补「主力」列）；跨版本合计值不再输出。\n取数区间 性能 %sd：%s\n取数区间 放量 %sd：%s\n取数区间 崩溃 %sd：%s%s\n崩溃=BigQuery 事件级（含已关闭 issue）· 崩溃率=事件数/会话数 · Crash-free=会话口径（**与控制台的用户口径不可比**，且为下界估计）· 卡死信号行**双端指标不同不可比**：Android=ANR 率（%sd，与 Play 门槛口径亦不同），iOS=冻结帧率（%sd，系统层无 ANR 概念）· 非致命双端不可比 · 慢帧>16ms / 冻结>700ms 为帧级占比\n格内对比 = 最新版 − 上一版（箭头跟数值方向、颜色跟好坏）；表头括号内为该版本的 **会话数/设备数**（设备数才是「多少人在用」，会话数会被同一人反复启动放大）；影响集中行取该端事件最多的版本；同版本 DoD/WoW 与完整 13 项指标见日报文档' \
   "$VERSION_COUNT" \
   "$PERF_DAYS"  "$(win_compact "$RUN_EPOCH" "$TZ_LABEL" "$PERF_DAYS" "$DATA_UNTIL")" \
   "$DAYS"       "$(win_compact "$RUN_EPOCH" "$TZ_LABEL" "$DAYS" "$ADOPTION_UNTIL")" \
-  "$CRASH_DAYS" "$(win_compact "$RUN_EPOCH" "$TZ_LABEL" "$CRASH_DAYS" "$CRASH_UNTIL")" "$SESS_FALLBACK_NOTE")"
+  "$CRASH_DAYS" "$(win_compact "$RUN_EPOCH" "$TZ_LABEL" "$CRASH_DAYS" "$CRASH_UNTIL")" "$SESS_FALLBACK_NOTE" \
+  "$CRASH_DAYS" "$PERF_DAYS")"
 
 CARD_JSON="$(jq -n \
   --arg hc "$HEADER_COLOR" --arg ht "$HEADER_TITLE" --arg sm "$STATUS_MD" \
