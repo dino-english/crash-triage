@@ -56,7 +56,7 @@ SNAP="$OUT_DIR/snapshot.json"
 # shellcheck disable=SC1091
 . "$ROOT/bin/lib/bq.sh" || { echo "❌ 外壳层缺失：bin/lib/bq.sh" >&2; exit 1; }
 # 沿用原有 stderr 汇集位置（随 runs/ 留存作跑批物证）。⚠️ 这行预设同时是承重墙：
-# bq_init 的默认分支引用 $TS，而本脚本不定义 TS——删掉这行会死于 unbound variable。
+# bq_init 的默认分支引用 ${TS}，而本脚本不定义 TS——删掉这行会死于 unbound variable。
 BQ_ERRLOG="$OUT_DIR/bq-stderr.log"
 bq_init
 trap 'rm -f "$BQ_SQLTMP"' EXIT
