@@ -133,7 +133,7 @@ mkdir -p "$OUT_DIR"
 . "$ROOT/bin/lib.sh"
 # 核心层（纯函数），与 L1 共用同一份实现——此前 _fmt / _until_epoch / win_* / stale_days
 # 在两个脚本里各存了一份，其中 stale_days 逐字节相同。
-for _c in format verdict version; do
+for _c in format verdict version cache; do
   # shellcheck disable=SC1090
   . "$ROOT/bin/lib/core/${_c}.sh" || { echo "❌ 核心层缺失：bin/lib/core/${_c}.sh" >&2; exit 1; }
 done

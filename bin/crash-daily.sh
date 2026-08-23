@@ -197,7 +197,7 @@ else
 fi
 # 核心层（纯函数）。不依赖任何全局，加载顺序任意；缺失则整跑失败——
 # 这些是阈值判定与格式化的唯一实现，退化版本会静默产出错误数字，比直接失败危险得多。
-for _c in format verdict version; do
+for _c in format verdict version cache; do
   # shellcheck disable=SC1090
   . "$ROOT/bin/lib/core/${_c}.sh" || { echo "❌ 核心层缺失：bin/lib/core/${_c}.sh" >&2; exit 1; }
 done

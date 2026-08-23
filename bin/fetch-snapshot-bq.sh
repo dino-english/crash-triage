@@ -31,6 +31,11 @@ mkdir -p "$OUT_DIR"
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="${CRASH_REPORT_ROOT:-$(dirname "$SELF_DIR")}"
 SQL_DIR="${SQL_DIR:-$ROOT/bin/sql}"
+# 核心层（纯函数）。本脚本是独立进程，必须自己加载——不能指望调用方 export 函数。
+# 只加载用得到的 cache：缺失则直接失败不退化，退化版本会静默产出错误判定
+# （抓取判定退化 → 事实层停更；保留谓词退化 → 误删固定文档键、重建整套飞书文档）。
+# shellcheck disable=SC1091
+. "$ROOT/bin/lib/core/cache.sh" || { echo "❌ 核心层缺失：bin/lib/core/cache.sh" >&2; exit 1; }
 STATE="${CRASH_REPORT_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/crash-triage}"
 ISSUES_DIR="$STATE/issues"
 mkdir -p "$ISSUES_DIR"
@@ -137,12 +142,13 @@ while IFS=$'\t' read -r iid plat title events users latest; do
   now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
   # ── ① 抓取判定（bq 路径下「抓取」退化为空操作，但语义与模型路径保持一致）──
-  if [ "$FORCE_REFETCH" = "1" ] || [ ! -f "$f" ]; then
-    verdict=new
+  # 判定本身已上移核心层（bin/lib/core/cache.sh），这里只负责把文件状态读成入参。
+  if [ -f "$f" ]; then
+    exists=1; prev="$(jq -r '.events_count_last_seen // 0' "$f" 2>/dev/null || echo 0)"
   else
-    prev="$(jq -r '.events_count_last_seen // 0' "$f" 2>/dev/null || echo 0)"
-    if [ "$events" -gt "$prev" ] 2>/dev/null; then verdict=append; else verdict=skip; fi
+    exists=0; prev=0
   fi
+  verdict="$(cache_verdict "$FORCE_REFETCH" "$exists" "$prev" "$events")"
   case "$verdict" in
     new)    FETCH_NEW=$((FETCH_NEW+1));;
     append) FETCH_APPEND=$((FETCH_APPEND+1));;

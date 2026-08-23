@@ -14,6 +14,11 @@ unset PYTHONPATH
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export CRASH_REPORT_ROOT="${CRASH_REPORT_ROOT:-$(dirname "$SELF_DIR")}"
 ROOT="$CRASH_REPORT_ROOT"
+# 核心层（纯函数）。本脚本是独立进程，必须自己加载——不能指望调用方 export 函数。
+# 只加载用得到的 cache：缺失则直接失败不退化，退化版本会静默产出错误判定
+# （抓取判定退化 → 事实层停更；保留谓词退化 → 误删固定文档键、重建整套飞书文档）。
+# shellcheck disable=SC1091
+. "$ROOT/bin/lib/core/cache.sh" || { echo "❌ 核心层缺失：bin/lib/core/cache.sh" >&2; exit 1; }
 STATE="${CRASH_REPORT_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/crash-triage}"
 # PATH 来源，见 crash-daily.sh 同处注释。
 # else 兜底是随改名一起补的：本脚本原本只有 if、没有 else，文件缺失时就直接吃 cron 的最小 env，
@@ -245,15 +250,9 @@ doc_prune() {
   local tmp cutoff before after; tmp="$(mktemp)"
   cutoff="$(date -v-"${DOC_KEEP_DAYS}"d +%Y-%m-%d 2>/dev/null)" || return 0
   before="$(jq 'length' "$DOC_STORE" 2>/dev/null || echo 0)"
-  # 先 test 再 capture：capture 不匹配时返回**空**而不是 null，`// "9999"` 兜不住，
-  # 整个 entry 会被 select 判假而丢弃——index / ledger 这类无日期后缀的固定键会被误删
-  # （2026-08-18 实测把两个固定文档键删掉了，下次运行就会重新建两份新文档）。
-  jq --arg cut "$cutoff" \
-    'with_entries(select(
-       if (.key | test("-[0-9]{4}-[0-9]{2}-[0-9]{2}$"))
-       then (.key | capture("-(?<d>[0-9]{4}-[0-9]{2}-[0-9]{2})$").d) >= $cut
-       else true end))' \
-    "$DOC_STORE" > "$tmp" 2>/dev/null && mv "$tmp" "$DOC_STORE" || return 0
+  # 谓词已上移核心层（bin/lib/core/cache.sh 的 doc_keep_predicate，jq 表达式一字未改），
+  # 那里有它的断言（bin/test/core-cache.sh），包括 index / ledger 固定键必须保留这一条。
+  doc_keep_predicate "$cutoff" < "$DOC_STORE" > "$tmp" 2>/dev/null && mv "$tmp" "$DOC_STORE" || return 0
   after="$(jq 'length' "$DOC_STORE" 2>/dev/null || echo 0)"
   [ "$before" -gt "$after" ] && echo "  🧹 文档台账清理：丢弃 $((before - after)) 条超过 ${DOC_KEEP_DAYS} 天的记录"
   return 0

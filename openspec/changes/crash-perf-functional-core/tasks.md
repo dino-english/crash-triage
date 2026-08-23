@@ -25,7 +25,7 @@
 - [x] 2.1 新建 `bin/lib/core/format.sh`，移入 `int` / `pct` / `rate_pct` / `_fmt` / `_until_epoch` / `win_compact` / `win_full`
 - [x] 2.2 新建 `bin/lib/core/verdict.sh`，移入 `traffic_light` / `cell_color` / `delta_cell` / `stale_days`
 - [x] 2.3 新建 `bin/lib/core/version.sh`，移入 `pick_newest` / `pick_top_sessions` / `union_versions` / `ver_field`
-- [ ] 2.4 ⏸ 未做：新建 `bin/lib/core/cache.sh`（design D10）：`cache_verdict <强制标志> <文件是否存在> <上次计数> <本次计数>` → `new|update|hit`（从 `fetch-snapshot-bq.sh:108-126` 的 while 循环上移）；`doc_keep_predicate` —— `doc_prune` 的日期键保留判定（从 `deliver.sh:252-258` 上移，保持 jq 表达式原样，只是移出并可独立调用）。三处调用方改为调用核心层，**保持行为一字不变**
+- [x] 2.4 ✅ 已完成（2026-08-23）：新建 `bin/lib/core/cache.sh`——`cache_verdict <强制标志> <文件是否存在> <上次计数> <本次计数>` → `new|append|skip`（判定值名以修复后代码为准，非 design 写的 `new|update|hit`）；`doc_keep_predicate <cutoff>` 走 stdin/stdout，jq 表达式一字未改。调用方三处：`fetch-snapshot-bq.sh`（只留读文件成入参）、`deliver.sh` 的 `doc_prune`、两个入口的加载清单加 `cache`。两个子进程脚本各自加载核心层（独立进程，不能指望调用方 export 函数），缺失即失败不退化。
 - [x] 2.5 按 design D3 改签名：`win_compact` / `win_full` 首二参改为「基准 epoch + 时区标签」，`stale_days` 首参改为基准 epoch，`union_versions` 增第三参「列上限」
 - [x] 2.6 调用点实际 **14 个**（daily 10 + weekly 4），design 估的是 18。原文：grep -n 逐个列出四个函数的全部调用点并改完；改完后确认核心层文件中不再出现 `RUN_EPOCH` / `TZ_LABEL` / `MAX_VERSION_COLS`
 - [x] 2.7 两个入口脚本 source 三个核心层文件（顺序任意，放在 `common.sh` 之前或之后均可）
@@ -40,7 +40,7 @@
 - [x] 3.2 `bin/test/core-format.sh`：覆盖 `format.sh` 全部函数。必含边界 —— `rate_pct` 分母为 `0` / 为空 → 空串；`int` / `pct` 空输入 → 空串；`pct` 整数与小数两种输出形态；`_until_epoch` 输入 `—` 与不可解析串 → 空；`win_compact` / `win_full` 止点为空 → 降级形态。**用例内固定 `TZ`**（design：`_fmt` 读环境 TZ）
 - [x] 3.3 `bin/test/core-verdict.sh`：`traffic_light` 空值与「无法计算」不判定 → 空串（这是「空值不告警」口径的根）；红/黄/绿三档各一例含边界值；`delta_cell` 覆盖 `lower_better` / `higher_better` / `neutral` 三方向 × 正/负/零增量，验证「箭头跟数值、颜色跟好坏」；`stale_days` 未停更 → 空、已停更 → 天数
 - [x] 3.4 `bin/test/core-version.sh`：`pick_newest` 按版本号而非会话量排序（含 `1.5.10` vs `1.5.9` 这类 `sort -V` 才对的用例）；`union_versions` 去重、排序、上限截断；`pick_top_sessions` 按会话量；`ver_field` 命中与未命中；**单版本可比时的退化情形**
-- [ ] 3.5 ⏸ 未做（`cache_verdict` / `doc_keep_predicate` 尚未上移核心层，见 2.4）：`bin/test/core-cache.sh`（design D10）：`cache_verdict` 覆盖 强制标志=1 / 文件不存在 / 计数变大 / 计数相等 四种入参组合；**并单列一条 `本次 < 上次`** —— **该缺陷已由 change `crash-fact-cache-freshness` 于 2026-08-22 修复**（抓取判定与记录更新拆开、`latest_event` 取 max）。用例直接钉住**修复后的正确行为**：`本次 < 上次` → 抓取判定为 `skip`，但观测字段仍刷新。⛔ 不要再写「已知缺陷」注释——那是修复前的状态。`doc_keep_predicate` 覆盖：日期键在 cutoff 内保留 / 超出丢弃 / **无日期后缀的固定键（`index` / `ledger`）无条件保留** —— 最后这条正是 2026-08-18 生产误删的那个场景（`deliver.sh:249-251` 注释），是本 change 里最高价值的一条用例
+- [x] 3.5 ✅ 已完成（2026-08-23）：`bin/test/core-cache.sh` 12 条断言，全套 39 → **51 条**。`cache_verdict` 覆盖 强制/文件不存在/计数变大/计数相等，并单列 `本次 < 上次 → skip`（钉住 crash-fact-cache-freshness 修复后的正确行为，未写「已知缺陷」注释）。`doc_keep_predicate` 覆盖 cutoff 内保留 / 超出丢弃 / **cutoff 晚于全部日期键时 index / ledger 仍无条件保留**（2026-08-18 生产误删场景）/ 空台账 / 日期恰等于 cutoff 保留。等价性实测：真实 `docs.json` 新旧 jq 输出完全一致；真实 `issues/` 20 个 × 6 种入参 = 120 次比对零差异；`CRASH_REPORT_SKIP_ANALYSIS=1` 整跑 L2 通过。
 - [x] 3.6 期望值从行为意图推导，不从当前输出反抄（design 风险表末项）。若某用例的意图值与实际输出不符，**不改代码也不改用例**，记入 `openspec/changes/crash-perf-functional-core/findings.md` 报给人判断
 - [x] 3.7 `bash bin/test/run.sh` 全绿
 
