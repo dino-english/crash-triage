@@ -5,7 +5,7 @@
 - [x] 0.3 写 `bin/test/baseline.sh`：**快照回滚协议**——备份 `$STATE` 基准文件 → 跑批 → 按 0.1 清单收集三层产物并归一化 → **从备份还原基准文件**。`crash-weekly.sh:624` 的 `cp "$SNAP_NEW" "$SNAP_LAST"` 在 `NO_DELIVER` 闸门之前，不还原则第二次跑批看到零变化，L2 等价性验收全是假阳性。**`issues/` 同样必须还原**——不还原则第二次跑批缓存已热（`CACHED_NEW` 变 `CACHED_HIT`），两次走不同分支
 - [x] 0.4 ✅ 核实完成：`perf-history.jsonl` 用 `>>` **追加，不幂等**（同周重跑加重复行，靠 prune 保留每 platform|version 最近 12 条兜底）。已在还原清单内。原文：核实 perf-history.jsonl 同周重跑是否幂等（L1 的 `metrics-history.jsonl` 已核实为按 `day` 键 upsert，`daily-snapshot.json` 为整体覆盖）；不幂等则在 0.3 的还原清单中确保覆盖
 - [x] 0.5 用 `baseline.sh` 跑 L1（`CRASH_REPORT_NO_DELIVER=1`），产物存入 `$STATE/backup/baseline-l1-<日期>/`
-- [ ] 0.6 ⚠️ **未做**（跳过了，导致 L2 无改动前基线可比）：用 `baseline.sh` 跑 L2（加 `CRASH_REPORT_SKIP_ANALYSIS=1` 跳过模型层，避免额度影响），存入 `baseline-l2-<日期>/`
+- [x] 0.6 「改动前基线」已无法回溯补抓；其目的（L2 可做等价性验收）于 2026-08-23 由 F1 收口以更强形式达成：取数收口 bqq 后，L2 同一冻结缓存两跑三层产物**逐字节一致**、改前改后数字盲比对 0 结构差异（见 findings F1 已根治记录）。原文：用 `baseline.sh` 跑 L2 存基线
 - [ ] 0.7 ⏸ 暂缓（L1 不写 issues/ 缓存，冷热之分主要对 L2 有意义）：**冷热两组基线**：L1 与 L2 各跑两组——组 A 从回滚后的冷缓存起跑，组 B 紧接着在热缓存上跑（design D7）。重构可能只改坏其中一条路径，两组各自留基线、后续不跨组比对
 - [x] 0.8 **协议自验**：代码未改的情况下重跑冷热两组并与基线 diff，**三层必须全为空**。不为空说明归一化漏字段（0.2）或还原漏文件（0.3），补完再继续 —— 这一步不通过就不要开始重构
 
@@ -18,7 +18,7 @@
 - [x] 1.5 `crash-daily.sh` / `crash-weekly.sh` 删除上述函数体，改为设好差异变量后 `. "$ROOT/bin/lib/common.sh"`；保留与现有 `lib.sh` 一致的「文件缺失则退化」回落分支
 - [x] 1.6 `bash bin/check-scripts.sh` 通过
 - [x] 1.7 **等价性验收** ✅ L1 三层全空。⚠️ L2 无改动前基线（0.6 未做），只验证了「能跑且产物正常」。原文：：用 `baseline.sh` 重跑 L1 + L2，与 0.5/0.6 基线三层 diff 为空
-- [ ] 1.8 单独提交（可独立回滚）
+- [x] 1.8 单独提交（可独立回滚）—— `0730f80 refactor(1/3)`（补记：提交早已按三段拆分，勾漏打）
 
 ## 2. 抽核心层：纯函数外移 + 全局提参
 
@@ -32,7 +32,7 @@
 - [x] 2.8 `bash -u -c '. bin/lib/core/format.sh; . bin/lib/core/verdict.sh; . bin/lib/core/version.sh; . bin/lib/core/cache.sh'` 在空环境下加载成功且无输出（spec 的「可脱离流水线独立调用」场景）
 - [x] 2.9 `bash bin/check-scripts.sh` 通过
 - [x] 2.10 **等价性验收**：重跑 L1 + L2，与基线三层 diff 为空 —— 参数错位会在此显形
-- [ ] 2.11 单独提交
+- [x] 2.11 单独提交 —— `f3a28b2 refactor(2/3)`（补记同 1.8）
 
 ## 3. 断言用例
 
@@ -53,7 +53,7 @@
 - [x] 4.5 接入 shellcheck（本机未安装 → 走「跳过并提示」分支，已验证不影响退出码；**已安装时的实际告警量仍未知**）：未安装时打印一行跳过提示且**不影响退出码**；已安装则计入退出码。按 design Open Questions —— 若首次接入报出的既有问题超过约 50 项，本 change 内改为仅提示不失败，并在 `findings.md` 记录数量与另开 change 的建议
 - [x] 4.6 **自检的自检**：在 `bin/lib/core/` 临时放一个含 `$STATE` 的文件，确认 4.2 报错；临时在第二个脚本里复制一个已有函数名，确认 4.3 报错；临时改坏一个纯函数，确认 4.4 报错。三项各确认后删除临时改动
 - [x] 4.7 `bash bin/check-scripts.sh` 全绿
-- [ ] 4.8 单独提交
+- [x] 4.8 单独提交 —— `8ed2115 refactor(3/3)`（补记同 1.8）
 
 ## 5. 文档与收尾
 
@@ -61,5 +61,5 @@
 - [x] 5.2 `CLAUDE.md` 的「架构要点」增一节：分层与依赖方向（核心层无副作用、外壳层编排、lint 如何强制），并写明**渲染层拆分与表名参数化是刻意的 Non-goal**及其理由，避免下一个读者以为是遗漏
 - [x] 5.3 ✅ 已完成（2026-08-23）：`CLAUDE.md` 增「跨进程边界：8 个子脚本，一种形状」一节——8 个脚本的进/出对照表、统一形状「`export` 环境变量 + argv 进，文件 + 退出码出」、三条踩过的推论（函数不跨进程 / 普通赋值必须 export / 退出码判据两端必须一致），并指向 `bin/test/artifacts.sh` 的三层产物清单；同时登记 `FACT_CACHE_POLICY` 那处 prompt 与 shell 的跨语言重复（重复定义检测抓不到、模型那份不可断言）。
 - [x] 5.4 `bin/INSTALL.md` 说明 bats / shellcheck 均为可选、生产机无需安装
-- [ ] 5.5 最终验收：`bash bin/check-scripts.sh` → `bash bin/test/run.sh` → `bin/test/baseline.sh` 跑 L1 与 L2（走快照回滚协议），与 0.5/0.6 基线三层 diff 为空
+- [x] 5.5 最终验收（2026-08-23 实测，/bin/bash 3.2）：`check-scripts.sh` 七项全绿（51 条断言）；`baseline.sh` L1 冻结缓存改前/改后三层 92 产物严格 diff 为空；L2 同缓存两跑严格 diff 为空 + 活数据数字盲比对 0 结构差异。原文基线对象 0.6 已由 F1 收口验收替代
 - [ ] 5.6 若 `findings.md` 有条目（3.6 的意图不符项、4.5 的 shellcheck 数量），在归档前逐条与人确认处置
