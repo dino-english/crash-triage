@@ -15,7 +15,7 @@ CRASH_REPORT_DRY_RUN=1 bash bin/crash-daily.sh      # 卡片预览后即 exit 0
 CRASH_REPORT_NO_DELIVER=1 bash bin/crash-daily.sh   # 完整链路不投递（验索引页/manifest 用这个）
 bash bin/setup.sh                # 装机/换机重探工具路径（换过 node/brew 位置必须重跑）
 bash bin/install.sh              # 一键装机；更新用 bin/update.sh
-bash bin/check-scripts.sh        # 改脚本后必跑（七项检查）
+bash bin/check-scripts.sh        # 改脚本后必跑（九项检查）
 FACT_CACHE_BASELINE=<跑批前快照目录> bash bin/test/assert-fact-cache.sh
 hermes cron list                 # 调度运维；改时间 edit / 停 pause
 cat "$STATE/health-daily.json"   # L1 健康（L2 是 health.json）；日志在 $STATE/logs
@@ -32,10 +32,15 @@ cat "$STATE/health-daily.json"   # L1 健康（L2 是 health.json）；日志在
 - ⚠️ `hermes cron run` 手工触发**总打印 `Ran now: failed`**，与成败无关——以 executions.db 与脚本日志为准
 - ⚠️ 活数据上 diff 永远不为空——等价性验收用 `CRASH_REPORT_BQ_CACHE` 冻结数据，**生产禁用**
 - ⚠️ L2 基线提升在 NO_DELIVER 闸门**之前**——「跑两次对比产物」在 L2 不成立，测试前先备份 `last-snapshot.json`
-- ⛔ `check-scripts.sh` 是**七项**检查；⚠️ 必须**递归**扫 `bin/**/*.sh`（只扫顶层时 lib/test 完全不受检）
+- ⛔ `check-scripts.sh` 是**九项**检查；⚠️ 必须**递归**扫 `bin/**/*.sh`（只扫顶层时 lib/test 完全不受检）
+- ⛔ **顶层「先用后定」会被第 7 项拦下**——常量/函数定义晚于使用，报错常被 EXIT trap 吞成 0。⚠️ 函数级测试抽函数出来跑，**原理上看不见顺序**，只能靠静态检查
+- ⚠️ **函数级测试必须跑在生产 shell 设置下**（`bin/test/harness.sh`）——夹具少了 `set -e` + ERR trap，「过程中踩了 ERR trap」这类问题测不出来（见 docs/CLAUDE-测试盲区.md）
 - ⛔ 全角括号 / `·` 一律先条件赋值再拼接，**禁 `${var:+（...）}`**——bash 把全角字节并进变量名
 - ⛔ prompt 与 bash 的重复（`FACT_CACHE_POLICY`）没有工具能检测，唯一检查是产物断言 `assert-fact-cache.sh`
 - ⛔ 渲染层拆分与表名参数化是**刻意的 Non-goal**，不是遗漏
+- ⛔ **跑批期间不得改 `bin/**`**——bash 按字节偏移边读边执行，改动会让运行中的进程从错位处继续读，报出与改动无关的错误（甚至不报错、执行拼接逻辑）。判据是「有没有进程在跑」不是「我改的是不是那个文件」
+- ⛔ **终止跑批用 `kill -9`**：默认信号会被 ERR trap 捕获，发一张假故障告警卡
+- ⛔ **失败必须非零退出**：四个脚本用完成哨兵（末尾 `RUN_COMPLETED=1`，trap 里没看到就 `exit 1`）。⚠️ bash 3.2 下 `set -u` 失败进 EXIT trap 时 `$?` **已经是 0**，保留 `$?` 的写法修不好；任何合法的提前 `exit 0` 都要先置位
 
 ### 跨进程边界（8 个子脚本：`export`+argv 进、文件+退出码出）
 
@@ -64,6 +69,14 @@ cat "$STATE/health-daily.json"   # L1 健康（L2 是 health.json）；日志在
 - ⛔ 更新事实层记录**不碰 `.source` 字段**（区分 bigquery 聚合与模型完整事件）
 - ⛔ **灰度关联做不了**（`remote_config_feature_rollouts` 字段存在但恒空）——先查有没有值，别按「字段存在」推断可用
 - ⛔ **汇总段不给根因**（与性能段「不出根因」同一条）；汇总段不进卡片；明细按受影响安装数排序
+- ⛔ **bq 的 CSV 一律走 `csv2tsv`（bin/lib/csv.sh），禁 `awk -F,` / `cut -d,`**——Apple 机型标识符自带逗号（`iPad7,11`），裸切会把 1 个事件渲染成 11 且无告警
+- ⛔ **SQL 占位符替换只走 `q_render`（bin/lib/query.sh）**，漏传当场失败并指名；⚠️ 共享层**不设窗口默认值**，漏传会静默用错窗口
+- **前后台**取 `process_state`（双端同名同枚举）回落自埋 `app_foreground`；⚠️ 两端取值不同（Android `true/false`、iOS `1/0`），归一化表达式**全仓只此一处**（`SQL_FG_NORM`）。⛔ 只给绝对数——会话表无该字段，**前后台没有分母**
+- **页面维度**取 `custom_keys.current_screen`，走无分母 SQL（`crash-dimensions-nodenom.sql`）。⛔ 永远不给率；⚠️ `(未知)` 照常成行不得丢弃；⚠️ 两份维度 SQL **列序不同**，渲染层不可共用列号
+- ⚠️ **iOS 几乎没有 FATAL**（实测 60 天 5 事件 / 4 issue，同期非致命 1424）——iOS 侧维度与下钻**必须用 NON_FATAL 口径**，否则渲染出单行表，而「只有一行」与「iOS 很健康」在版面上一样
+- **受影响用户数** `user.id` **仅 iOS 可得**（实测 iOS 96.6% / Android 0%）。Android 渲染「— 不上报」，⛔ 不是 0 也不是空；⛔ 与受影响安装**不可相加减**（实测前台子集 6 安装 / 7 用户）；⛔ 无用户率（会话表无用户标识）
+- **复发率**由生命周期「🔁回归」态聚合，⛔ **给分数不给百分比**（基准仅十余项，百分比是伪精度）；基准未建立时说「本轮建立基准」，⛔ 不显示 0/0
+- ⛔ **per-issue 的「top 机型」不是结论**——实测唯一机型数≈影响安装数（一设备一机型）。三分支：仅 1 台设备时明说判不了、真集中才点名、其余标「分散」
 
 ### 告警
 
@@ -71,6 +84,9 @@ cat "$STATE/health-daily.json"   # L1 健康（L2 是 health.json）；日志在
 - ⛔ **回退必须在摘要行说明**——换了判定对象不说，比漏报更难排查
 - ⛔ 不要说「首次纳入统计必然红档」——会不会红取决于判定对象是谁（由 1 天窗小样本回退决定）
 - ⚠️ 缺分析必须在卡片可见（「⚠️ 本周无深度分析 — 原因」）——缺分析与无异常是两件事
+- ⛔ **失败原因从日志读真实 API 错误码，不按退出码猜**（429 额度 / 529 过载 / 5xx / 4xx），识别不出时**明说识别不出**。⚠️ 写死「常见原因：额度耗尽」会把 529 说成额度问题，让人干等
+- ⛔ **补救建议必须由产生原因的那个分支一并赋值**，不得在渲染处写死——否则会出现「原因：显式跳过」+「建议：等额度恢复」这种自相矛盾
+- ⛔ **新增的检查/告警不得走触发 ERR trap 的路径**，且加完要**双向测试**（违规样本变红 + 全量代码不误报）。⚠️ `grep` 无匹配返回 1，放进 `set -e` 路径必须 `|| true`
 
 ### 卡片与文档
 
@@ -116,8 +132,12 @@ OpenSpec 驱动（`openspec/`，schema `spec-driven`）。**动手改脚本前�
 | 改指标口径前的校验流程 | .claude/skills/crash-metric-change/ |
 | 调试跑批、验产物（DRY_RUN / NO_DELIVER） | .claude/skills/crash-report-debug/ |
 | 零行为重构的等价性验收 | .claude/skills/eqv-check/ |
-| 部署、调度、装机换机、STATE 布局、check-scripts 七项 | docs/CLAUDE-部署与运维.md |
+| 脚本分层 / 消重 / 该不该拆 | docs/CLAUDE-分层与复用.md |
+| 改动前扫一眼「哪些错会静默重犯」 | docs/CLAUDE-失效模式登记.md |
+| 「我明明测过了为什么还炸」 | docs/CLAUDE-测试盲区.md |
+| 部署、调度、装机换机、STATE 布局、check-scripts 九项 | docs/CLAUDE-部署与运维.md |
 | 调 lark-cli / 排查同步失败 | docs/CLAUDE-lark-cli勘误.md |
 | 部署生产机 / 跑批后核验 | .claude/skills/deploy-prod/ 与 morning-verify/ |
 | 飞书固定资源（租户 / 文件夹 token / 固定 URL） | bin/INSTALL.md §12 |
+| 设计/审计报告内容（模块 · 指标 · 维度 · 排版） | .claude/skills/crash-report-design/ 与 crash-report-analyst agent |
 | 人工深度定位某个崩溃 | firebase-crash-triage skill |

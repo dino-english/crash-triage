@@ -36,11 +36,11 @@ STATE="${CRASH_REPORT_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/crash-tri
 
 ⚠️ **只能有一个调度器在跑**：launchd 与 Hermes cron 同时触发会双跑。卡片有幂等键不会重复，但**并发写 `docs.json` / 归档 JSONL 会互相覆盖**（脚本假设单写者）。装 plist 前先 `hermes cron pause`。
 
-## 验收链与 check-scripts 七项
+## 验收链与 check-scripts 九项
 
 没有单元测试。验收链：`check-scripts.sh` → DRY RUN → 抽查 2–3 个数值与 Firebase 控制台对得上（[bin/INSTALL.md](bin/INSTALL.md) §6）。
 
-⛔ `check-scripts.sh` 是**七项**检查（2026-08-23 起，change `crash-perf-functional-core`）：
+⛔ `check-scripts.sh` 是**九项**检查（2026-08-23 起，change `crash-perf-functional-core`）：
 
 1. `bash -n` 语法
 2. **`$VAR` 紧邻多字节字符** —— 反复踩的那个坑（`"${miss:+（$miss）}"` 在 `set -u` 下报
