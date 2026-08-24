@@ -4,17 +4,22 @@
 # 并生成本轮变更时间线条目（只含真正变化：新增/消失/暴涨/状态变更）。
 # 纯函数：只读输入、只写 stdout，不碰任何持久文件——持久化由调用方负责。
 #
-# 用法：render-ledger.sh <snapshot.json> <fixmap.json> <prev_table.md或空> <diff.json> <day> <report_url>
+# 用法：render-ledger.sh <snapshot.json> <fixmap.json> <prev_table.md或空> <diff.json> <day> <report_url> [issue-seen.json]
 # 输出：**三段**用 \x1e（record separator）分隔写到 stdout：
 #   ① FATAL 现状表 markdown  ② 变更时间线 markdown  ③ NON_FATAL 现状表 markdown
+#   ④ 更新后的生命周期基准 JSON —— **必须由本脚本产出**：first_seen 的取值优先级只在这里
+#      实现一次。调用方另算一遍必然与表格里的值漂移（2026-08-24 实测：调用方按 `first=今天`
+#      播种，下一轮 $s.first 反过来覆盖了台账里真实的历史首次纳入日期）。
 set -euo pipefail
 
-SNAPSHOT="${1:?用法：render-ledger.sh <snapshot.json> <fixmap.json> <prev_table.md或空> <diff.json> <day> <report_url>}"
+SNAPSHOT="${1:?用法：render-ledger.sh <snapshot.json> <fixmap.json> <prev_table.md或空> <diff.json> <day> <report_url> [issue-seen.json]}"
 FIXMAP="${2:?缺少 fixmap.json}"
 PREV_TABLE="${3:-}"   # 可以是空字符串或不存在的路径 → 视为无历史
 DIFF_FILE="${4:?缺少 diff.json}"
 DAY="${5:?缺少 day}"
 REPORT_URL="${6:-}"
+SEEN_FILE="${7:-}"   # 生命周期基准 {"<32位id>":{"first","last"}}；缺省则退回两态
+SEEN_CUTOFF="${8:-}" # 基准保留期起点（YYYY-MM-DD），早于它的条目在第 ④ 段输出时清理
 
 [ -s "$SNAPSHOT" ] || { echo "snapshot.json 为空：$SNAPSHOT" >&2; exit 1; }
 [ -s "$FIXMAP" ] || echo '{"mapped":{},"ambiguous":[],"platform_unavailable":[]}' > "$FIXMAP"
@@ -50,29 +55,55 @@ if [ -n "$PREV_TABLE" ] && [ -s "$PREV_TABLE" ]; then
   ' 2>/dev/null || echo '{}')"
 fi
 
+# ── 生命周期基准（change crash-report-correctness-fixes，design D4）──────────
+# spec crash-perf-issue-lifecycle 要三态：新增 / 回归 / 长期。此前只有两态，回归从未被渲染过。
+# 「上一轮」取基准里的**最大 last**，不假设为「上周」——漏跑一轮时按固定周期推断
+# 会把全部 issue 误判成回归（crash-daily.sh:830 已踩过同一个坑）。
+SEEN_JSON='{}'; SEEN_PREV_DAY=""; LIFECYCLE_OK=0
+if [ -n "$SEEN_FILE" ] && [ -s "$SEEN_FILE" ]; then
+  SEEN_JSON="$(jq -c '.' "$SEEN_FILE" 2>/dev/null || echo '{}')"
+  SEEN_PREV_DAY="$(printf '%s' "$SEEN_JSON" | jq -r '[.[].last] | max // ""' 2>/dev/null || echo "")"
+  [ "$(printf '%s' "$SEEN_JSON" | jq 'length' 2>/dev/null || echo 0)" -gt 0 ] && LIFECYCLE_OK=1
+fi
+
 # ── 逐平台构建现状表行 ──────────────────────────────────
 build_rows() { # $1=平台标签(iOS|Android) $2=snapshot key(ios|android)
   local label="$1" key="$2"
   jq -r --arg label "$label" --arg key "$key" --arg day "$DAY" \
-    --slurpfile fm "$FIXMAP" --argjson prev "$PREV_JSON" '
+    --slurpfile fm "$FIXMAP" --argjson prev "$PREV_JSON" \
+    --argjson seen "$SEEN_JSON" --arg prevday "$SEEN_PREV_DAY" --argjson lcok "$LIFECYCLE_OK" '
     ($fm[0].mapped // {}) as $mapped |
     (.[$key] // [])[] |
     . as $iss |
     ($iss.id[0:8]) as $short |
     ($mapped[$iss.id] // null) as $fix |
     ($prev[$short] // null) as $p |
+    ($seen[$iss.id] // null) as $s |
     {
       platform: $label,
       short: $short,
       full: $iss.id,
       title: $iss.title,
       type: "FATAL",
-      first_seen: ($p.first_seen // $day),
+      # 基准的 first 优先：issue 消失后从现状表掉出，$p 随之为空，
+      # 只看 $p 会把回归的 issue 记成「今天首次纳入」。
+      first_seen: ($s.first // $p.first_seen // $day),
       # 处置状态：反扫命中优先；否则保留历史结论；否则「未处理」（5.7：反扫只改这两列，不碰备注）
       disposition: (if $fix != null then $fix.status
                     elif $p.disposition != null and $p.disposition != "" then $p.disposition
                     else "未处理" end),
-      status_badge: (if $p == null then "🆕新增" else "🔁遗留" end),
+      # 三态（spec crash-perf-issue-lifecycle）。⚠️ $s.last 是**上一轮**的值——
+      # 基准提升发生在渲染之后，此处读到的还没被刷成今天。
+      status_badge: (
+        if $lcok == 1 then
+          (if $s == null then "🆕新增"
+           elif $prevday != "" and $s.last == $prevday then "🔁遗留"
+           else "🔁回归" end)
+        else
+          # 基准尚未建立（本 change 落地后的第一轮）：退回旧两态，不比现状差，
+          # 也不会凭空刷出一屏「回归」。下一轮基准就位后自动切到三态。
+          (if $p == null then "🆕新增" else "🔁遗留" end)
+        end),
       events: ($iss.events // 0),
       note: (if $fix != null then ($fix.commit + " " + $fix.subject)
              elif $p.note != null then $p.note
@@ -147,4 +178,19 @@ while IFS=$'\t' read -r id plat status commit subject; do
   add_line "🛠️ [$plat] $status ${subject}（${commit}，issue ${id:0:8}）"
 done < <(jq -r '.mapped // {} | to_entries[] | [.key, .value.platform, .value.status, .value.commit, .value.subject] | @tsv' "$FIXMAP" 2>/dev/null || true)
 
-printf '%s\x1e%s\x1e%s' "$TABLE_MD" "$TIMELINE_LINES" "$NF_TABLE"
+# ── ④ 更新后的生命周期基准 ─────────────────────────────
+# first 的取值与表格行逐字相同（基准的 first 优先，其次上一版表格的首次纳入，最后本轮日期）。
+# ⚠️ last 一律刷成本轮日期；超期条目按 SEEN_CUTOFF 清理（缺省则不清理）。
+SEEN_NEXT="$(jq -c --argjson prev "$PREV_JSON" --argjson seen "$SEEN_JSON" \
+  --arg day "$DAY" --arg cut "$SEEN_CUTOFF" '
+  [(.ios // [])[], (.android // [])[]]
+  | map({ id: .id, short: (.id[0:8]) })
+  | map({ key: .id,
+          value: { first: ((($seen[.id] // {}).first) // (($prev[.short] // {}).first_seen) // $day),
+                   last:  $day } })
+  | from_entries
+  | . as $cur
+  | (if $cut == "" then $seen else ($seen | with_entries(select(.value.last >= $cut))) end) + $cur
+' "$SNAPSHOT" 2>/dev/null || echo '{}')"
+
+printf '%s\x1e%s\x1e%s\x1e%s' "$TABLE_MD" "$TIMELINE_LINES" "$NF_TABLE" "$SEEN_NEXT"

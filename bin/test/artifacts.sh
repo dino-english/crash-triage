@@ -24,6 +24,7 @@ metrics-history.jsonl
 perf-history.jsonl
 daily-snapshot.json
 last-snapshot.json
+issue-seen.json
 docs.json
 folders.json
 report-index.jsonl
