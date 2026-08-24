@@ -70,7 +70,13 @@ json_only() { sed -n '/^[[:space:]]*{/,$p'; }
 # 这些是部署实例独有的事实，不回填到 CLAUDE.md 的「部署实例」表里，换机器就只能翻群找入口。
 # 用文件不用变量：记录点都在 $(...) 命令替换里，子 shell 的赋值传不回父进程。
 NEW_RESOURCES="$(mktemp)"
-trap 'rm -f "$NEW_RESOURCES"' EXIT
+# ⛔ EXIT trap 用**完成哨兵**判定成败，⚠️ 不能靠 `$?`——bash 3.2 在 `set -u` 未定义变量
+#    这条致命路径上，**进 trap 时 `$?` 已经是 0**（实测；普通命令失败时才是 1）。
+#    而 unbound variable 恰是本仓库最常见的失败模式（多字节首字节被并进变量名）。
+#    不修则三重静默：退出码 0 + ERR trap 不触发（shell 错误不是命令失败）+ health
+#    停在上一轮的 ok:true——cron 看到成功、无告警、群里却收不到报告（2026-08-24 实测）。
+#    ⚠️ 任何提前 `exit 0` 的合法路径都必须先置 RUN_COMPLETED=1。
+trap 'rm -f "$NEW_RESOURCES"; [ "${RUN_COMPLETED:-0}" = 1 ] || exit 1' EXIT
 note_new() { printf '| %s | `%s` |\n' "$1" "$2" >> "$NEW_RESOURCES"; }
 [ -s "$MANIFEST" ] || fail "投递清单不存在：$MANIFEST"
 jq empty "$MANIFEST" 2>/dev/null || fail "投递清单不是合法 JSON：$MANIFEST"
@@ -386,7 +392,7 @@ if [ "$CARD_ONLY" = "1" ]; then
   echo "  ↻ 仅重发卡片（文档未改动）"
   send_card "$CARD"
   echo "=== 投递完成 ==="
-  exit 0
+  RUN_COMPLETED=1; exit 0   # 合法提前退出，必须置哨兵
 fi
 
 # ── 台账同步（design D2/D3/D6.6/D6.7，change crash-ledger-l2-ownership，L2 独占）──────
@@ -649,3 +655,4 @@ if [ -s "$NEW_RESOURCES" ]; then
 fi
 doc_prune
 echo "=== 投递完成 ==="
+RUN_COMPLETED=1

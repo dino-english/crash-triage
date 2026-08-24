@@ -1,0 +1,4 @@
+- [x] 1.1 四脚本 trap 改完成哨兵，末尾置 `RUN_COMPLETED=1`
+- [x] 1.2 两处提前 `exit 0` 先置位（crash-daily DRY_RUN / deliver 重发卡片）
+- [x] 1.3 负向验证：注入 unbound variable → rc=1；正常/提前退出 rc=0
+- [x] 1.4 失效模式登记 F24；F25（baseline.sh 收走上一次产物）一并登记，验收脚本加产物名断言

@@ -102,6 +102,10 @@ DAYS="${CRASH_REPORT_DAYS:-1}"
 PERF_DAYS="${CRASH_REPORT_PERF_DAYS:-3}"
 # 崩溃窗口与 MCP topIssues 的 Firebase 默认 7 天窗一致；日窗口太窄（iOS 样本极少）会误读为「无崩溃」。
 CRASH_DAYS="${CRASH_REPORT_CRASH_DAYS:-7}"
+# 前后台摘要行的出现条件（change crash-fg-bg-split）：样本 >= N 且后台占比 >= P%。
+# ⚠️ 这两个值只控制「要不要多说一句」，**不参与任何红黄绿判定**——后台占比高不是告警。
+FGBG_MIN_EVENTS="${CRASH_REPORT_FGBG_MIN_EVENTS:-20}"
+FGBG_BG_NOTE_PCT="${CRASH_REPORT_FGBG_BG_NOTE_PCT:-80}"
 
 # ── 版本口径（change crash-perf-latest-2-versions）───────────────────
 VERSION_COUNT="${CRASH_REPORT_VERSION_COUNT:-2}"   # 日报统计的最新版本个数
@@ -190,12 +194,15 @@ trap 'on_err' ERR   # 不传 ${LINENO}：bash 3.2 下它不准，位置改由 er
 #    故包一层 `bash -c 'exec bq ... < "$1"'`，让重定向在子进程里生效。
 # ③ **stderr 不能丢给 /dev/null**。今早正是因为 `2>/dev/null` 连 bq 报错一起吞了，
 #    事后无法回溯「哪条查询卡住」。改为落盘到 ${BQ_ERRLOG}，超时另打一行可见提示。
+. "$ROOT/bin/lib/csv.sh"   # bq CSV 解析唯一入口（csv2tsv / csv_field1），L1/L2 共用
+. "$ROOT/bin/lib/query.sh" # SQL 占位符替换唯一入口（q_render），漏传占位符当场失败
 if [ -f "$ROOT/bin/lib.sh" ]; then
   # shellcheck disable=SC1091
   . "$ROOT/bin/lib.sh"
 else
   run_with_timeout() { local s="$1"; shift; "$@"; }   # 无 lib.sh 时退化为直接执行
   cleanup_old_runs() { :; }                            # 无 lib.sh 时跳过清理，不阻塞主流程
+  day_ago() { date -v-"${1:-0}"d +%Y-%m-%d 2>/dev/null; }   # 同上：保留期清理要用，缺了会整跑失败
 fi
 # 核心层（纯函数）。不依赖任何全局，加载顺序任意；缺失则整跑失败——
 # 这些是阈值判定与格式化的唯一实现，退化版本会静默产出错误数字，比直接失败危险得多。
@@ -210,7 +217,13 @@ done
 # shellcheck disable=SC1091
 . "$ROOT/bin/lib/bq.sh" || { echo "❌ 外壳层缺失：bin/lib/bq.sh" >&2; exit 1; }
 bq_init
-trap 'rm -f "$BQ_SQLTMP"' EXIT
+# ⛔ EXIT trap 用**完成哨兵**判定成败，⚠️ 不能靠 `$?`——bash 3.2 在 `set -u` 未定义变量
+#    这条致命路径上，**进 trap 时 `$?` 已经是 0**（实测；普通命令失败时才是 1）。
+#    而 unbound variable 恰是本仓库最常见的失败模式（多字节首字节被并进变量名）。
+#    不修则三重静默：退出码 0 + ERR trap 不触发（shell 错误不是命令失败）+ health
+#    停在上一轮的 ok:true——cron 看到成功、无告警、群里却收不到报告（2026-08-24 实测）。
+#    ⚠️ 任何提前 `exit 0` 的合法路径都必须先置 RUN_COMPLETED=1。
+trap 'rm -f "$BQ_SQLTMP"; [ "${RUN_COMPLETED:-0}" = 1 ] || exit 1' EXIT
 
 # run.start 与同日重复 run 检测（design D5：只记录不中止——同日重跑常是人工补救）
 audit run.start "" "$(jq -cn --arg day "$DAY" --arg sha "$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo '?')" '{day:$day,git:$sha}')"
@@ -230,7 +243,7 @@ vlist() { printf '"%s"' "$1"; }   # 单版本 → "1.5.4"（多版本形式保�
 
 q() { # $1=sql文件 $2=表名 $3=窗口天数 $4=版本 → CSV（无表头）
   local _t0=$SECONDS _rc=0 _out
-  _out="$(bqq csv "$(sed -e "s|{{TABLE}}|$2|g" -e "s|{{DAYS}}|$3|g" -e "s|{{VERSIONS}}|$(vlist "$4")|g" "$SQL_DIR/$1")" \
+  _out="$(bqq csv "$(q_render "$1" TABLE="$2" DAYS="$3" VERSIONS="$(vlist "$4")")" \
     | tail -n +2)" || _rc=$?
   audit query q "$(jq -cn --arg sql "$1" --arg tbl "$2" --arg days "$3" --arg ver "$4" \
     --argjson rows "$(printf '%s' "$_out" | grep -c . || true)" --argjson secs "$((SECONDS - _t0))" --argjson rc "$_rc" \
@@ -241,8 +254,8 @@ q() { # $1=sql文件 $2=表名 $3=窗口天数 $4=版本 → CSV（无表头）
 qc() { # $1=sql文件 $2=crashlytics表 $3=sessions表 $4=窗口天数 $5=版本 → JSON
   # 崩溃查询用 --format=json + jq 渲染：issue 标题是自由文本可能含逗号，CSV+awk 会错列。
   local _t0=$SECONDS _rc=0 _out
-  _out="$(bqq json "$(sed -e "s|{{TABLE}}|$2|g" -e "s|{{SESSIONS_TABLE}}|$3|g" -e "s|{{DAYS}}|$4|g" \
-                  -e "s|{{VERSIONS}}|$(vlist "$5")|g" -e "s|{{LIMIT}}|${ISSUE_LIMIT:-20}|g" "$SQL_DIR/$1")")" || _rc=$?
+  _out="$(bqq json "$(q_render "$1" TABLE="$2" SESSIONS_TABLE="$3" DAYS="$4" \
+                  VERSIONS="$(vlist "$5")" LIMIT="${ISSUE_LIMIT:-20}" FG_NORM="${SQL_FG_NORM}")")" || _rc=$?
   audit query qc "$(jq -cn --arg sql "$1" --arg tbl "$2" --arg days "$4" --arg ver "$5" \
     --argjson rows "$(printf '%s' "$_out" | jq 'length' 2>/dev/null || echo -1)" --argjson secs "$((SECONDS - _t0))" --argjson rc "$_rc" \
     '{fn:"qc",sql:$sql,table:$tbl,days:$days,version:$ver,rows:$rows,secs:$secs,rc:$rc}')"
@@ -253,20 +266,35 @@ qc() { # $1=sql文件 $2=crashlytics表 $3=sessions表 $4=窗口天数 $5=版本
 # 与 q()/qc() 的占位符集合不同，单独一个助手，不把 q() 撑成万能函数。
 qdim() { # $1=crash表 $2=sessions表 $3=版本 $4=维度表达式 $5=取几条 → CSV（无表头）
   local _t0=$SECONDS _rc=0 _out
-  _out="$(bqq csv "$(sed -e "s|{{TABLE}}|$1|g" -e "s|{{SESSIONS_TABLE}}|$2|g" -e "s|{{DAYS}}|$CRASH_DAYS|g" \
-                 -e "s|{{VERSIONS}}|$(vlist "$3")|g" -e "s|{{DIM}}|$4|g" -e "s|{{SESS_DIM}}|$4|g" \
-                 -e "s|{{LIMIT}}|$5|g" -e "s|{{MIN_SESSIONS}}|$DIM_MIN_SESSIONS|g" \
-                 "$SQL_DIR/crash-dimensions.sql")" | tail -n +2)" || _rc=$?
+  _out="$(bqq csv "$(q_render crash-dimensions.sql TABLE="$1" SESSIONS_TABLE="$2" DAYS="$CRASH_DAYS" \
+                 VERSIONS="$(vlist "$3")" DIM="$4" SESS_DIM="$4" LIMIT="$5" MIN_SESSIONS="$DIM_MIN_SESSIONS")" \
+                 | tail -n +2)" || _rc=$?
   audit query qdim "$(jq -cn --arg tbl "$1" --arg ver "$3" --arg dim "$4" \
     --argjson rows "$(printf '%s' "$_out" | grep -c . || true)" --argjson secs "$((SECONDS - _t0))" --argjson rc "$_rc" \
     '{fn:"qdim",sql:"crash-dimensions.sql",table:$tbl,version:$ver,dim:$dim,rows:$rows,secs:$secs,rc:$rc}')"
   [ -n "$_out" ] && printf '%s\n' "$_out"
   return 0
 }
+# 无分母维度取数（change crash-screen-dimension）。
+# ⚠️ 与 qdim 的三点不同，任一处套错都不报错只出坏数：
+#   ① 不 JOIN sessions、**没有率**（sessions 表无 screen 字段，页面级会话分母不存在）
+#   ② **列序不同**：本份第 4 列是集中度，qdim 那份第 4/5 列是 sessions / rate_pct
+#   ③ 错误类型由调用方给——iOS 须传 'NON_FATAL'（实测 iOS 60 天仅 5 次致命崩溃，
+#      按致命口径出来是空表，而「表里只有一行」与「iOS 很健康」在版面上长得一样）
+qdim_nd() { # $1=crash表 $2=版本 $3=维度表达式 $4=取几条 $5=错误类型白名单 → CSV（无表头）
+  local _t0=$SECONDS _rc=0 _out
+  _out="$(bqq csv "$(q_render crash-dimensions-nodenom.sql TABLE="$1" DAYS="$CRASH_DAYS" \
+                 VERSIONS="$(vlist "$2")" DIM="$3" LIMIT="$4" ERROR_TYPES="$5")" | tail -n +2)" || _rc=$?
+  audit query qdim_nd "$(jq -cn --arg tbl "$1" --arg ver "$2" --arg dim "$3" --arg et "$5" \
+    --argjson rows "$(printf '%s' "$_out" | grep -c . || true)" --argjson secs "$((SECONDS - _t0))" --argjson rc "$_rc" \
+    '{fn:"qdim_nd",sql:"crash-dimensions-nodenom.sql",table:$tbl,version:$ver,dim:$dim,error_types:$et,rows:$rows,secs:$secs,rc:$rc}')"
+  [ -n "$_out" ] && printf '%s\n' "$_out"
+  return 0
+}
 qhours() { # $1=crash表 $2=版本 → CSV（无表头）
   local _t0=$SECONDS _rc=0 _out
-  _out="$(bqq csv "$(sed -e "s|{{TABLE}}|$1|g" -e "s|{{DAYS}}|$CRASH_DAYS|g" \
-                 -e "s|{{VERSIONS}}|$(vlist "$2")|g" "$SQL_DIR/crash-hours.sql")" | tail -n +2)" || _rc=$?
+  _out="$(bqq csv "$(q_render crash-hours.sql TABLE="$1" DAYS="$CRASH_DAYS" \
+                 VERSIONS="$(vlist "$2")")" | tail -n +2)" || _rc=$?
   audit query qhours "$(jq -cn --arg tbl "$1" --arg ver "$2" \
     --argjson rows "$(printf '%s' "$_out" | grep -c . || true)" --argjson secs "$((SECONDS - _t0))" --argjson rc "$_rc" \
     '{fn:"qhours",sql:"crash-hours.sql",table:$tbl,version:$ver,rows:$rows,secs:$secs,rc:$rc}')"
@@ -275,7 +303,7 @@ qhours() { # $1=crash表 $2=版本 → CSV（无表头）
 }
 q1d() { # $1=sql文件 $2=表名 $3=距今天数 $4=版本 → 单行 JSON 对象（无数据/超时 → {}）
   local _t0=$SECONDS _rc=0 _out
-  _out="$(bqq json "$(sed -e "s|{{TABLE}}|$2|g" -e "s|{{DAYS}}|$3|g" -e "s|{{VERSIONS}}|$(vlist "$4")|g" "$SQL_DIR/$1")" \
+  _out="$(bqq json "$(q_render "$1" TABLE="$2" DAYS="$3" VERSIONS="$(vlist "$4")")" \
     | jq -c '.[0] // {}' 2>/dev/null)" || _rc=$?
   [ -n "$_out" ] || _out='{}'
   audit query q1d "$(jq -cn --arg sql "$1" --arg tbl "$2" --arg days "$3" --arg ver "$4" \
@@ -366,9 +394,8 @@ state_text() { # $1=state $2=表整体最新时间戳 → 单元格文案
 }
 
 # ── 数值格式化 ────────────────────────────────────────
-csv() { [ -s "$1" ] && cut -d, -f"$2" "$1" | head -1 || echo ""; }
+csv() { csv_field1 "$1" "$2"; }   # bq CSV 取列一律走 bin/lib/csv.sh，⛔ 不得裸 cut -d,
 daily_rate() { rate_pct "$1" "$2"; }
-day_ago() { date -v-"${1:-0}"d +%Y-%m-%d 2>/dev/null; }   # BSD date（macOS）：N 天前日期
 
 # ── 取数区间（双时区）─────────────────────────────────
 # 窗口起点 = 本次跑批时刻 − N 天，因为所有滚动窗口 SQL 写的都是
@@ -524,8 +551,8 @@ ADOPTION_UNTIL="$(newest_ts "$IOS_SESS_MAX" "$AND_SESS_MAX")"; [ -n "$ADOPTION_U
 step "解析版本清单"
 resolve_versions() { # $1=sessions表 → CSV「version,sessions,devices」（无表头，未排序）
   [ -n "$1" ] || return 0
-  bqq csv "$(sed -e "s|{{TABLE}}|$1|g" -e "s|{{DAYS}}|$DAYS|g" -e "s|{{MIN_SESSIONS}}|$MIN_SESSIONS|g" \
-    "$SQL_DIR/latest-versions.sql")" | tail -n +2 || true
+  bqq csv "$(q_render latest-versions.sql TABLE="$1" DAYS="$DAYS" MIN_SESSIONS="$MIN_SESSIONS")" \
+    | tail -n +2 || true
 }
 
 IOS_VER_CSV="$(resolve_versions "$SESS_IOS")"
@@ -558,6 +585,10 @@ collect_window() { # $1=plat键 $2=版本 $3=crash表 $4=sess表 $5=perf表 $6=c
   local vsess vdev
   # ANR 与 NON_FATAL：两者的 is_fatal 均为 FALSE，**不能复用上面的崩溃查询**
   local etypes='[]' nf='[]' anr_ev="" anr_inst="" nf_ev="" nf_inst="" anr_rp="" anr_rfrac=""
+  local aff_users=""   # 受影响用户数（仅 iOS 有值，见 crash-rate.sql 注释）
+  # 前后台（change crash-fg-bg-split）：三类各三个数，未知单独一列——
+  # `0 前台` 是结论（确实没有前台事件），`未知` 是缺数，⛔ 两者不可合并。
+  local fat_fg="" fat_bg="" fat_unk="" anr_fg="" anr_bg="" anr_unk="" nf_fg="" nf_bg="" nf_unk=""
   local csess_crash="" cfree="" cfree_bad="" cfree_frac=""
 
   # 崩溃
@@ -586,12 +617,21 @@ collect_window() { # $1=plat键 $2=版本 $3=crash表 $4=sess表 $5=perf表 $6=c
   anr_inst="$(printf '%s' "$etypes" | jq -r '(.[0].anr_installs // empty) | tostring'     2>/dev/null || echo "")"
   nf_ev="$(printf '%s' "$etypes"    | jq -r '(.[0].nonfatal_events // empty) | tostring'  2>/dev/null || echo "")"
   nf_inst="$(printf '%s' "$etypes"  | jq -r '(.[0].nonfatal_installs // empty) | tostring' 2>/dev/null || echo "")"
+  for _fld in fatal_fg fatal_bg fatal_unknown anr_fg anr_bg anr_unknown nonfatal_fg nonfatal_bg nonfatal_unknown; do
+    _v="$(printf '%s' "$etypes" | jq -r --arg f "$_fld" '(.[0][$f] // empty) | tostring' 2>/dev/null || echo "")"
+    case "$_fld" in
+      (fatal_fg) fat_fg="$_v";; (fatal_bg) fat_bg="$_v";; (fatal_unknown) fat_unk="$_v";;
+      (anr_fg) anr_fg="$_v";;   (anr_bg) anr_bg="$_v";;   (anr_unknown) anr_unk="$_v";;
+      (nonfatal_fg) nf_fg="$_v";; (nonfatal_bg) nf_bg="$_v";; (nonfatal_unknown) nf_unk="$_v";;
+    esac
+  done
   # ANR 率与崩溃率同分母（会话数），两者内部可比；与 Play 的日活口径不可比，标注在口径段。
   anr_rp="$(rate_pct "$anr_ev" "$sess")"
   [ -n "$anr_rp" ] && anr_rfrac="$anr_ev/$sess"
   # crash-free 会话率 = 1 − 崩溃会话数 / 会话数。分母为 0 时两个值都留空 →
   # 渲染成「无法计算」，⛔ **绝不能渲染成 100%**（零崩溃除以零会话不是「完全干净」）。
   csess_crash="$(printf '%s' "$rate" | jq -r '(.[0].crash_sessions // empty) | tostring' 2>/dev/null || echo "")"
+  aff_users="$(printf '%s' "$rate" | jq -r '(.[0].affected_users // empty) | tostring' 2>/dev/null || echo "")"
   cfree_bad="$(rate_pct "$csess_crash" "$sess")"        # 崩溃会话率（判定用，坏方向）
   if [ -n "$cfree_bad" ]; then
     cfree="$(awk -v b="$cfree_bad" 'BEGIN{printf "%.2f", 100 - b}')"
@@ -615,14 +655,14 @@ collect_window() { # $1=plat键 $2=版本 $3=crash表 $4=sess表 $5=perf表 $6=c
   wslow="$(pct "$(csv "$screens" 3)")"
   # 冻结率取「最差慢帧页」同一行的冻结率（沿用既有口径，仅在标签上明确写出「最差页」）
   frozen="$(pct "$(csv "$screens" 4)")"
-  neterr="$([ -s "$net" ] && awk -F, '{e+=$5; n+=$2} END{if(n>0) printf "%.2f", e/n*100}' "$net" || echo "")"
+  neterr="$([ -s "$net" ] && csv2tsv < "$net" | awk -F'\t' '{e+=$5; n+=$2} END{if(n>0) printf "%.2f", e/n*100}' || echo "")"
   neterr="$(pct "$neterr")"
   # 最差页的样本量：94% 慢帧率在 3 次打开和 3000 次打开上是完全不同的结论（决策 D5）
   wsamples="$(csv "$screens" 2)"
   # 最差接口 = 错误率最高的那条。崩溃给了最差 issue、慢帧给了最差页面，接口只给总数，三者不对称（决策 D7）
   if [ -s "$net" ]; then
-    wnet="$(awk -F, 'NF>=6 && $6+0 > mx {mx=$6+0; n=$1} END{print n}' "$net")"
-    wnet_pct="$(pct "$(awk -F, 'NF>=6 && $6+0 > mx {mx=$6+0} END{if(mx>0) print mx}' "$net")")"
+    wnet="$(csv2tsv < "$net" | awk -F'\t' 'NF>=6 && $6+0 > mx {mx=$6+0; n=$1} END{print n}')"
+    wnet_pct="$(pct "$(csv2tsv < "$net" | awk -F'\t' 'NF>=6 && $6+0 > mx {mx=$6+0} END{if(mx>0) print mx}')")"
   fi
   pstate="$(data_state "$5" "$prows" "$7" "${9:-}")"
 
@@ -637,16 +677,24 @@ collect_window() { # $1=plat键 $2=版本 $3=crash表 $4=sess表 $5=perf表 $6=c
     --arg wsamp "$wsamples" --arg wnet "$wnet" --arg wnetp "$wnet_pct" \
     --arg anrev "$anr_ev" --arg anrinst "$anr_inst" --arg anrrp "$anr_rp" --arg anrfrac "$anr_rfrac" \
     --arg nfev "$nf_ev" --arg nfinst "$nf_inst" \
+    --arg fatfg "$fat_fg" --arg fatbg "$fat_bg" --arg fatunk "$fat_unk" \
+    --arg anrfg "$anr_fg" --arg anrbg "$anr_bg" --arg anrunk "$anr_unk" \
+    --arg nffg "$nf_fg" --arg nfbg "$nf_bg" --arg nfunk "$nf_unk" \
     --arg cfree "$cfree" --arg cfreebad "$cfree_bad" --arg cfreefrac "$cfree_frac" \
+    --arg affu "$aff_users" \
     '{version:$v,
       crash:{state:$cstate, n:$n, events:$ev, latest:$latest, affected:$aff,
              crash_events:$cev, sessions:$csess, rate_pct:$rp, rate_frac:$rfrac,
-             crash_free_pct:$cfree, crash_free_bad:$cfreebad, crash_free_frac:$cfreefrac},
+             crash_free_pct:$cfree, crash_free_bad:$cfreebad, crash_free_frac:$cfreefrac,
+             affected_users:$affu},
       perf:{state:$pstate, p50:$p50, p95:$p95, worst_screen:$wscreen, worst_slow:$wslow,
             frozen:$frozen, net_err:$neterr,
             worst_samples:$wsamp, worst_net:$wnet, worst_net_pct:$wnetp},
       errtype:{anr_events:$anrev, anr_installs:$anrinst, anr_rate_pct:$anrrp, anr_rate_frac:$anrfrac,
-               nonfatal_events:$nfev, nonfatal_installs:$nfinst},
+               nonfatal_events:$nfev, nonfatal_installs:$nfinst,
+               fatal_fg:$fatfg, fatal_bg:$fatbg, fatal_unknown:$fatunk,
+               anr_fg:$anrfg, anr_bg:$anrbg, anr_unknown:$anrunk,
+               nonfatal_fg:$nffg, nonfatal_bg:$nfbg, nonfatal_unknown:$nfunk},
       adopt:{sessions:$vsess, devices:$vdev}}' > "$TMP/m-$key.json"
 }
 
@@ -658,16 +706,22 @@ mv_() { local f="$TMP/m-$1-$2.json"; [ -s "$f" ] || { echo ""; return 0; }
 # 「新版是否引入了新机型问题」——四段平铺就丢掉了这个唯一价值。
 DIM_MODEL_EXPR="CONCAT(device.manufacturer,' ',device.model)"
 DIM_OS_EXPR="operating_system.display_version"
+# 页面：custom_keys 是 REPEATED RECORD，取值必须走标量子查询（不能当普通字段路径）
+DIM_SCREEN_EXPR="(SELECT value FROM UNNEST(custom_keys) WHERE key = 'current_screen' LIMIT 1)"
 collect_dims() { # $1=plat键 $2=版本 $3=crash表 $4=sess表
   local key="$1-$2"
   : > "$TMP/dim-model-$key.csv"; : > "$TMP/dim-os-$key.csv"; : > "$TMP/hours-$key.csv"
+  : > "$TMP/dim-screen-$key.csv"
   [ -n "$3" ] && [ -n "$4" ] || return 0
   qdim "$3" "$4" "$2" "$DIM_MODEL_EXPR" "$DIM_TOP" > "$TMP/dim-model-$key.csv" || true
   qdim "$3" "$4" "$2" "$DIM_OS_EXPR"    "$DIM_TOP" > "$TMP/dim-os-$key.csv"    || true
+  # 页面维度的错误类型口径按端分叉（见 qdim_nd 注释 ③）
+  local _screen_et="'FATAL','ANR'"
+  [ "$1" = ios ] && _screen_et="'NON_FATAL'"
+  qdim_nd "$3" "$2" "$DIM_SCREEN_EXPR" "$DIM_TOP" "$_screen_et" > "$TMP/dim-screen-$key.csv" || true
   qhours "$3" "$2" > "$TMP/hours-$key.csv" || true
-  bqq csv "$(sed -e "s|{{TABLE}}|$3|g" -e "s|{{DAYS}}|$CRASH_DAYS|g" \
-                 -e "s|{{VERSIONS}}|$(vlist "$2")|g" -e "s|{{LIMIT}}|$DIM_TOP|g" \
-                 "$SQL_DIR/crash-blame.sql")" | tail -n +2 > "$TMP/blame-$key.csv" || true
+  bqq csv "$(q_render crash-blame.sql TABLE="$3" DAYS="$CRASH_DAYS" \
+                 VERSIONS="$(vlist "$2")" LIMIT="$DIM_TOP")" | tail -n +2 > "$TMP/blame-$key.csv" || true
   return 0
 }
 
@@ -691,9 +745,11 @@ allver_crashfree() { # $1=crash表 $2=sessions表 → 「99.28」或空
   [ -n "$1" ] && [ -n "$2" ] || { printf ''; return 0; }
   # 版本过滤改成恒真，其余照用 crash-rate.sql（同一份 SQL，口径不会漂）。
   # ⛔ **不能整行删掉**：sessions 子查询里那行就是 `WHERE ...`，删了会留下 `FROM ... AND` 语法错误。
-  sql="$(sed -e "s|{{TABLE}}|$1|g" -e "s|{{SESSIONS_TABLE}}|$2|g" -e "s|{{DAYS}}|$CRASH_DAYS|g" \
-             "$SQL_DIR/crash-rate.sql" \
-         | sed -e 's|application.display_version IN ({{VERSIONS}})|TRUE|g')"
+  # ⚠️ 版本过滤改成恒真：先渲染其余占位符，再把版本谓词整段替换掉。
+  #    ⛔ 不能让 {{VERSIONS}} 留到 q_render 的缺项检查——那会被当成漏传而失败，
+  #    故先替换谓词、再补一个不会被用到的 VERSIONS 值。
+  sql="$(q_render crash-rate.sql TABLE="$1" SESSIONS_TABLE="$2" DAYS="$CRASH_DAYS" VERSIONS="''" \
+         | sed -e 's|application.display_version IN (.*)|TRUE|g')"
   out="$(bqq csv "$sql" | tail -n +2 | head -1)" || return 0
   cs="$(printf '%s' "$out" | cut -d, -f4)"; se="$(printf '%s' "$out" | cut -d, -f2)"
   { [ -n "$cs" ] && [ -n "$se" ] && [ "$se" != "0" ]; } || { printf ''; return 0; }
@@ -1132,10 +1188,10 @@ build_card_table() {
 blame_top() { # $1=plat $2=版本 → 「自家代码 12 人 · 三方 SDK 8 人」（卡片用，仅 owner 汇总）
   local f="$TMP/blame-$1-$2.csv"
   [ -s "$f" ] || { printf ''; return 0; }
-  awk -F, 'NF>=4 { o=$1
+  csv2tsv < "$f" | awk -F'\t' 'NF>=4 { o=$1
       if (o=="DEVELOPER") o="自家"; else if (o=="THIRD_PARTY") o="三方"; else if (o=="SYSTEM") o="系统"
       u[o]+=$4 }
-    END { n=0; for (k in u) { printf "%s%s %s 人", (n++?" · ":""), k, u[k] } }' "$f"
+    END { n=0; for (k in u) { printf "%s%s %s 人", (n++?" · ":""), k, u[k] } }'
 }
 
 # 影响集中行：top 3 机型 + 各自受影响人数。突发状况的第一落点，做成表会再加 4 行。
@@ -1155,14 +1211,14 @@ card_focus_line() { # → markdown 若干行（无事件则空）
     [ -n "$best" ] || continue
     f="$TMP/dim-model-$pk-$best.csv"
     [ -s "$f" ] || continue
-    seg="$(awk -F, 'NF>=6{printf "%s%s %s 人", (n++?" · ":""), $1, $3}' "$f")"
+    seg="$(csv2tsv < "$f" | awk -F'\t' 'NF>=6{printf "%s%s %s 人", (n++?" · ":""), $1, $3}')"
     [ -n "$seg" ] && out="${out:+$out
 }🎯 影响集中 ${pn} ${best}：$seg"
     # 系统版本：只给**崩溃率最高**的那个。⚠️ 该维度会话桶足够大（实测 2657/1221/715），率可靠；
     # 机型维度最大桶只有 75 会话，率不可靠——所以上面那行只给人数、这行才给率（design D5）。
     osf="$TMP/dim-os-$pk-$best.csv"
     if [ -s "$osf" ]; then
-      osseg="$(awk -F, 'NF>=6 && $5 != "" && $5+0 > mx {mx=$5+0; d=$1; u=$3} END{if(d!="") printf "%s %s%%（%s 人）", d, mx, u}' "$osf")"
+      osseg="$(csv2tsv < "$osf" | awk -F'\t' 'NF>=6 && $5 != "" && $5+0 > mx {mx=$5+0; d=$1; u=$3} END{if(d!="") printf "%s %s%%（%s 人）", d, mx, u}')"
       [ -n "$osseg" ] && out="${out}
 🧩 系统版本最差 ${pn}：${osseg}"
     fi
@@ -1183,6 +1239,47 @@ card_focus_line() { # → markdown 若干行（无事件则空）
     done
     [ -n "$adopt" ] && out="${out:+$out
 }📊 放量（${DAYS}d）：${adopt}"
+  fi
+  # 前后台摘要（change crash-fg-bg-split）：只在某端后台占比 >= 阈值时出一行。
+  # ⚠️ 这一行改写严重度判断——实测 iOS 1.5.3 非致命 981 次里 967 次（98.6%）发生在后台，
+  #    用户完全无感；不拆开就会把「iOS 非致命上千条」读成「iOS 问题比 Android 多」。
+  # ⛔ 后台崩溃不等于可以不修（会中断上传/推送/预加载），文案只说「用户无感」不说「无需处理」。
+  # ⛔ 只给绝对数与占比，**不给率**——sessions 表无 process_state，前后台的会话分母不存在。
+  # ⛔ **取事件最多的版本，不是固定取最新版**——与本函数上方维度块同一条教训：
+  #    实测 IOS_V1=1.5.4 非致命只有 14 条（低于阈值直接跳过），真正的 981 条在 1.5.3。
+  #    2026-08-24 首版就是写死 V1 才没渲染出来。
+  if true; then
+    local _fgpk _fgpn _fgt _fgv _bestv _bestt _fg _bg _unk _tot _pct _lbl _unknote
+    for pv in "ios:iOS:$IOS_V1 $IOS_V2" "and:Android:$AND_V1 $AND_V2"; do
+      _fgpk="${pv%%:*}"; rest="${pv#*:}"; _fgpn="${rest%%:*}"; vers="${rest#*:}"
+      for _fgt in nonfatal fatal anr; do
+        _bestv=""; _bestt=0
+        for _fgv in $vers; do
+          [ -n "$_fgv" ] || continue
+          _fg="$(mv_ "$_fgpk" "$_fgv" "errtype.${_fgt}_fg")"
+          _bg="$(mv_ "$_fgpk" "$_fgv" "errtype.${_fgt}_bg")"
+          _unk="$(mv_ "$_fgpk" "$_fgv" "errtype.${_fgt}_unknown")"
+          [ -n "$_fg" ] && [ -n "$_bg" ] || continue
+          _tot=$(( _fg + _bg + ${_unk:-0} ))
+          [ "$_tot" -gt "$_bestt" ] && { _bestt=$_tot; _bestv="$_fgv"; }
+        done
+        [ -n "$_bestv" ] && [ "$_bestt" -ge "$FGBG_MIN_EVENTS" ] || continue
+        _fg="$(mv_ "$_fgpk" "$_bestv" "errtype.${_fgt}_fg")"
+        _bg="$(mv_ "$_fgpk" "$_bestv" "errtype.${_fgt}_bg")"
+        _unk="$(mv_ "$_fgpk" "$_bestv" "errtype.${_fgt}_unknown")"
+        _pct="$(awk -v b="$_bg" -v t="$_bestt" 'BEGIN{printf "%.1f", b/t*100}')"
+        awk -v p="$_pct" -v th="$FGBG_BG_NOTE_PCT" 'BEGIN{exit !(p+0 >= th+0)}' || continue
+        case "$_fgt" in (fatal) _lbl=崩溃;; (anr) _lbl=ANR;; (nonfatal) _lbl=非致命;; (*) _lbl="$_fgt";; esac
+        # ⛔ 全角括号必须**先条件赋值再拼接**，禁 `${var:+（…）}`（CLAUDE.md 硬约束，
+        #    bash 3.2 会把全角字节并进变量名）。⚠️ check-scripts 的多字节 lint 只查 `$VAR`
+        #    紧邻全角，`${VAR:+（…）}` 这个形式它抓不到——2026-08-24 首版就是这么写的。
+        # ⚠️ 判空不能用 `:+`：未知数为字符串 "0" 时它非空，会渲染出「（未知 0）」。
+        _unknote=""
+        [ -n "$_unk" ] && [ "$_unk" != "0" ] && _unknote="（未知 ${_unk}）"
+        out="${out:+$out
+}ℹ️ ${_fgpn} ${_bestv} ${_lbl} ${_bestt} 次中 ${_bg} 次在后台（${_pct}%），用户无感；前台仅 ${_fg} 次${_unknote}"
+      done
+    done
   fi
   # 全版本 crash-free 在表里没有归属列（它不是某个版本），放这里
   if true; then
@@ -1465,8 +1562,8 @@ nonfatal_table() { # $1=plat $2=版本
 # 与性能段「不出根因」是同一条硬约束。
 
 # 块 A：影响多少人。集中度 = 事件 / 受影响安装。
-sum_impact_rows() { # → CSV：平台,版本,受影响安装,崩溃事件,集中度
-  local p v pn ev aff c
+sum_impact_rows() { # → CSV：平台,版本,受影响安装,受影响用户,崩溃事件,集中度
+  local p v pn ev aff c u
   for p in ios and; do
     [ "$p" = ios ] && pn="iOS" || pn="Android"
     for v in $([ "$p" = ios ] && printf '%s' "$IOS_NEWEST" || printf '%s' "$AND_NEWEST"); do
@@ -1474,7 +1571,14 @@ sum_impact_rows() { # → CSV：平台,版本,受影响安装,崩溃事件,集�
       [ -n "$ev" ] || continue
       c="—"
       [ -n "$aff" ] && [ "$aff" != "0" ] && c="$(awk -v e="$ev" -v u="$aff" 'BEGIN{printf "%.1f", e/u}')"
-      printf '%s,%s,%s,%s,%s\n' "$pn" "$v" "${aff:-—}" "$ev" "$c"
+      # 受影响用户数（change crash-affected-users）：⛔ **仅 iOS 有值**，Android 客户端不上报
+      # user.id（实测 0/221）。Android 渲染「— 不上报」而**不是 0**——0 会被读成「没人受影响」，
+      # 也不是留空——留空会被读成渲染坏了。⚠️ 与 iOS ANR 的「— 无此概念」语义不同，后缀必须区分。
+      # ⛔ 与「受影响安装」**不可相加或相减**：两者是交叉的两套群体（实测前台子集出现过
+      #    6 安装 / 7 用户，用户数反而更多）。
+      u="$(mv_ "$p" "$v" crash.affected_users)"
+      if [ "$p" = ios ]; then u="${u:-—}"; else u="— 不上报"; fi
+      printf '%s,%s,%s,%s,%s,%s\n' "$pn" "$v" "${aff:-—}" "$u" "$ev" "$c"
     done
   done
 }
@@ -1492,17 +1596,35 @@ dim_csv() { # $1=model|os → stdout: 平台,版本,取值,事件,影响安装,�
     for v in $vers; do
       f="$TMP/dim-$1-$pk-$v.csv"
       [ -s "$f" ] || continue
-      awk -F, -v pn="$pn" -v ver="$v" -v sr="$show_rate" -v minS="$DIM_MIN_SESSIONS" '
+      csv2tsv < "$f" | awk -F'\t' -v pn="$pn" -v ver="$v" -v sr="$show_rate" -v minS="$DIM_MIN_SESSIONS" '
         NF>=6 {
           # 机型维度不给率（Android 机型碎片化，桶太小率不可靠）；系统版本样本不足时也不给
           rate = ($5 == "" || $4 == "" || $4+0 < minS) ? "—" : $5 "%"
           printf "\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\"", pn, ver, $1, $2, $3, $6
           if (sr) printf ",\"%s\"", rate
           printf "\n"
-        }' "$f"
+        }'
     done
   done
 }
+# 无分母维度的汇总行（change crash-screen-dimension）。
+# ⛔ **不复用 dim_csv**：那份判 NF>=6 并读第 5 列作率，而无分母 CSV 只有 4 列——
+#    套用只会静默拿到空表（NF>=6 不成立），不报错。列序差异见 qdim_nd 注释 ②。
+dim_nd_csv() { # $1=维度名(screen) → stdout: "平台","版本","取值","事件","影响安装","集中度"
+  local pk pn vers v f
+  for pp in "ios:iOS:$IOS_NEWEST" "and:Android:$AND_NEWEST"; do
+    pk="${pp%%:*}"; rest="${pp#*:}"; pn="${rest%%:*}"; vers="${rest#*:}"
+    plat_has_events "$pk" || continue
+    for v in $vers; do
+      f="$TMP/dim-$1-$pk-$v.csv"
+      [ -s "$f" ] || continue
+      csv2tsv < "$f" | awk -F'\t' -v pn="$pn" -v ver="$v" 'NF>=4 {
+        printf "\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\"\n", pn, ver, $1, $2, $3, $4
+      }'
+    done
+  done
+}
+
 blame_csv() { # → 平台,版本,归因方,代码库,事件,影响安装
   local pk pn vers v f
   for pp in "ios:iOS:$IOS_NEWEST" "and:Android:$AND_NEWEST"; do
@@ -1511,11 +1633,11 @@ blame_csv() { # → 平台,版本,归因方,代码库,事件,影响安装
     for v in $vers; do
       f="$TMP/blame-$pk-$v.csv"
       [ -s "$f" ] || continue
-      awk -F, -v pn="$pn" -v ver="$v" 'NF>=4 {
+      csv2tsv < "$f" | awk -F'\t' -v pn="$pn" -v ver="$v" 'NF>=4 {
         o=$1
         if (o=="DEVELOPER") o="自家代码"; else if (o=="THIRD_PARTY") o="三方 SDK"; else if (o=="SYSTEM") o="系统"
         printf "\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\"\n", pn, ver, o, $2, $3, $4
-      }' "$f"
+      }'
     done
   done
 }
@@ -1561,7 +1683,7 @@ hours_cluster() { # $1=plat $2=版本 → 聚集提示（无则空）
 csv_table() { # $1=文件 $2=表头 $3=awk 格式
   if [ ! -s "$1" ]; then printf '（无数据）\n\n'; return 0; fi
   printf '%s\n' "$2"
-  awk -F, "$3" "$1"
+  csv2tsv < "$1" | awk -F'\t' "$3"
   printf '\n'
 }
 
@@ -1696,8 +1818,11 @@ REPORT="$STATE/reports/$DAY-daily.md"
   printf '\n'
 
   printf '### 影响多少人\n\n'
-  printf '| 平台 | 版本 | 受影响安装 | 崩溃事件 | 集中度 |\n|---|---|---|---|---|\n'
-  sum_impact_rows | awk -F, '{printf "| %s | %s | %s | %s | %s |\n",$1,$2,$3,$4,$5}'
+  printf '| 平台 | 版本 | 受影响安装 | 受影响用户 | 崩溃事件 | 集中度 |\n|---|---|---|---|---|---|\n'
+  sum_impact_rows | awk -F, '{printf "| %s | %s | %s | %s | %s | %s |\n",$1,$2,$3,$4,$5,$6}'
+  # ⛔ 字面文本走 `printf '%s\\n' "…"`，**不可放进格式串**——文案里的 `96.6%` / `0%` 会被
+  #    printf 当成格式符，报 `invalid format character` 并触发 ERR trap 发告警（2026-08-24 实测）。
+  printf '%s\n' '> **受影响用户**（`user.id` 去重）**仅 iOS 可得**——实测 iOS 覆盖 96.6%、**Android 0%**（客户端不上报），故 Android 渲染「— 不上报」。⛔ 与「受影响安装」**不可相加或相减**：两者是交叉的两套群体（实测前台子集出现过 6 安装 / 7 用户，用户数反而更多）。⛔ **无用户崩溃率**——会话表无任何用户标识，用户分母不存在；⚠️ 也**不可与 Firebase 控制台首屏的受影响用户数对照**（口径与窗口均不同）。'
   printf '\n> 集中度 = 事件 / 受影响安装。9 次崩溃影响 1 台设备（9.0）与 14 次影响 7 台（2.0）严重度完全不同，\n'
   printf '> 而只看事件数两者长得一样。\n\n'
 
@@ -1713,6 +1838,14 @@ REPORT="$STATE/reports/$DAY-daily.md"
   printf '**系统版本**\n\n'
   dim_csv os > "$TMP/sum-dim-os.csv"
   md_csv_table "$TMP/sum-dim-os.csv" '平台,版本,系统版本,事件,影响安装,集中度,崩溃率'
+
+  printf '**页面**（崩溃发生时所在页面）\n\n'
+  dim_nd_csv screen > "$TMP/sum-dim-screen.csv"
+  md_csv_table "$TMP/sum-dim-screen.csv" '平台,版本,页面,事件,影响安装,集中度'
+  printf '> ⛔ **本维度只给绝对数，不给崩溃率**——`firebase_sessions` 表无页面字段，页面级会话分母**不存在**（不是暂时没做）。事件多的页面通常只是访问量大的页面。\n'
+  printf '> ⚠️ 口径按端不同：**Android = FATAL + ANR，iOS = NON_FATAL**。iOS 近 60 天仅 5 次致命崩溃，按致命口径这张表只有一行——**两端此表不可并读为同一指标**。\n'
+  printf '> ⚠️ `(未知)` 是取不到页面的事件，**照常参与排序不予丢弃**；ANR 的页面覆盖率最低（应用卡死时 custom key 写入本身也受影响）。\n'
+  printf '> ⚠️ iOS 侧存在 UIKit 内部窗口（如 `UITrackingElementWindowController`），**不是业务页面**，埋点取值口径待与客户端确认前照实呈现、不做过滤。\n\n'
   printf '**归因（责任帧属于谁）**\n\n'
   printf '> ⛔ 归因方标识的是崩溃栈中**被判定为责任帧的那一帧属于谁**，**不是「谁触发了这次崩溃」**。\n'
   printf '> 归因方是「系统」或「三方」**不等于非自家问题**——实测存在「系统帧 + 自家包名」的组合，\n'
@@ -1781,7 +1914,7 @@ REPORT="$STATE/reports/$DAY-daily.md"
     pn="${ps%%:*}"; tbl="${ps##*:}"
     printf '**%s**\n\n' "$pn"
     if [ -z "$tbl" ]; then printf '（sessions 表尚未同步）\n\n'; continue; fi
-    rows="$(bqq csv "$(sed -e "s|{{TABLE}}|$tbl|g" -e "s|{{DAYS}}|$DAYS|g" "$SQL_DIR/sessions-by-version.sql")" \
+    rows="$(bqq csv "$(q_render sessions-by-version.sql TABLE="$tbl" DAYS="$DAYS")" \
       | tail -n +2)" || true
     if [ -z "$rows" ]; then printf '（⚠️ 数据未同步）\n\n'; else
       printf '| 版本 | 会话 | 设备 | 最新数据 |\n|---|---|---|---|\n'
@@ -1821,7 +1954,7 @@ if [ "$DRY_RUN" = "1" ]; then
   echo "  card.json 字节数：$(wc -c < "$STATE/publish/card.json" | tr -d ' ')"
   echo "（完整报告见 $REPORT · 快照与历史未写入，不影响明日基准）"
   audit run.end "" '{"ok":true,"dry_run":true}'
-  exit 0
+  RUN_COMPLETED=1; exit 0   # 合法提前退出，必须置哨兵
 fi
 
 # ── 索引页：跟踪表随每日数据变化，整份重建而非局部改块（局部改易错且难回滚）──
@@ -1949,8 +2082,8 @@ build_report_xml() {
       done
 
     printf '<h2>影响多少人</h2>\n'
-    sum_impact_rows | awk -F, '{printf "\"%s\",\"%s\",\"%s\",\"%s\",\"%s\"\n",$1,$2,$3,$4,$5}' > "$TMP/sum-impact.csv"
-    xml_csv_table "$TMP/sum-impact.csv" '平台,版本,受影响安装,崩溃事件,集中度' '1,2,3,4,5'
+    sum_impact_rows | awk -F, '{printf "\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\"\n",$1,$2,$3,$4,$5,$6}' > "$TMP/sum-impact.csv"
+    xml_csv_table "$TMP/sum-impact.csv" '平台,版本,受影响安装,受影响用户,崩溃事件,集中度' '1,2,3,4,5,6'
     printf '<callout background-color="light-blue"><p>集中度 = 事件 / 受影响安装。9 次崩溃影响 1 台设备（9.0）与 14 次影响 7 台（2.0）严重度完全不同，而只看事件数两者长得一样。</p></callout>\n'
 
     printf '<h2>集中在哪</h2>\n'
@@ -1959,6 +2092,9 @@ build_report_xml() {
     xml_csv_table "$TMP/sum-dim-model.csv" '平台,版本,机型,事件,影响安装,集中度' '1,2,3,4,5,6'
     printf '<h3>系统版本</h3>\n'
     xml_csv_table "$TMP/sum-dim-os.csv" '平台,版本,系统版本,事件,影响安装,集中度,崩溃率' '1,2,3,4,5,6,7'
+    printf '<h3>页面（崩溃发生时所在页面）</h3>\n'
+    printf '<callout background-color="light-yellow"><p>⛔ <b>本维度只给绝对数，不给崩溃率</b>——<code>firebase_sessions</code> 表无页面字段，页面级会话分母<b>不存在</b>（不是暂时没做）。事件多的页面通常只是访问量大的页面。⚠️ 口径按端不同：<b>Android = FATAL + ANR，iOS = NON_FATAL</b>（iOS 近 60 天仅 5 次致命崩溃，按致命口径此表只有一行）——<b>两端此表不可并读为同一指标</b>。⚠️ <code>(未知)</code> 是取不到页面的事件，照常参与排序不予丢弃。⚠️ iOS 侧存在 UIKit 内部窗口（如 <code>UITrackingElementWindowController</code>），<b>不是业务页面</b>。</p></callout>\n'
+    xml_csv_table "$TMP/sum-dim-screen.csv" '平台,版本,页面,事件,影响安装,集中度' '1,2,3,4,5,6'
     printf '<h3>归因（责任帧属于谁）</h3>\n'
     printf '<callout background-color="light-yellow"><p>⛔ 归因方标识的是崩溃栈中<b>被判定为责任帧的那一帧属于谁</b>，<b>不是「谁触发了这次崩溃」</b>。归因方是「系统」或「三方」<b>不等于非自家问题</b>——实测存在「系统帧 + 自家包名」的组合，那是系统帧被自家代码调用。归因方与代码库必须一起读。</p></callout>\n'
     xml_csv_table "$TMP/sum-blame.csv" '平台,版本,归因方,代码库,事件,影响安装' '1,2,3,4,5,6'
@@ -2141,3 +2277,4 @@ find "$STATE/reports" -type f -name '*.md' -mtime +90 -delete 2>/dev/null || tru
 find "$STATE" -maxdepth 1 -type f -name '.bq-sql-*.sql' -mtime +1 -delete 2>/dev/null || true
 audit run.end "" '{"ok":true}'
 echo "=== 完成 ==="
+RUN_COMPLETED=1

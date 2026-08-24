@@ -59,7 +59,13 @@ SNAP="$OUT_DIR/snapshot.json"
 # bq_init 的默认分支引用 ${TS}，而本脚本不定义 TS——删掉这行会死于 unbound variable。
 BQ_ERRLOG="$OUT_DIR/bq-stderr.log"
 bq_init
-trap 'rm -f "$BQ_SQLTMP"' EXIT
+# ⛔ EXIT trap 用**完成哨兵**判定成败，⚠️ 不能靠 `$?`——bash 3.2 在 `set -u` 未定义变量
+#    这条致命路径上，**进 trap 时 `$?` 已经是 0**（实测；普通命令失败时才是 1）。
+#    而 unbound variable 恰是本仓库最常见的失败模式（多字节首字节被并进变量名）。
+#    不修则三重静默：退出码 0 + ERR trap 不触发（shell 错误不是命令失败）+ health
+#    停在上一轮的 ok:true——cron 看到成功、无告警、群里却收不到报告（2026-08-24 实测）。
+#    ⚠️ 任何提前 `exit 0` 的合法路径都必须先置 RUN_COMPLETED=1。
+trap 'rm -f "$BQ_SQLTMP"; [ "${RUN_COMPLETED:-0}" = 1 ] || exit 1' EXIT
 
 bq_json() { # $1=SQL文本 → JSON 数组（失败返回空数组，由调用方判定）
   # 用变量接住再输出：bqq 失败时 stdout 是一个空行，直接 `bqq || echo '[]'` 会把
@@ -205,3 +211,4 @@ done < <(jq -r '
 echo "  事实层缓存 · 抓取: 新建 $FETCH_NEW / 增量 $FETCH_APPEND / 跳过 $FETCH_SKIP (FORCE_REFETCH=$FORCE_REFETCH)"
 echo "  事实层缓存 · 记录: 更新 $REC_UPDATED 条 (观测字段每轮无条件刷新，window_days=$DAYS)"
 echo "  → $SNAP"
+RUN_COMPLETED=1

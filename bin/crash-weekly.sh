@@ -139,6 +139,8 @@ OUT_DIR="$STATE/runs/$DAY/L2/$TS"
 mkdir -p "$OUT_DIR"
 # shellcheck disable=SC1091
 . "$ROOT/bin/lib.sh"
+. "$ROOT/bin/lib/csv.sh"   # bq CSV 解析唯一入口（csv2tsv），L1/L2 共用
+. "$ROOT/bin/lib/query.sh" # SQL 占位符替换唯一入口（q_render），漏传占位符当场失败
 # 核心层（纯函数），与 L1 共用同一份实现——此前 _fmt / _until_epoch / win_* / stale_days
 # 在两个脚本里各存了一份，其中 stale_days 逐字节相同。
 for _c in format verdict version cache; do
@@ -150,7 +152,13 @@ done
 # shellcheck disable=SC1091
 . "$ROOT/bin/lib/bq.sh" || { echo "❌ 外壳层缺失：bin/lib/bq.sh" >&2; exit 1; }
 bq_init
-trap 'rm -f "$BQ_SQLTMP"' EXIT
+# ⛔ EXIT trap 用**完成哨兵**判定成败，⚠️ 不能靠 `$?`——bash 3.2 在 `set -u` 未定义变量
+#    这条致命路径上，**进 trap 时 `$?` 已经是 0**（实测；普通命令失败时才是 1）。
+#    而 unbound variable 恰是本仓库最常见的失败模式（多字节首字节被并进变量名）。
+#    不修则三重静默：退出码 0 + ERR trap 不触发（shell 错误不是命令失败）+ health
+#    停在上一轮的 ok:true——cron 看到成功、无告警、群里却收不到报告（2026-08-24 实测）。
+#    ⚠️ 任何提前 `exit 0` 的合法路径都必须先置 RUN_COMPLETED=1。
+trap 'rm -f "$BQ_SQLTMP"; [ "${RUN_COMPLETED:-0}" = 1 ] || exit 1' EXIT
 
 # run.start 与同日重复 run 检测（design D5：只记录不中止——同日重跑常是人工补救）
 audit run.start "" "$(jq -cn --arg day "$DAY" --arg sha "$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo '?')" '{day:$day,git:$sha}')"
@@ -184,8 +192,14 @@ jq -e '.ios and .android' "$SNAP_NEW" >/dev/null || fail "快照 JSON 结构不�
 TRIAGE_REPORT="$OUT_DIR/report.md"
 ANALYSIS_OK=0
 ANALYSIS_SKIP_REASON=""
+# ⛔ 补救建议**必须跟着实际原因走**，不能写死。原文案无论何种原因都说「额度恢复后重跑」，
+#    而显式跳过与超时都**与额度无关**——2026-08-24 实测产出过自相矛盾的两行：
+#    「原因：按 CRASH_REPORT_SKIP_ANALYSIS=1 跳过」+「额度恢复后重跑本周即可补齐」。
+#    这与 CLAUDE.md 记的 NON_FATAL「线上仍为零上报」是同一类：**静态文案与实况相反**。
+ANALYSIS_FIX_HINT=""
 if [ "${CRASH_REPORT_SKIP_ANALYSIS:-0}" = "1" ]; then
   ANALYSIS_SKIP_REASON="按 CRASH_REPORT_SKIP_ANALYSIS=1 跳过"
+  ANALYSIS_FIX_HINT="这是显式跳过（调试/验收常用），**与额度无关**；去掉该环境变量重跑即可补齐。"
   step "分析层：跳过（${ANALYSIS_SKIP_REASON}）"
 else
   step "分析层：firebase-crash-triage（模型）"
@@ -195,9 +209,29 @@ else
   run_with_timeout "$TRIAGE_TIMEOUT" "$ROOT/bin/fetch-snapshot.sh" "$OUT_DIR/analysis" full || TRIAGE_RC=$?
   if [ "${TRIAGE_RC:-0}" -eq 124 ]; then
     ANALYSIS_SKIP_REASON="分析超时（${TRIAGE_TIMEOUT}s）"
+    ANALYSIS_FIX_HINT="**与额度无关**；调大 TRIAGE_TIMEOUT 或减少 issue 数后重跑本周即可补齐。"
   elif [ "${TRIAGE_RC:-0}" -ne 0 ]; then
-    # 429 额度耗尽走这条路：退出码非 0 且非超时。
-    ANALYSIS_SKIP_REASON="模型不可用（退出码 ${TRIAGE_RC:-?}，常见原因：额度耗尽 429）"
+    # ⛔ **从日志读真实错误码，不按退出码猜**。原文案一律写「常见原因：额度耗尽 429」，
+    #    而 2026-08-24 实测真实是 **529 Overloaded**（服务端过载，与额度无关）——
+    #    猜错的代价是读者按「等额度恢复」处理，正确动作却是「立刻重试」（失效模式 F29 同源）。
+    # ⚠️ 扫**全部**重试日志而不是最新那个：重试进行中时最新文件可能为空，
+    #    只看它会把已知的 529 误判成「未能识别」（实测踩到）。
+    # ⛔ `|| true` 不可省：grep 无匹配返回 1，而「无匹配」是正常路径（F31）。
+    _alog="$OUT_DIR/analysis/agent"
+    _atxt="$(cat "${_alog}"*.log 2>/dev/null | tail -c 8000 || true)"
+    _acode="$(printf '%s' "$_atxt" | grep -oE 'API Error: [0-9]{3}' | grep -oE '[0-9]{3}' | tail -1 || true)"
+    case "${_acode:-}" in
+      (429) ANALYSIS_SKIP_REASON="模型额度耗尽（API 429）"
+            ANALYSIS_FIX_HINT="额度恢复后重跑本周即可补齐。" ;;
+      (529) ANALYSIS_SKIP_REASON="模型服务端过载（API 529）"
+            ANALYSIS_FIX_HINT="**与额度无关**，服务端临时问题；稍后重跑本周即可补齐（可查 status.claude.com）。" ;;
+      (5??) ANALYSIS_SKIP_REASON="模型服务端错误（API ${_acode}）"
+            ANALYSIS_FIX_HINT="**与额度无关**；稍后重跑本周即可补齐。" ;;
+      (4??) ANALYSIS_SKIP_REASON="模型请求被拒（API ${_acode}）"
+            ANALYSIS_FIX_HINT="需看 ${_alog}-*.log 定位，⛔ 不要默认当成额度问题。" ;;
+      (*)   ANALYSIS_SKIP_REASON="模型不可用（退出码 ${TRIAGE_RC:-?}）"
+            ANALYSIS_FIX_HINT="未能从日志识别 API 错误码，需看 ${_alog}-*.log 定位，⛔ 不要默认当成额度问题。" ;;
+    esac
   fi
   if [ -s "$OUT_DIR/analysis/report.md" ]; then
     cp "$OUT_DIR/analysis/report.md" "$TRIAGE_REPORT"
@@ -205,6 +239,7 @@ else
     echo "  ✅ 分析报告已产出"
   else
     [ -n "$ANALYSIS_SKIP_REASON" ] || ANALYSIS_SKIP_REASON="未产出 report.md"
+    [ -n "${ANALYSIS_FIX_HINT:-}" ] || ANALYSIS_FIX_HINT="退出码为 0 但产物缺失，属未预期情况；看分析日志定位后重跑。"
     echo "  ⚠️ 本周无深度分析：${ANALYSIS_SKIP_REASON}（数据与台账不受影响）"
   fi
 fi
@@ -263,18 +298,37 @@ LEDGER_TABLE_FILE="$OUT_DIR/ledger-table.md"
 LEDGER_TIMELINE_FILE="$OUT_DIR/ledger-timeline-delta.md"
 LEDGER_NF_FILE="$OUT_DIR/ledger-nonfatal-table.md"
 LEDGER_RENDER_OK=0
+
+# ── 生命周期基准（change crash-report-correctness-fixes，design D4）────────────
+# spec crash-perf-issue-lifecycle 要求三态（新增 / 回归 / 长期），台账此前只有两态。
+# ⛔ **不复用 L1 的 issue_seen**：L1 取数走 `crash-issues.sql`（**带版本过滤**，只看最新 2 版），
+#    L2 走 `crash-issues-all.sql`（**刻意不带**，台账要跨版本追踪）。只在老版本上发生的 issue
+#    从不进 L1 基准，复用会让它们每周都被标成「🆕新增」——比现在的「全是遗留」更糟，因为它是错的。
+# 结构：{"<32位id>": {"first":"YYYY-MM-DD","last":"YYYY-MM-DD"}}，保留 90 天。
+SEEN_FILE="$STATE/issue-seen.json"
+SEEN_KEEP_DAYS="${CRASH_REPORT_SEEN_KEEP_DAYS:-90}"
+SEEN_NEXT_FILE="$OUT_DIR/issue-seen-next.json"
+[ -s "$SEEN_FILE" ] || echo '{}' > "$SEEN_FILE"
+# ⚠️ 基准是否已建立**必须在 render-ledger.sh 之前判**：跑批收尾会把 SEEN_FILE 覆盖成本轮值，
+# 之后再判永远是「已建立」。复发率的分母同理——见下方 RECUR_MD。
+SEEN_WAS_ESTABLISHED=0
+[ "$(jq 'length' "$SEEN_FILE" 2>/dev/null || echo 0)" -gt 0 ] && SEEN_WAS_ESTABLISHED=1
 if [ -x "$ROOT/bin/render-ledger.sh" ]; then
   # 周报文档 URL 此刻还不存在（由 deliver.sh 建文档后才知道），时间线先写占位符
   # __REPORT_URL__，deliver.sh 拿到 URL_REPORT 后统一回填（与卡片 __REPORT_URL__ 占位符同机制）。
   # 8.8：周报投递失败则占位符永远不会被回填——deliver.sh 只在投递成功分支才 fill，
   # 未回填的占位符不会被当成真链接展示（lark 侧就是一段普通文本），不会挂空链接。
   RENDER_OUT="$("$ROOT/bin/render-ledger.sh" "$SNAP_NEW" "$FIXMAP_FILE" "$PREV_TABLE_FILE" \
-    <(echo "$DIFF") "$DAY" "__REPORT_URL__" 2>"$OUT_DIR/render-ledger.log")" \
+    <(echo "$DIFF") "$DAY" "__REPORT_URL__" "$SEEN_FILE" "$(day_ago "$SEEN_KEEP_DAYS")" \
+    2>"$OUT_DIR/render-ledger.log")" \
     && LEDGER_RENDER_OK=1 || echo "  ⚠️ 台账渲染失败，本轮跳过台账更新（详见 render-ledger.log）"
   if [ "$LEDGER_RENDER_OK" = "1" ]; then
     printf '%s' "$RENDER_OUT" | awk 'BEGIN{RS="\x1e"} NR==1' > "$LEDGER_TABLE_FILE"
     printf '%s' "$RENDER_OUT" | awk 'BEGIN{RS="\x1e"} NR==2' > "$LEDGER_TIMELINE_FILE"
     printf '%s' "$RENDER_OUT" | awk 'BEGIN{RS="\x1e"} NR==3' > "$LEDGER_NF_FILE"
+    # ④ 更新后的生命周期基准。先落临时文件，**跑批收尾时才覆盖正式基准**——
+    # 与 SNAP_LAST 同一时机，中途失败不会留下半提升的基准。
+    printf '%s' "$RENDER_OUT" | awk 'BEGIN{RS="\x1e"} NR==4' > "$SEEN_NEXT_FILE"
   fi
 else
   echo "  ⚠️ bin/render-ledger.sh 不存在，跳过台账渲染"
@@ -300,11 +354,45 @@ if [ "$LEDGER_RENDER_OK" = "1" ]; then
     ' "$LEDGER_TMP" > "$LEDGER_TMPNF" 2>/dev/null && mv "$LEDGER_TMPNF" "$LEDGER_TMP"
   fi
   if [ -s "$LEDGER_TIMELINE_FILE" ]; then
-    LEDGER_TMP2="$(mktemp)"
-    awk -v tlf="$LEDGER_TIMELINE_FILE" '
-      /<!-- LEDGER:TIMELINE:END -->/ { while ((getline line < tlf) > 0) print line }
+    # ── 追加前先去重（change crash-report-correctness-fixes，design D2）──
+    # ⛔ 时间线是 **append，不幂等**。CLAUDE.md 的「台账同步不需要幂等键」只对现状表成立
+    #    （那边是 block_replace）。同周重跑会重新算出同一批增量，原先无条件追加——
+    #    实测台账里 2026-08-22 那批 6 条**原样重复了三遍**。
+    # 查重键取「 · [周报](」之前的正文：同一条目不同轮次的链接不同（未投递是占位符、
+    # 投递后是真 URL），整行比对查不出重复。
+    # ⚠️ 只把 `- YYYY-` 开头的行当时间线条目——台账其他段落也有 `- ` 列表项。
+    LEDGER_TL_DEDUP="$(mktemp)"
+    awk '
+      function body(s,   i) { i = index(s, " · [周报](");  return (i > 0 ? substr(s, 1, i - 1) : s) }
+      function istl(s)      { return (s ~ /^- [0-9][0-9][0-9][0-9]-/) }
+      NR == FNR { if (istl($0)) seen[body($0)] = 1; next }
+      istl($0) && (body($0) in seen) { next }
       { print }
-    ' "$LEDGER_TMP" > "$LEDGER_TMP2" 2>/dev/null && mv "$LEDGER_TMP2" "$LEDGER_TMP"
+    ' "$LEDGER_LOCAL" "$LEDGER_TIMELINE_FILE" > "$LEDGER_TL_DEDUP" 2>/dev/null \
+      || cp "$LEDGER_TIMELINE_FILE" "$LEDGER_TL_DEDUP"
+    # 本轮不投递（NO_DELIVER / DRY RUN）时去掉链接后缀（design D3）：回填由 deliver.sh 在投递成功后做，
+    # 不投递就永远不回填，`__REPORT_URL__` 会作为**死链**永久留在台账里（实测已污染 18 行）。
+    # ⛔ 不能改成「不投递就不写台账」——L2 的基线提升无条件发生，跳过写入会让这批变化**永久丢失**。
+    if [ "$DRY_RUN" = "1" ] || [ "${CRASH_REPORT_NO_DELIVER:-0}" = "1" ]; then
+      # 就地替换走 python，与 deliver.sh 的 fill() 同一套（仓库无 sed -i 先例，BSD/GNU 语法不同）
+      python3 - "$LEDGER_TL_DEDUP" <<'FILLPY' 2>/dev/null || true
+import sys, pathlib
+p = pathlib.Path(sys.argv[1])
+p.write_text(p.read_text().replace(" · [周报](__REPORT_URL__)", ""))
+FILLPY
+    fi
+    # 去掉增量尾部空行：每轮追加都会带一行，累积下来时间线里全是空行
+    printf '%s\n' "$(cat "$LEDGER_TL_DEDUP")" > "$LEDGER_TL_DEDUP".t && mv "$LEDGER_TL_DEDUP".t "$LEDGER_TL_DEDUP"
+    if [ -s "$LEDGER_TL_DEDUP" ]; then
+      LEDGER_TMP2="$(mktemp)"
+      awk -v tlf="$LEDGER_TL_DEDUP" '
+        /<!-- LEDGER:TIMELINE:END -->/ { while ((getline line < tlf) > 0) print line }
+        { print }
+      ' "$LEDGER_TMP" > "$LEDGER_TMP2" 2>/dev/null && mv "$LEDGER_TMP2" "$LEDGER_TMP"
+    else
+      echo "  ℹ️ 时间线增量全部已存在于台账，跳过追加（幂等）"
+    fi
+    rm -f "$LEDGER_TL_DEDUP"
   fi
   mv "$LEDGER_TMP" "$LEDGER_LOCAL"
   echo "  ✅ 本地台账已更新：${LEDGER_LOCAL}（__REPORT_URL__ 占位符待投递成功后回填）"
@@ -318,9 +406,18 @@ fi
 # 两者常常不是同一批版本（新版刚放量时尤其），并列着看才完整（change crash-perf-latest-2-versions）。
 # 本段依赖 bq；bq 不可用时整段降级（周报核心是 MCP 变化摘要，不因放量段失败而不发）。
 SQL_DIR="${SQL_DIR:-$ROOT/bin/sql}"
+
 PROJECT="dino-english-497507"
 MIN_SESSIONS="${CRASH_REPORT_MIN_SESSIONS:-5}"
 WEEK_DAYS="${CRASH_REPORT_WEEK_DAYS:-7}"
+# WoW / 环比基准的时间下界。⚠️ 必须定义在**所有取数与渲染之前**——4b 崩溃侧环比与
+# 5b 性能段都用它，首版定义在 5b 附近，4b 处报 unbound variable（check-scripts 第 9 项已能拦下）。
+WOW_CUT="$(day_ago 4)"   # 基准只认至少 4 天前的记录——同日/隔夜重跑不是「上周」
+# TOP N 下钻（change crash-issue-drilldown）。⚠️ 常量必须定义在**取数步骤之前**——
+# 首版放在渲染函数区（文件后半），取数处引用时报 unbound variable（2026-08-24 实测）。
+DD_TOP_N="${CRASH_REPORT_DD_TOP_N:-3}"
+DD_MODEL_CONC_PCT="${CRASH_REPORT_DD_MODEL_CONC_PCT:-60}"
+DIM_ABSENT=""          # TSV：平台 \t 版本 \t 有无FATAL \t 有无页面事件——供维度段显式说明缺席原因
 ADOPT_ROWS=""          # TSV：平台 \t 版本 \t 会话 \t 设备 \t 崩溃事件 \t 崩溃率 \t crash-free \t ANR \t 非致命
 ADOPT_OK=0
 
@@ -328,8 +425,7 @@ if command -v bq >/dev/null 2>&1 && bqq csv 'SELECT 1' >/dev/null 2>&1; then
   ADOPT_OK=1
   step "主力版本放量（bq）"
   top2_versions() { # $1=sessions表 → 「版本,会话,设备」前两行（按会话量降序）
-    bqq csv "$(sed -e "s|{{TABLE}}|$1|g" -e "s|{{DAYS}}|$WEEK_DAYS|g" -e "s|{{MIN_SESSIONS}}|$MIN_SESSIONS|g" \
-      "$SQL_DIR/latest-versions.sql")" \
+    bqq csv "$(q_render latest-versions.sql TABLE="$1" DAYS="$WEEK_DAYS" MIN_SESSIONS="$MIN_SESSIONS")" \
       | tail -n +2 | sort -t, -k2,2 -nr | head -2 || true
   }
   # ANR 与 NON_FATAL 计数：两者 is_fatal 均为 FALSE，crash-rate.sql 取不到
@@ -338,29 +434,33 @@ if command -v bq >/dev/null 2>&1 && bqq csv 'SELECT 1' >/dev/null 2>&1; then
   DIM_TOP_W="${CRASH_REPORT_DIM_TOP:-3}"
   DIM_MIN_W="${CRASH_REPORT_DIM_MIN_SESSIONS:-200}"
   ver_dim() { # $1=crash表 $2=sessions表 $3=版本 $4=维度表达式 → CSV（无表头）
-    bqq csv "$(sed -e "s|{{TABLE}}|$1|g" -e "s|{{SESSIONS_TABLE}}|$2|g" -e "s|{{DAYS}}|$WEEK_DAYS|g" \
-        -e "s|{{VERSIONS}}|\"$3\"|g" -e "s|{{DIM}}|$4|g" -e "s|{{SESS_DIM}}|$4|g" \
-        -e "s|{{LIMIT}}|$DIM_TOP_W|g" -e "s|{{MIN_SESSIONS}}|$DIM_MIN_W|g" \
-        "$SQL_DIR/crash-dimensions.sql")" \
+    bqq csv "$(q_render crash-dimensions.sql TABLE="$1" SESSIONS_TABLE="$2" DAYS="$WEEK_DAYS" \
+        VERSIONS="\"$3\"" DIM="$4" SESS_DIM="$4" LIMIT="$DIM_TOP_W" MIN_SESSIONS="$DIM_MIN_W")" \
+      | tail -n +2 || true
+  }
+  # 页面：custom_keys 是 REPEATED RECORD，取值必须走标量子查询
+  DIM_SCREEN_EXPR_W="(SELECT value FROM UNNEST(custom_keys) WHERE key = 'current_screen' LIMIT 1)"
+  ver_dim_nd() { # $1=crash表 $2=版本 $3=维度表达式 $4=错误类型 → CSV（无表头，4 列）
+    bqq csv "$(q_render crash-dimensions-nodenom.sql TABLE="$1" DAYS="$WEEK_DAYS" \
+        VERSIONS="\"$2\"" DIM="$3" LIMIT="$DIM_TOP_W" ERROR_TYPES="$4")" \
       | tail -n +2 || true
   }
   # 归因分布（change crash-actionable-signals 1.5，与日报汇总段同源同 SQL）。
   # ⚠️ 与 ver_dim 不同：crash-blame.sql 不需要 sessions 表——归因不给率，只给绝对数。
   #    给率要除以「该归因方的会话数」，而会话表里根本没有归因维度，除不出来。
   ver_blame() { # $1=crash表 $2=版本 → CSV「归因方,代码库,事件,影响安装」（无表头）
-    bqq csv "$(sed -e "s|{{TABLE}}|$1|g" -e "s|{{DAYS}}|$WEEK_DAYS|g" \
-        -e "s|{{VERSIONS}}|\"$2\"|g" -e "s|{{LIMIT}}|$DIM_TOP_W|g" \
-        "$SQL_DIR/crash-blame.sql")" \
+    bqq csv "$(q_render crash-blame.sql TABLE="$1" DAYS="$WEEK_DAYS" \
+        VERSIONS="\"$2\"" LIMIT="$DIM_TOP_W")" \
       | tail -n +2 || true
   }
   ver_etypes() { # $1=crashlytics表 $2=版本 → 「anr事件,anr安装,非致命事件,非致命安装」
-    bqq csv "$(sed -e "s|{{TABLE}}|$1|g" -e "s|{{DAYS}}|$WEEK_DAYS|g" -e "s|{{VERSIONS}}|\"$2\"|g" \
-        "$SQL_DIR/crash-error-types.sql")" \
+    bqq csv "$(q_render crash-error-types.sql TABLE="$1" DAYS="$WEEK_DAYS" VERSIONS="\"$2\"" \
+        FG_NORM="${SQL_FG_NORM}")" \
       | tail -n +2 | head -1 || true
   }
   ver_crash() { # $1=crashlytics表 $2=sessions表 $3=版本 → 「事件数,会话数,受影响安装,崩溃会话数」
-    bqq csv "$(sed -e "s|{{TABLE}}|$1|g" -e "s|{{SESSIONS_TABLE}}|$2|g" -e "s|{{DAYS}}|$WEEK_DAYS|g" \
-        -e "s|{{VERSIONS}}|\"$3\"|g" "$SQL_DIR/crash-rate.sql")" \
+    bqq csv "$(q_render crash-rate.sql TABLE="$1" SESSIONS_TABLE="$2" DAYS="$WEEK_DAYS" \
+        VERSIONS="\"$3\"")" \
       | tail -n +2 | head -1 || true
   }
   IOS_TOP2_VERS=""; AND_TOP2_VERS=""   # 供 6. 性能段复用同一批主力版本（不重复解析）
@@ -397,16 +497,88 @@ if command -v bq >/dev/null 2>&1 && bqq csv 'SELECT 1' >/dev/null 2>&1; then
       ADOPT_ROWS="${ADOPT_ROWS}${pname}	${ver}	${sess}	${dev}	${cev:-—}	${rate}	${cfree}	${anrcell}	${nfev:-0} 次
 "
       echo "  ${pname} ${ver}：${sess} 会话 / ${dev} 设备 / 崩溃 ${cev:-—} 次 ${rate} / crash-free ${cfree} / ANR ${anrcell} / 非致命 ${nfev:-0} 次"
-      # 维度只在该版本确有崩溃事件时才查——零崩溃的版本查了必然全空，白花两次查询
-      if [ -n "$cev" ] && [ "$cev" != "0" ] && [ "$cev" != "—" ]; then
+      # 维度只在该版本确有事件时才查——零事件的版本查了必然全空，白花查询。
+      # ⛔ **闸门必须按各维度自己的 error_type 判**，不能一律用 FATAL 数 ${cev}：
+      #    页面维度对 iOS 走 NON_FATAL，而 iOS 主力版本常年 FATAL=0——实测 2026-08-24
+      #    iOS 1.5.3 有 **958 条 NON_FATAL、0 条 FATAL**，旧闸门把这 958 条带页面信息的
+      #    事件整个挡在门外，`dim-screen-iOS-1.5.3.csv` 根本没生成，而报告里**不留任何痕迹**
+      #    （`for f in dim-*.csv` 轮不到不存在的文件）——读者分不清「无事件 / 查询失败 / 被忽略」。
+      _has_fatal=0; { [ -n "$cev" ] && [ "$cev" != "0" ] && [ "$cev" != "—" ]; } && _has_fatal=1
+      # 页面维度的闸门：iOS 看非致命数，Android 看 FATAL+ANR
+      _dim_et="'FATAL','ANR'"; _screen_n="$cev"
+      if [ "$pname" = "iOS" ]; then _dim_et="'NON_FATAL'"; _screen_n="$nfev"; fi
+      _has_screen=0; { [ -n "$_screen_n" ] && [ "$_screen_n" != "0" ] && [ "$_screen_n" != "—" ]; } && _has_screen=1
+      if [ "$_has_fatal" = 1 ]; then
         ver_dim "$ctbl" "$stbl" "$ver" "CONCAT(device.manufacturer,' ',device.model)" > "$OUT_DIR/dim-model-${pname}-${ver}.csv" || true
         ver_dim "$ctbl" "$stbl" "$ver" "operating_system.display_version"             > "$OUT_DIR/dim-os-${pname}-${ver}.csv"    || true
         ver_blame "$ctbl" "$ver"                                                       > "$OUT_DIR/blame-${pname}-${ver}.csv"     || true
       fi
+      if [ "$_has_screen" = 1 ]; then
+        ver_dim_nd "$ctbl" "$ver" "$DIM_SCREEN_EXPR_W" "$_dim_et" > "$OUT_DIR/dim-screen-${pname}-${ver}.csv" || true
+      fi
+      # ⛔ **版本缺席必须显式留痕**，不能靠「文件不存在」静默省略（镜头 6：缺失可不可见）
+      DIM_ABSENT="${DIM_ABSENT}${pname}\t${ver}\t${_has_fatal}\t${_has_screen}\n"
     done <<< "$(top2_versions "$stbl")"
   done
 else
   echo "--- ⚠️ bq 不可用，跳过主力版本放量段（不影响变化摘要）---"
+fi
+
+# ── 4b. 崩溃侧周度基准（analyst G10：二段全是孤立当期值，metrics-history 是 L1 的
+#        天级口径，⛔ 不可混用——L2 自建 7d 快照历史，upsert by (day,平台,版本)）────────
+WEEKLY_HIST="$STATE/weekly-metrics.jsonl"
+ADOPT_WOW_MD=""
+if [ "$ADOPT_OK" = "1" ] && [ -n "$ADOPT_ROWS" ]; then
+  while IFS=$'\t' read -r _wp _wv _ws _wd _wc _wr _wf _wa _wn; do
+    [ -n "$_wp" ] || continue
+    _wa_n="${_wa%% *}"; _wn_n="${_wn%% *}"   # 「45 次 0.67%」→「45」；「— 无此概念」→「—」
+    if [ -s "$WEEKLY_HIST" ]; then
+      _prev="$(jq -cs --arg p "$_wp" --arg v "$_wv" --arg c "$WOW_CUT" \
+        '[.[] | select(.platform==$p and .version==$v and .day <= $c)] | last // empty' "$WEEKLY_HIST" 2>/dev/null || true)"
+      if [ -n "$_prev" ]; then
+        _pd="$(printf '%s' "$_prev" | jq -r '.day')"
+        ADOPT_WOW_MD="${ADOPT_WOW_MD}> 环比 ${_wp} ${_wv}（vs ${_pd}）：崩溃 $(printf '%s' "$_prev" | jq -r '.crash // "—"')→${_wc} · ANR $(printf '%s' "$_prev" | jq -r '.anr // "—"')→${_wa_n} · 非致命 $(printf '%s' "$_prev" | jq -r '.nf // "—"')→${_wn_n} · crash-free $(printf '%s' "$_prev" | jq -r '.cfree // "—"')→${_wf}\n"
+      fi
+    fi
+  done <<< "$ADOPT_ROWS"
+  # upsert：删掉今天已有的行再整批追加（同日重跑不膨胀）；保留 120 天
+  _wh="$(mktemp)"
+  { [ -s "$WEEKLY_HIST" ] && jq -c --arg d "$DAY" --arg cut "$(day_ago 120)" \
+      'select(.day != $d and .day >= $cut)' "$WEEKLY_HIST" 2>/dev/null; } > "$_wh" || true
+  printf '%s' "$ADOPT_ROWS" | while IFS=$'\t' read -r _wp _wv _ws _wd _wc _wr _wf _wa _wn; do
+    [ -n "$_wp" ] || continue
+    jq -nc --arg p "$_wp" --arg v "$_wv" --arg d "$DAY" --arg c "$_wc" --arg f "$_wf" \
+      --arg a "${_wa%% *}" --arg n "${_wn%% *}" \
+      '{platform:$p, version:$v, day:$d, crash:$c, cfree:$f, anr:$a, nf:$n}'
+  done >> "$_wh"
+  mv "$_wh" "$WEEKLY_HIST"
+fi
+
+# ── 5a. TOP N 事件下钻（change crash-issue-drilldown）──────────────────────
+# ⚠️ 取数函数**必须定义在这里**（调用点之前）——bash 顺序执行，定义在文件后半的
+#    渲染函数区会报 `dd_fetch: command not found`，而 `|| true` 会把 127 吞掉，
+#    结果是空产物 + 退出码 0（2026-08-24 实测跑了一轮才发现）。
+dd_fetch() { # $1=crashlytics表 $2=版本列表(空格分隔) $3=错误类型 → CSV（无表头）
+  local vers="" v
+  for v in $2; do [ -n "$v" ] && vers="${vers:+$vers,}\"$v\""; done
+  [ -n "$vers" ] || return 0
+  bqq csv "$(q_render crash-issue-drilldown.sql TABLE="$1" DAYS="$WEEK_DAYS" VERSIONS="$vers" \
+      ERROR_TYPES="$3" TOP_N="$DD_TOP_N" FG_NORM="${SQL_FG_NORM}")" | tail -n +2 || true
+}
+# 复用 5. 已解析出的主力版本；SQL 自己选 top N（不从快照取 id——快照只有 FATAL，
+# 会让按受影响安装排第一的那个 ANR 整个消失）。bq 不可用时整段降级，不阻塞周报。
+DD_IOS_CSV="$OUT_DIR/drilldown-ios.csv"; DD_AND_CSV="$OUT_DIR/drilldown-android.csv"
+: > "$DD_IOS_CSV"; : > "$DD_AND_CSV"
+if [ "$ADOPT_OK" = "1" ]; then
+  step "TOP ${DD_TOP_N} 事件下钻（bq，窗口 ${WEEK_DAYS}d）"
+  # ⚠️ 记下取数是否成功：空产物有两种成因——「本窗口真的没有 issue」与「取数挂了」，
+  #    ⛔ 两者渲染成同一句「无可下钻的 issue」会把故障读成好消息。
+  DD_IOS_OK=1; DD_AND_OK=1
+  dd_fetch "$PROJECT.firebase_crashlytics.com_prime_dino_english_IOS_REALTIME" \
+    "$IOS_TOP2_VERS" "'NON_FATAL'" > "$DD_IOS_CSV" || DD_IOS_OK=0
+  dd_fetch "$PROJECT.firebase_crashlytics.com_prime_dino_english_ANDROID_REALTIME" \
+    "$AND_TOP2_VERS" "'FATAL','ANR'" > "$DD_AND_CSV" || DD_AND_OK=0
+  echo "  iOS $(grep -c . "$DD_IOS_CSV" 2>/dev/null || true) 行（ok=${DD_IOS_OK}） · Android $(grep -c . "$DD_AND_CSV" 2>/dev/null || true) 行（ok=${DD_AND_OK}）"
 fi
 
 # ── 5b. 性能段（design D8/D9，L2 独占，不进台账，不出根因）────────────────
@@ -430,12 +602,9 @@ if [ "$ADOPT_OK" = "1" ]; then
   step "性能段（bq，窗口 ${WEEK_DAYS}d）"
   perf_row() { # $1=平台标签 $2=perf表 $3=版本 → 一行 TSV（失败字段留空，由调用方判定缺数原因）
     local pname="$1" tbl="$2" ver="$3" traces screens net p50 p95 wscreen wslow frozen neterr
-    traces="$(bqq csv "$(sed -e "s|{{TABLE}}|$tbl|g" -e "s|{{DAYS}}|$WEEK_DAYS|g" -e "s|{{VERSIONS}}|\"$ver\"|g" \
-      "$SQL_DIR/perf-traces.sql")" | tail -n +2 || true)"
-    screens="$(bqq csv "$(sed -e "s|{{TABLE}}|$tbl|g" -e "s|{{DAYS}}|$WEEK_DAYS|g" -e "s|{{VERSIONS}}|\"$ver\"|g" \
-      "$SQL_DIR/perf-screens.sql")" | tail -n +2 || true)"
-    net="$(bqq csv "$(sed -e "s|{{TABLE}}|$tbl|g" -e "s|{{DAYS}}|$WEEK_DAYS|g" -e "s|{{VERSIONS}}|\"$ver\"|g" \
-      "$SQL_DIR/perf-network.sql")" | tail -n +2 || true)"
+    traces="$(bqq csv "$(q_render perf-traces.sql TABLE="$tbl" DAYS="$WEEK_DAYS" VERSIONS="\"$ver\"")" | tail -n +2 || true)"
+    screens="$(bqq csv "$(q_render perf-screens.sql TABLE="$tbl" DAYS="$WEEK_DAYS" VERSIONS="\"$ver\"")" | tail -n +2 || true)"
+    net="$(bqq csv "$(q_render perf-network.sql TABLE="$tbl" DAYS="$WEEK_DAYS" VERSIONS="\"$ver\"")" | tail -n +2 || true)"
     # `|| true`：性能表停更时 traces 为空，grep 无匹配返回 1，pipefail 让赋值整体失败，
     # set -e 直接杀掉整跑（同源问题在 L1 是误报告警，见 crash-daily.sh collect_window）。
     p50="$(printf '%s\n' "$traces" | grep '^_app_start,' | cut -d, -f3 | head -1 || true)"
@@ -443,32 +612,47 @@ if [ "$ADOPT_OK" = "1" ]; then
     wscreen="$(printf '%s\n' "$screens" | head -1 | cut -d, -f1)"
     wslow="$(printf '%s\n' "$screens" | head -1 | cut -d, -f3)"
     frozen="$(printf '%s\n' "$screens" | head -1 | cut -d, -f4)"
-    neterr="$(printf '%s\n' "$net" | awk -F, '{e+=$5; n+=$2} END{if(n>0) printf "%.2f", e/n*100}')"
+    # csv2tsv：NETWORK_REQUEST 的 event_name 是 URL，可能含逗号（见 csv2tsv 处注释）
+    neterr="$(printf '%s\n' "$net" | csv2tsv | awk -F'\t' '{e+=$5; n+=$2} END{if(n>0) printf "%.2f", e/n*100}')"
     # 三态缺数判定（design 缺数三态，简化为周报够用的两态）：表不存在/查询失败 → 空值走「⚠️ 数据未同步」；
     # 表存在但该版本无样本（HAVING 阈值过滤掉）→ 空值走「该版本无数据」。两者在渲染时统一显示 —，
     # 性能段不做告警判定（design D8：只给趋势，不触发红黄绿），故不需要像 L1 那样细分三态文案。
-    PERF_ROWS="${PERF_ROWS}${pname}	${ver}	${p50:-—}	${p95:-—}	${wscreen:-—}	${wslow:-—}	${frozen:-—}	${neterr:-—}
-"
-    # WoW（7.4）：查上周同 (平台,版本) 的 P95 基准，有则标变化方向（箭头跟数值、颜色跟好坏，
-    # 启动耗时越小越好故数值增大标↑变差），无基准则显式标「本轮建立」而非显示零变化。
-    local prev_p95 wow=""
+    # WoW：基准取同 (平台,版本) 中 day <= 今天−4 的最近一条，⛔ **不是 last**——
+    # last 会取到同一天早些时候的跑批（同日重跑各追加一条），实测 2026-08-24 三次跑批后
+    # iOS 1.5.3 报「WoW 持平」，而真上周（08-22 578ms → 701ms）应是 +123ms（analyst G9）。
+    # 基准日直接写进文案（vs 08-17），读者自己能看出比的是哪天——比隐式假设「上周」诚实。
+    local prev_rec prev_p95="" prev_day="" wow="" wow_cell="—（无基准）"
     if [ -s "$PERF_HISTORY" ]; then
-      prev_p95="$(jq -rs --arg p "$pname" --arg v "$ver" \
-        '[.[] | select(.platform==$p and .version==$v)] | last | .p95 // empty' "$PERF_HISTORY" 2>/dev/null || true)"
+      prev_rec="$(jq -cs --arg p "$pname" --arg v "$ver" --arg c "$WOW_CUT" \
+        '[.[] | select(.platform==$p and .version==$v and .day <= $c)] | last // empty' "$PERF_HISTORY" 2>/dev/null || true)"
+      if [ -n "$prev_rec" ]; then
+        prev_p95="$(printf '%s' "$prev_rec" | jq -r '.p95 // empty' 2>/dev/null || true)"
+        prev_day="$(printf '%s' "$prev_rec" | jq -r '.day // empty' 2>/dev/null || true)"
+      fi
     fi
     if [ -n "${prev_p95:-}" ] && [ -n "$p95" ]; then
       local delta; delta="$(awk -v a="$p95" -v b="$prev_p95" 'BEGIN{printf "%.0f", a-b}' 2>/dev/null || true)"
       if [ -n "$delta" ]; then
-        if [ "$delta" -gt 0 ] 2>/dev/null; then wow="（WoW P95 +${delta}ms↑ 变差）"
-        elif [ "$delta" -lt 0 ] 2>/dev/null; then wow="（WoW P95 ${delta}ms↓ 变好）"
-        else wow="（WoW P95 持平）"; fi
+        if [ "$delta" -gt 0 ] 2>/dev/null; then wow="（WoW P95 +${delta}ms↑ 变差 vs ${prev_day}）"; wow_cell="+${delta}ms↑（vs ${prev_day}）"
+        elif [ "$delta" -lt 0 ] 2>/dev/null; then wow="（WoW P95 ${delta}ms↓ 变好 vs ${prev_day}）"; wow_cell="${delta}ms↓（vs ${prev_day}）"
+        else wow="（WoW P95 持平 vs ${prev_day}）"; wow_cell="持平（vs ${prev_day}）"; fi
       fi
     else
-      wow="（无上周基准，本轮建立）"
+      wow="（无近周基准，本轮建立）"
     fi
+    PERF_ROWS="${PERF_ROWS}${pname}	${ver}	${p50:-—}	${p95:-—}	${wscreen:-—}	${wslow:-—}	${frozen:-—}	${neterr:-—}	${wow_cell}
+"
     echo "  ${pname} ${ver}：启动 P50 ${p50:-—}ms / P95 ${p95:-—}ms ${wow} · 慢帧最差页 ${wscreen:-—} ${wslow:-—}% · 冻结 ${frozen:-—}% · 接口错误率 ${neterr:-—}%"
     # 落一行到历史（本轮快照，供下周环比），只在拿到值时写，避免用空值污染基准
     if [ -n "$p95" ] || [ -n "$p50" ]; then
+      # ⛔ 按 (平台,版本,日) upsert 而非裸 append：同日重跑各追一条会把 KEEP=12 的窗口吃光
+      #    （实测 Android 1.5.1 的 12 条全在 08-20/08-22 两天里），WoW 基准随之失效。
+      if [ -s "$PERF_HISTORY" ]; then
+        local _ph; _ph="$(mktemp)"
+        jq -c --arg p "$pname" --arg v "$ver" --arg d "$DAY" \
+          'select((.platform==$p and .version==$v and .day==$d) | not)' "$PERF_HISTORY" > "$_ph" 2>/dev/null \
+          && mv "$_ph" "$PERF_HISTORY" || rm -f "$_ph"
+      fi
       jq -nc --arg p "$pname" --arg v "$ver" --arg d "$DAY" --arg p50 "${p50:-}" --arg p95 "${p95:-}" \
         '{platform:$p, version:$v, day:$d, p50:($p50|tonumber? // null), p95:($p95|tonumber? // null)}' >> "$PERF_HISTORY"
     fi
@@ -530,6 +714,32 @@ sec() { # $1=平台名 $2=json key → markdown 变化摘要
 }
 CHANGES_MD="$(sec "iOS" ios; printf '\n'; sec "Android" android)"
 
+# ── 复发率（change crash-recurrence-rate）────────────────────────────────
+# ⛔ **给分数不给百分比**：基准实测只有 14 个 key，1 个回归 = 7.1%、2 个 = 14.3%——
+#    百分比在这个分母上是伪精度，且周与周之间跳动会被读成趋势。分数形态自带分母。
+# ⛔ 三态判定**不在这里重算**，直接数已渲染的现状表——判定只在 render-ledger.sh 实现一次
+#    （失效模式 F4：同一个值多来源必然漂移）。
+# ⚠️ 「回归」= 该 issue 在上一轮基准日无记录、本轮重新出现。判定窗口是崩溃段的滚动窗口，
+#    「消失」的含义是**窗口内无事件**，不是「已修复」。
+# ⚠️ 台账取数带 LIMIT 20，issue 总数逼近 20 时掉出榜单再回来会被误计为回归
+#    （实测 Android FATAL 7d 唯一 issue 数 13 < 20，暂未咬合）。
+RECUR_MD=""
+if [ "${LEDGER_RENDER_OK:-0}" = "1" ] && [ -s "$LEDGER_TABLE_FILE" ]; then
+  # ⛔ 不能写 `$(grep -c … || echo 0)`：grep -c 零匹配时**既输出 "0" 又返回 1**，
+  #    `|| echo 0` 会再追加一个 0，值变成 "0\n0"，后续 `[ … -gt 0 ]` 直接报
+  #    「integer expression expected」（2026-08-24 实测踩到）。用 `|| true` 保留 grep 自己的 0。
+  _rc_total="$(grep -c '^| \(iOS\|Android\) |' "$LEDGER_TABLE_FILE" 2>/dev/null || true)"; _rc_total="${_rc_total:-0}"
+  _rc_regr="$(grep -c '回归' "$LEDGER_TABLE_FILE" 2>/dev/null || true)"; _rc_regr="${_rc_regr:-0}"
+  if [ "$SEEN_WAS_ESTABLISHED" != "1" ]; then
+    # ⛔ 基准未建立时**不显示 0/0，也不显示 0%**——「没有回归」与「还没法算」必须可分
+    RECUR_MD="**本周复发**：本轮建立基准，复发率下轮起可用"
+  elif [ "$_rc_regr" -gt 0 ]; then
+    RECUR_MD="**本周复发**：${_rc_regr} / ${_rc_total}（${_rc_regr} 个 issue 在上一轮窗口内无事件，本轮重新出现）"
+  else
+    RECUR_MD="**本周复发**：0 / ${_rc_total}（无 issue 回归）"
+  fi
+fi
+
 # ── 发送策略（三态，2026-08-18 修订）──────────────────────
 # 旧实现把「首跑不列新增」和「无变化不发」合成了一条，结果首跑连总数都发不出去，
 # 而 spec 原文写的是首跑「只报总数」——是发，不是不发。
@@ -566,58 +776,178 @@ ANR 仅 Android（iOS 系统层无此概念）；ANR 率与崩溃率同分母，
 # 主力版本表（markdown 与卡片共用同一批数据）
 adopt_md() {
   [ -n "$ADOPT_ROWS" ] || { printf '（本次未取到放量数据）\n'; return 0; }
-  printf '| 平台 | 版本 | 会话 | 设备 | 崩溃事件 | 崩溃率 | Crash-free 会话 | ANR | 非致命 |\n|---|---|---|---|---|---|---|---|---|\n'
+  # ⚠️ 列头显式标 FATAL（analyst G5）——同一行并排三类事件，「崩溃」不标口径会被当总数
+  printf '| 平台 | 版本 | 会话 | 设备 | 崩溃(FATAL) | FATAL率 | Crash-free 会话 | ANR | 非致命 |\n|---|---|---|---|---|---|---|---|---|\n'
   printf '%s' "$ADOPT_ROWS" | awk -F'\t' 'NF>=9{printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s |\n",$1,$2,$3,$4,$5,$6,$7,$8,$9}'
 }
 
 # 影响面维度段（change crash-impact-summary）。⛔ 与性能段同一条硬约束：只给可定位对象，不出根因——
 # 维度聚合只显示相关性，某机型崩溃率高仍可能源自该机型用户的网络环境或功能路径。
 dims_md() {
-  local any=0 f pname ver
+  local any=0 f
   for f in "$OUT_DIR"/dim-*.csv; do [ -s "$f" ] && any=1 && break; done
   [ "$any" = 1 ] || { printf '（本周主力版本无崩溃事件，无维度分布）\n'; return 0; }
-  for kind in model os; do
-    [ "$kind" = model ] && printf '**机型**（绝对数，**未除以装机量**，不代表该机型更易崩）\n\n' \
-                        || printf '**系统版本**（含崩溃率，该维度会话桶足够大）\n\n'
-    for f in "$OUT_DIR"/dim-${kind}-*.csv; do
-      [ -s "$f" ] || continue
-      b="$(basename "$f" .csv)"; b="${b#dim-${kind}-}"
-      pname="${b%%-*}"; ver="${b#*-}"
-      printf '*%s %s*\n\n' "$pname" "$ver"
-      awk -F, -v sr="$([ "$kind" = os ] && echo 1 || echo 0)" -v minS="$DIM_MIN_W" '
-        NF>=6 { rate = ($5 == "" || $4 == "" || $4+0 < minS) ? "" : $5 "%"
-          printf "- %s · %s 事件 / %s 人 · 集中度 %s%s\n", $1, $2, $3, $6, (sr && rate != "" ? " · 崩溃率 " rate : "") }' "$f"
-      printf '\n'
-    done
-  done
+  # ⛔ 用**表格**不用「加粗维度名 + 斜体平台版本 + 项目符号」三层嵌套：
+  #    同一份数据 L1 日报早就是表（md_csv_table），L2 却是列表——同源数据两种排版，
+  #    且列表形态的垂直空间约是表格的 3 倍（2026-08-24 实测该段 64 行）。
+  #    平台与版本进列，读者才能横向对照「新版是否引入了新机型问题」。
+  dim_table model '机型' '**机型**（绝对数，**未除以装机量**，不代表该机型更易崩）'
+  dim_table os    '系统版本' '**系统版本**（含 FATAL+ANR 率，该维度会话桶足够大）'
+  printf '%s\n\n' '> 表中 `—` = 该桶会话数不足（低于阈值），率不可靠故不展示——与「无此概念」「缺数」不同义（analyst G6）。⚠️ 本表比率为 **FATAL+ANR / 该系统版本会话**，与二段「FATAL率」（FATAL / 全部会话）**不是同一个率**，实测可差 6 倍以上。'
+  # 页面维度（change crash-screen-dimension）。⚠️ 无分母 CSV 只有 4 列，走 dim_table_nd，
+  # ⛔ 不能套 dim_table（那份判 NF>=6 读第 5 列作率，套用会静默拿空表）。
+  dim_table_nd screen '页面' '**页面**（崩溃发生时所在页面）'
+  # ⛔ 缺席的主力版本必须点名，⛔ 不能靠「表里没有那行」让读者自己发现——
+  #    「该版本无事件」「查询失败」「被闸门忽略」在版面上长得一模一样（镜头 6）。
+  if [ -n "${DIM_ABSENT:-}" ]; then
+    printf '%b' "$DIM_ABSENT" | awk -F'\t' 'NF>=4 && ($3=="0" || $4=="0") {
+      why = ($3=="0" && $4=="0") ? "该口径下本窗口无事件" : (($3=="0") ? "无致命/卡死事件（机型·系统版本·归因三表不适用）" : "无该端主口径事件（页面表不适用）")
+      printf "> ⚠️ **%s %s** 未出现在上方维度表中：%s。\n", $1, $2, why }'
+    printf '\n'
+  fi
+  printf '%s\n' '> ⛔ 页面维度**只给绝对数不给崩溃率**——`firebase_sessions` 表无页面字段，页面级会话分母**不存在**。事件多的页面通常只是访问量大的页面。'
+  printf '%s\n\n' '> ⚠️ `(未知)` 是取不到页面的事件，**照常参与排序不予丢弃**；ANR 的页面覆盖率最低（应用卡死时 custom key 写入本身也受影响）。⚠️ iOS 侧存在 UIKit 内部窗口（如 `UITrackingElementWindowController`），**不是业务页面**。'
   blame_md
+}
+
+# 有分母维度（机型 / 系统版本）→ 表。列序对应 crash-dimensions.sql：
+#   $1 dim · $2 events · $3 users · $4 sessions · $5 rate_pct · $6 concentration
+dim_table() { # $1=kind $2=列名 $3=段标题
+  local f b pname ver rows=""
+  printf '%s\n\n' "$3"
+  for f in "$OUT_DIR"/dim-$1-*.csv; do
+    [ -s "$f" ] || continue
+    b="$(basename "$f" .csv)"; b="${b#dim-$1-}"; pname="${b%%-*}"; ver="${b#*-}"
+    rows="${rows}$(csv2tsv < "$f" | awk -F'\t' -v pn="$pname" -v v="$ver" -v sr="$([ "$1" = os ] && echo 1 || echo 0)" -v minS="$DIM_MIN_W" '
+      NF>=6 { rate = ($5 == "" || $4 == "" || $4+0 < minS) ? "—" : $5 "%"
+        printf "| %s | %s | %s | %s | %s | %s%s |\n", pn, v, $1, $2, $3, $6, (sr ? " | " rate : "") }')
+"
+  done
+  if [ -n "$(printf '%s' "$rows" | tr -d '[:space:]')" ]; then
+    # ⚠️ 列名写明 FATAL+ANR（analyst G3）：与二段「FATAL率」同名不同义，实测差 6.7 倍（0.42% vs 2.83%）
+    if [ "$1" = os ]; then printf '| 平台 | 版本 | %s | 事件 | 影响安装 | 集中度 | FATAL+ANR率 |\n|---|---|---|---|---|---|---|\n' "$2"
+    else printf '| 平台 | 版本 | %s | 事件 | 影响安装 | 集中度 |\n|---|---|---|---|---|---|\n' "$2"; fi
+    printf '%s' "$rows" | grep -v '^$' || true
+  else
+    printf '（本周主力版本该维度无数据）\n'
+  fi
+  printf '\n'
+}
+
+# 无分母维度（页面等）→ 表。列序对应 crash-dimensions-nodenom.sql：
+#   $1 dim · $2 events · $3 users · $4 concentration（⚠️ 第 4 列不是会话数）
+dim_table_nd() { # $1=kind $2=列名 $3=段标题
+  local f b pname ver rows=""
+  printf '%s\n\n' "$3"
+  for f in "$OUT_DIR"/dim-$1-*.csv; do
+    [ -s "$f" ] || continue
+    b="$(basename "$f" .csv)"; b="${b#dim-$1-}"; pname="${b%%-*}"; ver="${b#*-}"
+    rows="${rows}$(csv2tsv < "$f" | awk -F'\t' -v pn="$pname" -v v="$ver" '
+      NF>=4 { printf "| %s | %s | %s | %s | %s | %s |\n", pn, v, $1, $2, $3, $4 }')
+"
+  done
+  if [ -n "$(printf '%s' "$rows" | tr -d '[:space:]')" ]; then
+    printf '| 平台 | 版本 | %s | 事件 | 影响安装 | 集中度 |\n|---|---|---|---|---|---|\n' "$2"
+    printf '%s' "$rows" | grep -v '^$' || true
+  else
+    printf '（本周主力版本该维度无数据）\n'
+  fi
+  printf '\n'
 }
 
 # 归因块（change crash-actionable-signals 1.5，与日报汇总段同一口径与同一条警告）。
 # ⛔ owner 与 library **必须一起呈现**：实测最有信息量的一行是
 #    `SYSTEM · com.prime.dino.english`——归因方是系统、库却是自家包名，那是系统帧被自家代码调用。
 #    只看 owner 会读成「系统的问题，与我无关」；只看 library 会读成「自家代码崩了」。两者都不对。
+# ── TOP N 事件下钻（change crash-issue-drilldown）───────────────────────────
+# 每个 top issue 一个块，六个维度按**可行动性**排序（页面最前，责任帧最后）。
+# ⛔ 各维度占比的分母是**该 issue 的事件数**，不是该维度的崩溃率——页面/前后台/内存档
+#    都没有会话分母。占比高只说明「这个 issue 集中在这里」，不说明「这里更容易崩」。
+# ⚠️ 口径按端不同：Android 用 FATAL+ANR（实测按受影响安装排第一的是个 ANR，
+#    纯 FATAL 榜会让它整个消失）；iOS 用 NON_FATAL（60 天仅 5 次致命崩溃）。
+dd_block() { # $1=CSV文件 $2=平台名 $3=口径说明 $4=取数是否成功 → markdown 表 + 脚注
+  if [ ! -s "$1" ]; then
+    # ⛔ 缺数与无异常是两件事：取数失败要说「未取到」，别渲染成「没有 issue」
+    if [ "${4:-1}" = "1" ]; then printf '（%s 本窗口无可下钻的 issue）\n\n' "$2"
+    else printf '⚠️ （%s 下钻取数失败，本段缺失——不代表没有 issue）\n\n' "$2"; fi
+    return 0
+  fi
+  printf '**%s**（口径：%s）\n\n' "$2" "$3"
+  # 列序（11 列，⚠️ SQL 加列必须同步这里——套错不报错只出坏数，2026-08-24 已踩）：
+  #  $1 issue_id · $2 title · $3 subtitle · $4 dim · $5 value
+  #  $6 events · $7 users · $8 n_distinct · $9 total_events · $10 total_users
+  # 表列取舍（analyst 审计 2026-08-24）：
+  #  · 「场景」列：iOS 用自埋 scene（覆盖 99.7%，把 190 字符标题压到 20 字符）；
+  #    Android scene 覆盖仅 52% 且单一取值，改用 title 末段。完整标题进表下脚注。
+  #  · ⛔ 机型不进表——per-issue 唯一机型数≈安装数，「top 机型」是随机一台设备；
+  #    只有「集中」或「单台设备」两种有信号的判定进脚注，「分散」不占版面。
+  #  · ⛔ 内存档不进表——mem_tier 无会话侧分母，「low 50%」与装机基准率无法区分。
+  csv2tsv < "$1" | awk -F'\t' -v plat="$2" -v conc="$DD_MODEL_CONC_PCT" '
+    function pct(a, b) { return (b+0 > 0) ? sprintf("%.0f", a/b*100) : "0" }
+    function fgcn(x) { if (x=="FOREGROUND") return "前台"; if (x=="BACKGROUND") return "后台"; return x }
+    function owner_cn(x) { sub(/^SYSTEM/,"系统",x); sub(/^DEVELOPER/,"自家",x); sub(/^THIRD_PARTY/,"三方",x); sub(/^PLATFORM/,"平台层",x); return x }
+    function short_title(t,   n, a, tail) {
+      # Android：取「 - 」之后再留末两个点段：Native method - android.os.MessageQueue.nativePollOnce
+      # → MessageQueue.nativePollOnce；com.….RemoteAnimationSpecKt.sha256Hex → RemoteAnimationSpecKt.sha256Hex
+      tail = t; while (index(tail, " - ") > 0) tail = substr(tail, index(tail, " - ") + 3)
+      n = split(tail, a, "."); if (n > 2) return a[n-1] "." a[n]
+      return tail
+    }
+    function flush(   sc, row) {
+      if (last == "") return
+      if (plat == "iOS" && val["scene"] != "" && val["scene"] != "(未知)") sc = val["scene"]
+      else sc = short_title(title)
+      row = sprintf("| %s | %s | %s / %s（%.1f） | %s %s%% | %s %s%% | %s · %s%% | %s |", \
+        substr(last,1,8), sc, tev, tus, (tus+0>0 ? tev/tus : 0), \
+        val["screen"], p["screen"], fgcn(val["fgbg"]), p["fgbg"], val["os"], p["os"], owner_cn(val["blame"]))
+      rows = rows row "\n"
+      fn = fn "> `" substr(last,1,8) "`：" title ((sub2 != "" && sub2 != title) ? " · " sub2 : "") "\n"
+      if (tus+0 <= 1)
+        fn = fn "> `" substr(last,1,8) "` 机型：单台设备（" tev " 次）——⛔ 样本仅 1 台判不了机型特异性，需复现\n"
+      else if (p["model"]+0 >= conc+0 && nd["model"]+0 <= tus/2)
+        fn = fn "> `" substr(last,1,8) "` 机型：⚠️ 集中于 " val["model"] "（" p["model"] "%；共 " nd["model"] " 种机型 / " tus " 台设备）\n"
+      delete val; delete p; delete nd
+    }
+    $1 != last { flush(); last = $1; title = $2; sub2 = $3; tev = $9; tus = $10 }
+    { val[$4] = $5; p[$4] = pct($6, $9); nd[$4] = $8 }
+    END {
+      flush()
+      print "| Issue | 场景 | 事件/安装（集中度） | 页面 | 前后台 | 系统版本 | 责任帧 |"
+      print "|---|---|---|---|---|---|---|"
+      printf "%s\n", rows
+      printf "%s", fn
+    }'
+  printf '\n'
+}
+
 blame_md() {
-  local any=0 f b pname ver
+  local any=0 f b pname ver rows=""
   for f in "$OUT_DIR"/blame-*.csv; do [ -s "$f" ] && any=1 && break; done
   [ "$any" = 1 ] || return 0
   printf '**归因**（责任帧属于谁，绝对数）\n\n'
-  printf '> ⛔ 归因方标识的是崩溃栈中**被判定为责任帧的那一帧属于谁**，**不是「谁触发了这次崩溃」**。\n'
-  printf '> 归因方是「系统」或「三方」**不等于非自家问题**——实测存在「系统帧 + 自家包名」的组合，\n'
-  printf '> 那是系统帧被自家代码调用。归因方与代码库必须一起读。\n\n'
+  printf '%s\n' '> ⛔ 归因方标识的是崩溃栈中**被判定为责任帧的那一帧属于谁**，**不是「谁触发了这次崩溃」**。'
+  printf '%s\n\n' '> 归因方是「系统」或「三方」**不等于非自家问题**——实测存在「系统帧 + 自家包名」的组合，那是系统帧被自家代码调用。归因方与代码库必须一起读。'
   for f in "$OUT_DIR"/blame-*.csv; do
     [ -s "$f" ] || continue
-    b="$(basename "$f" .csv)"; b="${b#blame-}"
-    pname="${b%%-*}"; ver="${b#*-}"
-    printf '*%s %s*\n\n' "$pname" "$ver"
-    awk -F, 'NF>=4 {
+    b="$(basename "$f" .csv)"; b="${b#blame-}"; pname="${b%%-*}"; ver="${b#*-}"
+    rows="${rows}$(csv2tsv < "$f" | awk -F'\t' -v pn="$pname" -v v="$ver" 'NF>=4 {
       o=$1
-      if (o=="DEVELOPER") o="自家代码"
-      else if (o=="THIRD_PARTY") o="三方 SDK"
+      if (o=="DEVELOPER") o="自家代码"; else if (o=="THIRD_PARTY") o="三方 SDK"
       else if (o=="SYSTEM") o="系统"
-      printf "- %s · %s · %s 事件 / %s 人\n", o, $2, $3, $4 }' "$f"
-    printf '\n'
+      # ⚠️ PLATFORM 与空值必须映射（analyst G7）：iOS 实测出现裸 PLATFORM、Android 出现 (null)，
+      #    不映射就是一行英文枚举混在中文表里
+      else if (o=="PLATFORM") o="平台层"; else if (o=="" || o=="(null)" || o=="null") o="(未知)"
+      lib=$2; if (lib=="" || lib=="(null)" || lib=="null") lib="(未知)"
+      printf "| %s | %s | %s | %s | %s | %s |\n", pn, v, o, lib, $3, $4 }')
+"
   done
+  if [ -n "$(printf '%s' "$rows" | tr -d '[:space:]')" ]; then
+    printf '| 平台 | 版本 | 归因方 | 代码库 | 事件 | 影响安装 |\n|---|---|---|---|---|---|\n'
+    printf '%s' "$rows" | grep -v '^$' || true
+  else
+    printf '（本周主力版本无归因数据）\n'
+  fi
+  printf '\n'
 }
 
 # 性能段表（design D8/D9：只给趋势与对象，不出根因；不进台账，只在周报文档呈现）
@@ -628,8 +958,9 @@ perf_md() {
   [ -n "$IOS_PERF_STALE" ] && printf '> ⚠️ **iOS 性能表已停更 %s 天**（截至 %s）——窗口内 0 行，下表 iOS 各列为空是数据源断更，不是「本周无异常」。\n\n' "$IOS_PERF_STALE" "$IOS_PERF_MAX"
   [ -n "$AND_PERF_STALE" ] && printf '> ⚠️ **Android 性能表已停更 %s 天**（截至 %s）——窗口内 0 行，下表 Android 各列为空是数据源断更，不是「本周无异常」。\n\n' "$AND_PERF_STALE" "$AND_PERF_MAX"
   [ -n "$PERF_ROWS" ] || { printf '（本次未取到性能数据）\n'; return 0; }
-  printf '| 平台 | 版本 | 启动 P50 | 启动 P95 | 慢帧最差页 | 慢帧率 | 冻结率 | 接口错误率 |\n|---|---|---|---|---|---|---|---|\n'
-  printf '%s' "$PERF_ROWS" | awk -F'\t' 'NF>=8{printf "| %s | %s | %sms | %sms | %s | %s%% | %s%% | %s%% |\n",$1,$2,$3,$4,$5,$6,$7,$8}'
+  printf '| 平台 | 版本 | 启动 P50 | 启动 P95 | P95 WoW | 慢帧最差页 | 慢帧率 | 冻结率 | 接口错误率 |\n|---|---|---|---|---|---|---|---|---|\n'
+  printf '%s' "$PERF_ROWS" | awk -F'\t' 'NF>=9{printf "| %s | %s | %sms | %sms | %s | %s | %s%% | %s%% | %s%% |\n",$1,$2,$3,$4,$9,$5,$6,$7,$8}'
+  printf '%s\n' '> WoW 基准 = 同 (平台,版本) 至少 4 天前的最近一轮（基准日已标注）；「—（无基准）」= 尚无足够早的记录，⛔ 不是持平。'
 }
 
 MSG="$(cat <<MSG_END
@@ -650,10 +981,44 @@ ADOPT_JSON="$(printf '%s' "$ADOPT_ROWS" | awk -F'\t' 'NF>=9{printf "%s\t%s\t%s\t
       | {plat:.[0], ver:.[1], sess:.[2], dev:.[3], crash:.[4], rate:.[5], cfree:.[6], anr:.[7], nf:.[8]})')"
 # 只有真出现变化才红；基线与平稳周都是蓝——红色要留给「需要看一眼」的场合
 HEADER_COLOR="blue"; [ "$WEEK_STATE" = changed ] && HEADER_COLOR="red"
+# ── 卡片图表（change crash-card-charts）────────────────────────────────────
+# 飞书 Card 2.0 原生 chart 组件（VChart spec，纯 JSON）。⚠️ 单卡建议 ≤5 图；
+# ⛔ 移动端不支持纹理/锥形渐变等属性，只用最基础的 bar/line。
+# ⛔ **数据不够就不画**：weekly-metrics 本轮才建立（实测 4 行全是今天），
+#    画出来是一条单点"趋势线"——比不画更误导（镜头 5：变化必须有基准）。
+CHART_EVENTS='[]'; CHART_SCREEN='[]'; CHART_P95='[]'
+if [ -n "$ADOPT_ROWS" ]; then
+  # ① 三类事件构成：平台+版本 × FATAL/ANR/非致命。⚠️ iOS 无 ANR 不produce 该系列（不填 0）
+  CHART_EVENTS="$(printf '%s' "$ADOPT_ROWS" | awk -F'\t' 'NF>=9{
+      gsub(/[^0-9]/,"",$5); a=$8; gsub(/ .*/,"",a); gsub(/[^0-9]/,"",a); n=$9; gsub(/[^0-9]/,"",n)
+      k=$1" "$2
+      printf "%s\t崩溃(FATAL)\t%s\n", k, ($5==""?0:$5)
+      if (a != "") printf "%s\tANR\t%s\n", k, a
+      printf "%s\t非致命\t%s\n", k, (n==""?0:n) }' \
+    | jq -Rsc 'split("\n")|map(select(length>0)|split("\t")|{x:.[0],type:.[1],y:(.[2]|tonumber? // 0)})')"
+fi
+# ② 崩溃页面 TOP5（横向条形）——把最可行动的维度放进卡片
+if ls "$OUT_DIR"/dim-screen-*.csv >/dev/null 2>&1; then
+  CHART_SCREEN="$(for f in "$OUT_DIR"/dim-screen-*.csv; do
+      [ -s "$f" ] || continue
+      b="$(basename "$f" .csv)"; b="${b#dim-screen-}"
+      csv2tsv < "$f" | awk -F'\t' -v k="${b%%-*} ${b#*-}" 'NF>=4{printf "%s · %s\t%s\n", k, $1, $2}'
+    done | sort -t"$(printf '\t')" -k2 -rn | head -5 \
+    | jq -Rsc 'split("\n")|map(select(length>0)|split("\t")|{x:.[0],y:(.[1]|tonumber? // 0)})' || echo '[]')"
+fi
+# ③ 启动 P95 趋势（折线，按天取该平台各版本最大值——代表最差体验）
+if [ -s "$PERF_HISTORY" ]; then
+  CHART_P95="$(jq -sc '[.[]|select(.p95)]|group_by(.platform+.day)
+      |map({x:.[0].day, type:.[0].platform, y:([.[].p95]|max)})|sort_by(.x)' "$PERF_HISTORY" 2>/dev/null || echo '[]')"
+  # ⛔ 少于 2 个日期不画折线：单点连不成趋势
+  [ "$(printf '%s' "$CHART_P95" | jq '[.[].x]|unique|length' 2>/dev/null || echo 0)" -ge 2 ] || CHART_P95='[]'
+fi
+
 CARD_JSON="$(jq -n \
   --arg hc "$HEADER_COLOR" --arg ht "📊 崩溃周报 · ${DAY} ${TS_HM}${WEEK_TAG:+ $WEEK_TAG}" \
   --arg ch "$CHANGES_MD" --arg nm "$NOTE_MD" \
   --argjson rows "${ADOPT_JSON:-[]}" \
+  --argjson chev "${CHART_EVENTS:-[]}" --argjson chsc "${CHART_SCREEN:-[]}" --argjson chp95 "${CHART_P95:-[]}" \
   '{schema:"2.0",
     config:{width_mode:"fill"},
     header:{template:$hc,title:{tag:"plain_text",content:$ht}},
@@ -675,6 +1040,26 @@ CARD_JSON="$(jq -n \
                     {name:"nf",display_name:"非致命",data_type:"text",width:"auto",horizontal_align:"left"}],
            rows:$rows}]
          else [{tag:"markdown",content:"（本次未取到放量数据）"}] end)
+      + (if ($chev | length) > 0 then [
+          {tag:"markdown",content:"<font color=\u0027grey\u0027>**📊 三类事件构成**（iOS 无 ANR 系列，⛔ 不是 0）</font>"},
+          {tag:"chart", color_theme:"rainbow",
+           chart_spec:{type:"bar", data:{values:$chev}, xField:"x", yField:"y", seriesField:"type",
+                       stack:true, legends:{visible:true, position:"bottom"},
+                       title:{text:"三类事件（近 7 天，主力版本）"}}}]
+         else [] end)
+      + (if ($chsc | length) > 0 then [
+          {tag:"markdown",content:"<font color=\u0027grey\u0027>**🎯 崩溃页面 TOP5**（绝对数，⛔ 无会话分母故不给率）</font>"},
+          {tag:"chart", color_theme:"brand",
+           chart_spec:{type:"bar", direction:"horizontal", data:{values:$chsc}, xField:"y", yField:"x",
+                       title:{text:"崩溃最多的页面（Android=FATAL+ANR · iOS=NON_FATAL，口径不同不可并读）"}}}]
+         else [] end)
+      + (if ($chp95 | length) > 0 then [
+          {tag:"markdown",content:"<font color=\u0027grey\u0027>**🚀 启动 P95 趋势**（每日各版本最大值＝最差体验）</font>"},
+          {tag:"chart", color_theme:"complementary",
+           chart_spec:{type:"line", data:{values:$chp95}, xField:"x", yField:"y", seriesField:"type",
+                       legends:{visible:true, position:"bottom"},
+                       title:{text:"启动 P95（ms，越小越好）"}}}]
+         else [] end)
       + [{tag:"div",text:{tag:"plain_text",content:$nm,text_size:"notation",text_color:"grey"}},
          {tag:"markdown",content:"📄 [完整报告](__REPORT_URL__) · 📁 [全部报告](__FOLDER_URL__)"}])}}')"
 
@@ -685,29 +1070,66 @@ REPORT="$STATE/reports/$DAY-weekly.md"
   printf '> 窗口起点 = 本次跑批时刻 − %s 天（SQL 下界）；终点 = sessions 活表实际取到的最新数据。\n' "$WEEK_DAYS"
   printf '> 本次运行 %s · 审计 $STATE/audit/weekly-%s.events.jsonl\n\n' "$RUN_ID" "$RUN_ID"
   printf '## 一、本周变化\n\n%s\n\n' "$CHANGES_MD"
+  [ -n "$RECUR_MD" ] && printf '%s\n\n' "$RECUR_MD"
+  [ -n "$RECUR_MD" ] && printf '> ⚠️ 「回归」指该 issue 在**上一轮基准日**（取基准里 `last` 的最大值，**不是「上周」**）无记录、本轮重新出现。判定窗口是崩溃段的滚动窗口——「消失」是**窗口内无事件**，⛔ 不等于「已修复」。⛔ 只给分数不给百分比：基准规模小（实测 14 项），百分比是伪精度。\n\n'
   printf '## 二、主力版本（近 %s 天会话量 top2）\n\n' "$WEEK_DAYS"
   adopt_md
   printf '\n> 日报盯的是「版本号最新的 2 个版本」（新版发得怎么样），本段盯的是「承载用户最多的版本」（盘子里的大头）。\n'
-  printf '> 两段版本集常常不同，各自回答不同的问题，**不可混比**。\n\n'
+  printf '> 两段版本集常常不同，各自回答不同的问题，**不可混比**。\n'
+  # G4（analyst）：crash-free 与 ANR 的必要标注原本在六段、离数字 155 行——标注必须随数字同现。
+  # ⚠️ 六段（NOTE_MD）那份**不能删**，卡片用的是同一份文案。
+  printf '%s\n' '> Crash-free 为**会话**口径且为**下界估计**（分子刻意不做 JOIN，见口径段），⛔ 不可与 Firebase 控制台首屏的**用户**口径对照。'
+  printf '%s\n' '> ANR 率分母为会话数，与 Play Console「用户感知 ANR 率」（日活分母）**口径不同**，⛔ 不可对照商店门槛。'
+  if [ -n "${ADOPT_WOW_MD:-}" ]; then printf '%b' "$ADOPT_WOW_MD"
+  elif [ "$ADOPT_OK" = "1" ]; then printf '%s\n' '> 环比：本轮建立基准，下轮起显示与上一周的对比。'
+  fi
+  printf '\n'
   printf '## 三、影响面分布（近 %s 天，主力版本）\n\n' "$WEEK_DAYS"
   printf '> ⛔ 只给可定位对象与取证方向，**不出根因**——维度聚合只显示相关性，与性能段同一条硬约束。\n'
   printf '> **本节口径 = FATAL + ANR**（影响面需覆盖卡死），与「主力版本」表的崩溃列（仅 FATAL）**不可直接相加对照**。\n\n'
   dims_md
-  printf '\n## 四、性能（近 %s 天，主力版本，双端分列）\n\n' "$WEEK_DAYS"
-  printf '> 取数区间 %sd：**%s**（与本文档同一套跑批时刻锚定，与一/二段共用）。\n' "$WEEK_DAYS" "$WIN_FULL"
+  printf '\n## 四、TOP %s 事件下钻（近 %s 天，主力版本）\n\n' "$DD_TOP_N" "$WEEK_DAYS"
+  printf '%s\n' '> ⛔ 各维度占比的分母是**该 issue 自己的事件数**，**不是该维度的崩溃率**——页面 / 前后台 / 内存档都没有会话分母（`firebase_sessions` 表无对应字段）。占比高只说明「这个 issue 集中在这里」，⛔ 不说明「这里更容易崩」。'
+  printf '%s\n' '> ⚠️ **两端口径不同不可并读**：Android = FATAL + ANR（实测按受影响安装排第一的是个 ANR，纯致命榜会让它消失）；iOS = NON_FATAL（近 60 天仅 5 次致命崩溃）。'
+  printf '%s\n' '> ⚠️ 责任帧 `owner` 标识的是崩溃栈中**责任帧的归属**，**不是谁触发了崩溃**——`SYSTEM` 不等于非自家问题。⚠️ 本段结论**未经人工复核**。'
+  printf '%s\n\n' '> ⛔ 机型**不给 top 值当结论**：实测 per-issue 的唯一机型数≈影响安装数（一设备一机型），此时「top 机型」只是随机一台设备。只在真正集中时才点名，样本仅 1 台时明说判不了。'
+  dd_block "$DD_AND_CSV" "Android" "FATAL + ANR" "${DD_AND_OK:-1}"
+  dd_block "$DD_IOS_CSV" "iOS" "NON_FATAL" "${DD_IOS_OK:-1}"
+  printf '\n## 五、性能（近 %s 天，主力版本，双端分列）\n\n' "$WEEK_DAYS"
+  # ⛔ 性能段**不能套用 $WIN_FULL**——那是 sessions 活表的终点。实测 2026-08-24：
+  #    sessions 到 08-24 02:11 UTC，而性能表只到 08-22 06:5x UTC，**虚报 43 小时**，
+  #    读者会以为 P95 覆盖到今早。各表终点各自算，这是架构文档「缺口本身就是要看见的信息」。
+  printf '> 取数区间 %sd：起点同上；**终点按各性能表自己的最新事件**——iOS %s · Android %s。\n' \
+    "$WEEK_DAYS" "${IOS_PERF_MAX:-未取到}" "${AND_PERF_MAX:-未取到}"
+  printf '%s\n' '> ⚠️ 性能表的同步滞后于 sessions 表是常态；⛔ 不要用一/二段的窗口终点理解本段——两者不是同一个终点。'
   printf '> 性能是连续指标、无追踪 ID，**只给趋势、可定位对象与下一步取证方向，不出根因与修复方案**（硬约束）。\n'
   printf '> **本段不写入台账**（design D8：台账只收有唯一标识、可跨周追踪的崩溃 issue）。\n\n'
   perf_md
   printf '\n> 与日报口径互补但不可混比：日报是日维度当期值，本段是周维度趋势快照，窗口天数不同。\n\n'
-  printf '## 五、口径\n\n%s\n' "$NOTE_MD"
+  # D2（analyst）：NOTE_MD 里的分析层说明与下方「分析层：…」段重复——文档侧剥掉那一行，
+  # ⛔ 不能改 NOTE_MD 本身（卡片与它逐字节共用，卡片读者看不到下面那段）。
+  printf '## 六、口径\n\n%s\n' "$(printf '%s\n' "$NOTE_MD" | grep -v '本周无深度分析' | grep -v '根因与修复方案见完整报告' || true)"
   # 数据/分析分层的可见化：读者必须能一眼看出「本周没有根因分析」是模型不可用，
   # 而不是「本周没问题」。缺分析和无异常是两件完全不同的事。
   if [ "$ANALYSIS_OK" = "1" ]; then
     printf '\n> 分析层：✅ 本周含深度分析（根因与修复方案**未经人工复核**，落地前须验证）。\n'
   else
     printf '\n> 分析层：⚠️ **本周无深度分析** — %s。\n' "$ANALYSIS_SKIP_REASON"
-    printf '> 以上数据、台账与变化检测均由 BigQuery + git 纯脚本产出，**不受影响**；\n'
-    printf '> 缺的只是根因与修复方案。额度恢复后重跑本周即可补齐。\n'
+    printf '> 以上数据、台账与变化检测均由 BigQuery + git 纯脚本产出，**不受影响**；缺的只是根因与修复方案。\n'
+    printf '> %s\n' "${ANALYSIS_FIX_HINT:-看分析日志定位后重跑。}"
+  fi
+  # 分析层作为不参与编号的「分析层 · 根因分析」段追加进同一份文档（change crash-weekly-report-composition）。
+  # 这里曾经不追加，而是在投递时用 triage 报告**整份覆盖**数据层周报——分析层按 triage skill
+  # 自己的模板成文，其 prompt（fetch-snapshot.sh full 模式）从未要求带维度与指标，于是
+  # 「分析越成功、周报数据面越空」：2026-08-20 投递的 30,991 字符文档里，主力版本 / 性能 /
+  # crash-free / 系统版本 / 取数区间命中数**全为 0**。
+  # ⛔ 只丢弃 triage 的第一行 h1（避免文档出现第二个 h1），**其余标题层级一律不动**——
+  #    split-fix-list.py 用 `^##\s*.*修复清单` 定位段落，把 `## 四、修复清单` 降成三级会让它
+  #    静默失效（找不到就原样返回，退出码 0、无告警）。序号重排的收益是排版，风险是断掉一条
+  #    无告警的下游依赖，不划算（design D2）。
+  if [ "$ANALYSIS_OK" = "1" ] && [ -s "$TRIAGE_REPORT" ]; then
+    printf '\n## 分析层 · 根因分析（模型产出，**未经人工复核**）\n\n'
+    awk 'h==0 && /^# /{h=1; next} {print}' "$TRIAGE_REPORT"
   fi
 } > "$REPORT"
 
@@ -729,6 +1151,18 @@ fi
 # （2026-08-07 事故类型）。顺序 = 先提升基线，再产出投递物。
 cp "$SNAP_NEW" "$SNAP_LAST"
 
+# 生命周期基准提升：与 SNAP_LAST 同一时机（都必须在 manifest 落盘之前，见上方注释）。
+# ⚠️ 顺序不可提前到 render-ledger.sh 之前——渲染判「回归」要看的是**上一轮**的基准，
+#    先提升会让每个 issue 的 last 都等于今天，三态永远只渲染出「遗留」。
+# ⛔ 基准内容**只由 render-ledger.sh 算**（第 ④ 段），这里只负责落盘：first_seen 的取值优先级
+#    在渲染器里已实现一次，调用方再算一遍必然漂移（2026-08-24 实测：调用方按 `first=今天`
+#    播种，下一轮反过来把台账里真实的历史首次纳入日期全覆盖成了当天）。
+if [ -s "$SEEN_NEXT_FILE" ] && jq -e 'type == "object"' "$SEEN_NEXT_FILE" >/dev/null 2>&1; then
+  cp "$SEEN_NEXT_FILE" "$SEEN_FILE"
+else
+  echo "  ⚠️ 生命周期基准未产出，保持上一轮不变（下轮三态退回两态，不影响其余产物）"
+fi
+
 PUBLISH_DIR="$STATE/publish"
 rm -rf "$PUBLISH_DIR"; mkdir -p "$PUBLISH_DIR/docs"
 printf '%s\n' "$MSG" > "$PUBLISH_DIR/message.md"
@@ -742,12 +1176,14 @@ REPORT_FILE=""
 # 没有的东西——性能段趋势与 WoW、主力版本明细、取数区间双时区标注；卡片受 CardKit
 # 表格能力限制装不下。跳过建文档会让「本周平稳」的那几周**永久丢失性能趋势记录**，
 # 而平稳周恰恰是趋势最该被留档的时候（异常周反正有人盯）。
-if [ -s "$TRIAGE_REPORT" ]; then
-  # 有分析报告：用 triage 产出的完整版（含根因与修复方案）
-  cp "$TRIAGE_REPORT" "$PUBLISH_DIR/docs/weekly.md"; REPORT_FILE="$PUBLISH_DIR/docs/weekly.md"
-elif [ -s "$REPORT" ]; then
-  # 无分析报告（额度耗尽 / 超时 / 显式跳过）：投递数据层周报本体，
-  # 正文里已由分析层标注说明缺的是什么。
+if [ -s "$REPORT" ]; then
+  # 单一来源：$REPORT 已是完整文档——数据层五段 + （若本轮有）分析层的「分析层 · 根因分析」段。
+  #
+  # 这里曾是二选一：`if [ -s "$TRIAGE_REPORT" ]` 投模型报告、`elif` 才投数据层周报。
+  # 那是一次回归——互斥分支自 Initial commit 就在，而影响面维度段是 2303dcc 才加进数据层的，
+  # 加的时候没回头动这里。后果见上方 $REPORT 生成处的注释（08-20 实测数据面全空）。
+  # 下方「跳过建文档会永久丢失性能趋势记录」的理由在**有分析的那几周同样成立**，
+  # 却只在 fallback 分支被兑现——合并之后两条路径都兑现了。
   cp "$REPORT" "$PUBLISH_DIR/docs/weekly.md"; REPORT_FILE="$PUBLISH_DIR/docs/weekly.md"
 fi
 
@@ -838,3 +1274,4 @@ find "$STATE/logs" -type f -mtime +60 -delete 2>/dev/null || true
 find "$STATE" -maxdepth 1 -name 'snapshot-*.json' -mtime +60 -delete 2>/dev/null || true
 cleanup_old_runs "$STATE"
 echo "=== 完成，报告：$REPORT ==="
+RUN_COMPLETED=1
