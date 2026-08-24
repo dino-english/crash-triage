@@ -1,9 +1,21 @@
 #!/usr/bin/env bash
-# 提交前自检。两项：
-#  1. bash 语法
+# 提交前自检。⚠️ **九项**（CLAUDE.md 若仍写「七项」以本文件为准）：
+#  1. bash 语法（递归扫 bin/**/*.sh）
 #  2. $VAR 紧跟多字节字符 —— bash 3.2（macOS 自带）会把多字节的首字节并进变量名，
 #     报 "VAR?: unbound variable"。2026-08-18 一天内连踩五次，做成检查项。
 #     用 python 做匹配：BSD grep -E 不支持 \x 转义，写正则会误报一片。
+#  3. 依赖方向（核心层不得出现取数 / 投递 / 模型 / 状态目录）
+#  4. 同名函数跨文件重复定义
+#  5. bq query 直连收口（只允许 bin/lib/bq.sh）
+#  6. printf 格式串里的字面 %（F22：只在运行时炸，bash -n 查不出）
+#  7. 顶层「先用后定」（F24 同源：常量/函数定义晚于使用，报错常被 EXIT trap 吞成 0）
+#  8. 纯函数断言（bin/test/run.sh）+ 函数级回归（fn-regression.sh，生产 shell 设置下）
+#  9. ShellCheck（可选依赖，未安装则跳过，不影响退出码）
+#
+# ⚠️ 每加一项都要**双向测试**：①塞违规样本确认真的变红 ②在**当前全量代码**上确认不误报。
+#    只做①不够——2026-08-24 加的「多传占位符」检查对正常设计也报，当轮就给使用方
+#    发了误报告警卡（失效模式 F30）。⛔ 检查本身也不得走会触发 ERR trap 的路径。
+#    一个不会红的检查项危险，一个乱红的检查项更危险——它会训练人忽略告警。
 set -uo pipefail
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 rc=0
@@ -83,12 +95,52 @@ if [ -n "$bq_direct" ]; then
   rc=1
 fi
 
-# ── 6. 纯函数断言 ────────────────────────────────────────────────
+# ── 6. printf 格式串里的字面 % ───────────────────────────────────
+# 中文报告文案里百分比极常见（「覆盖 96.6%」「Android 0%」），写进 printf 的**格式串**
+# 会被当成格式符，报 invalid format character——⚠️ **只在运行时炸**，且触发 ERR trap 发告警。
+# `bash -n` 查不出（格式串语法合法），2026-08-24 实测让一次整跑在取数 5 分钟后作废（F22）。
+# 修法：含字面 % 的文案走 `printf '%s\n' "…"`，不放进格式串。
+python3 - "$SELF_DIR" <<'PY' || rc=1
+import sys, re, pathlib
+bad = 0
+# 合法的转换说明符与 %%，其余的 % 视为字面量
+ok = re.compile(r'%%|%[-+ #0-9.*]*[diouxXeEfgGaAcsbq]')
+for f in sorted(pathlib.Path(sys.argv[1]).rglob('*.sh')):
+    if f.name == 'check-scripts.sh':
+        continue
+    for n, line in enumerate(f.read_text(encoding='utf-8').splitlines(), 1):
+        for m in re.finditer(r"printf\s+'([^']*)'", line):
+            if '%' in ok.sub('', m.group(1)):
+                rel = f.relative_to(pathlib.Path(sys.argv[1]))
+                print(f'❌ {rel}:{n} printf 格式串含字面 %，改用 printf \'%s\\n\' "…"：{line.strip()[:70]}')
+                bad = 1
+sys.exit(bad)
+PY
+
+# ── 7. 顶层「先用后定」────────────────────────────────────────────
+# bash 顺序执行，声明与使用隔着几百行时没有任何工具在守。2026-08-24 一天内同类错误四次
+# （DD_TOP_N / dd_fetch / WOW_CUT / awk 列序），⚠️ **全都不报错或报错被吞**：
+#   · 常量先用后定 → unbound variable，退出码曾被 EXIT trap 吞成 0（失效模式 F24）
+#   · 函数先用后定 → command not found，被 `|| true` 吞掉 → 空产物 + rc=0
+# 只看顶层引用（函数体内前向引用合法），跳过 ${VAR:-默认} 与 trap 体。
+if [ -f "$SELF_DIR/test/lint-order.py" ]; then
+  python3 "$SELF_DIR/test/lint-order.py" "$SELF_DIR" || rc=1
+fi
+
+# ── 8. 纯函数断言 ────────────────────────────────────────────────
 if [ -x "$SELF_DIR/test/run.sh" ]; then
   bash "$SELF_DIR/test/run.sh" || rc=1
 fi
+# 函数级回归：跑在**生产 shell 设置**下（set -euo pipefail + errtrace + ERR trap）。
+# ⛔ 与上面的纯函数断言不是一回事：那些验「输入→输出」，这些验「过程中有没有踩 ERR trap」。
+#    2026-08-24 实测：`grep -o` 无匹配返回 1，普通夹具测出 rc=0 一切正常，
+#    生产里每次成功渲染都触发一次 ERR trap → 发告警卡（失效模式 F31）。
+#    详见 docs/CLAUDE-测试盲区.md。
+if [ -x "$SELF_DIR/test/fn-regression.sh" ]; then
+  bash "$SELF_DIR/test/fn-regression.sh" || rc=1
+fi
 
-# ── 7. ShellCheck（可选依赖）─────────────────────────────────────
+# ── 9. ShellCheck（可选依赖）─────────────────────────────────────
 # 生产机是无人值守的 Mac mini，不该为开发期工具多一项装机步骤。
 # 未安装 → 跳过并提示，**不影响退出码**；已安装 → 计入。
 if command -v shellcheck >/dev/null 2>&1; then

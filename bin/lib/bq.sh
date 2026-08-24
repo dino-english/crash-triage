@@ -85,3 +85,13 @@ bqq() { # $1=csv|json  $2=SQL文本 → stdout；超时返回 124，失败返回
   printf '%s\n' "$out"
   return "$rc"
 }
+
+# ── 前后台归一化表达式（change crash-fg-bg-split / crash-issue-drilldown）─────────
+# ⛔ **全仓唯一定义**。两份 SQL（crash-error-types / crash-issue-drilldown）都用 {{FG_NORM}}
+#    占位符引用它——把 CASE 表达式抄进第二个文件就是失效模式 F1「同一目的两份实现」，
+#    而 check-scripts 第 4 项只检测同名 bash 函数，SQL 里的重复它一个都抓不到。
+# 取值优先级：process_state（Crashlytics 一等字段，双端同名同枚举）→ 自埋 app_foreground 回落。
+# ⚠️ 两端 app_foreground 取值不同，方向经交叉验证（2026-08-24，7d）：
+#    iOS   BACKGROUND↔"0"=1068 · FOREGROUND↔"1"=14   Android FOREGROUND↔"true"=162 · BACKGROUND↔"false"=11
+# ⚠️ 放 bin/lib/bq.sh 而非 core：core 要求 env -i 可调用且不依赖外层，这是取数层的 SQL 片段。
+SQL_FG_NORM="COALESCE(NULLIF(process_state, 'UNKNOWN_PROCESS_STATE'), CASE LOWER(IFNULL((SELECT value FROM UNNEST(custom_keys) WHERE key = 'app_foreground' LIMIT 1), '')) WHEN 'true' THEN 'FOREGROUND' WHEN '1' THEN 'FOREGROUND' WHEN 'false' THEN 'BACKGROUND' WHEN '0' THEN 'BACKGROUND' ELSE NULL END)"

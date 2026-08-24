@@ -68,3 +68,7 @@ audit() { # $1=type $2=step $3=payload（JSON 对象文本，可省=空对象）
       '{seq:$seq, ts:$ts, run_id:$run, type:$type, step:$step, payload:$payload}' >> "$AUDIT_FILE"
   } 2>/dev/null || true
 }
+
+# N 天前的日期（BSD date，macOS）。收口到此处：L1 的保留期清理与 L2 的生命周期基准清理
+# 都要它，各存一份会被 check-scripts 第 3 项（同名函数重复定义）拦下。
+day_ago() { date -v-"${1:-0}"d +%Y-%m-%d 2>/dev/null; }
