@@ -9,6 +9,11 @@
 -- ⚠️ 有了率**也不等于**有了根因：某机型崩溃率高仍可能源自该机型用户的网络环境或功能路径。
 -- 汇总段只给可定位对象与取证方向，不出根因（与性能段同一条硬约束）。
 --
+-- ⚠️ **本份只适用于 sessions 表里也存在的维度**（机型 / 系统版本）——它强制 JOIN sessions 取率。
+--    页面 / 前后台 / 内存档等 sessions 表没有的维度走 `crash-dimensions-nodenom.sql`，那份永远不给率。
+--    ⛔ 两份的**列序不同**（本份第 4/5 列是 sessions / rate_pct，那份第 4 列是 concentration），
+--       渲染层不可共用同一套列号——套错会把集中度读成会话数且不报错。
+--
 -- {{DIM}} 取以下之一（由调用方 sed 替换）：
 --   CONCAT(device.manufacturer,' ',device.model)   机型
 --   operating_system.display_version               系统版本

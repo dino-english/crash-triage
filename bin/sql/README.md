@@ -12,6 +12,7 @@ L1 日报用的 BigQuery 查询，每个文件一个指标块。
 | `{{DAYS}}` | 回看天数 | `1`（日报）/ `7`（周报） |
 | `{{VERSIONS}}` | 版本白名单（**带引号的逗号列表**，非裸值） | `"1.5.4"` / `"1.5.4","1.5.3"` |
 | `{{MIN_SESSIONS}}` | 版本候选门槛（仅 `latest-versions.sql`） | `5` |
+| `{{ERROR_TYPES}}` | 错误类型白名单（仅 `crash-dimensions-nodenom.sql`）⚠️ iOS 须传 `'NON_FATAL'`——实测 iOS 60 天仅 5 次致命崩溃，按致命口径出来是空表 | `'FATAL','ANR'` |
 
 ```bash
 sed -e "s|{{TABLE}}|$TBL|g" -e "s|{{DAYS}}|1|g" -e 's|{{VERSIONS}}|"1.5.4"|g' \
@@ -41,7 +42,8 @@ sed -e "s|{{TABLE}}|$TBL|g" -e "s|{{DAYS}}|1|g" -e 's|{{VERSIONS}}|"1.5.4"|g' \
 | `sessions-by-version.sql` | 各版本会话数 / 设备数（**修复验证的分母**） | `firebase_sessions` |
 | `crash-issues.sql` | 致命崩溃 issue 聚合（issue_id / title / 事件数 / 最新时间戳） | `firebase_crashlytics` |
 | `crash-rate.sql` | 崩溃率（分子 `firebase_crashlytics` 事件数 / 分母 `firebase_sessions` 会话数） | 双表 |
-| `crash-error-types.sql` | ANR 与 NON_FATAL 的事件数 / 受影响安装数（**一次查询取两类**） | `firebase_crashlytics` |
+| `crash-error-types.sql` | 三类事件的事件数 / 受影响安装数 / **前后台分布**（一次查询取三类；归一化表达式**全仓只此一处**） | `firebase_crashlytics` |
+| `crash-dimensions-nodenom.sql` | 无分母维度（页面 / 内存档等 sessions 表没有的维度）——⛔ **永远不给率**，⚠️ 列序与 `crash-dimensions.sql` 不同 | `firebase_crashlytics` |
 | `crash-nonfatal-issues.sql` | NON_FATAL issue 聚合（含 `subtitle`，见下方注意） | `firebase_crashlytics` |
 | `latest-versions.sql` | 版本清单解析（**日报唯一版本源**，返回候选版本 + 会话/设备数） | `firebase_sessions` |
 

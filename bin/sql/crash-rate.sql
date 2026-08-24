@@ -37,4 +37,18 @@ SELECT
     WHERE is_fatal = TRUE
       AND firebase_session_id IS NOT NULL AND firebase_session_id != ''
       AND application.display_version IN ({{VERSIONS}})
-      AND event_timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {{DAYS}} DAY)) AS crash_sessions
+      AND event_timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {{DAYS}} DAY)) AS crash_sessions,
+  -- 受影响**用户**数（change crash-affected-users）。⚠️ **仅 iOS 有值**：实测近 7 天
+  -- iOS user.id 非空 1060/1097 = 96.6%，**Android 0/221 = 0%**（客户端不上报该字段）。
+  -- 同一份 SQL 双端共用，Android 自然跑出 0；⛔ **不在 SQL 里按平台分叉**——
+  -- 渲染层按「该列恒 0 且事件数 > 0」判定为不上报并渲染「— 该端不上报」。
+  -- ⛔ 与 affected_installs **不是包含关系，不可相加或相减**：实测 iOS 119 个 user.id 对应
+  -- 130 组 (用户, 安装) 配对，单用户最多跨 3 个安装；前台子集出现过 6 安装 / 7 用户
+  -- （一台设备多个账号），用户数反而多于安装数。
+  -- ⛔ **用户崩溃率做不了**：firebase_sessions 全字段实测无任何用户标识，用户分母不存在。
+  -- ⚠️ NULLIF(user.id,'')：覆盖率按「非 NULL 且非空串」实测，只判 NULL 会把空串算成一个用户。
+  (SELECT COUNT(DISTINCT NULLIF(user.id, ''))
+     FROM `{{TABLE}}`
+    WHERE is_fatal = TRUE
+      AND application.display_version IN ({{VERSIONS}})
+      AND event_timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {{DAYS}} DAY)) AS affected_users
