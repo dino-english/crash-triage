@@ -114,6 +114,11 @@ VERSION_COUNT="${CRASH_REPORT_VERSION_COUNT:-2}"   # 日报统计的最新版本
 # SAMPLE_SESSION_MIN 在单元格上打「⚠️」标出来。此常量仅为兼容占位符替换而保留。
 MIN_SESSIONS="${CRASH_REPORT_MIN_SESSIONS:-1}"
 MAX_VERSION_COLS="${CRASH_REPORT_MAX_VERSION_COLS:-4}"  # 最新 N 版 ∪ 主力 2 版后的列数上限
+# 卡片列上限（change crash-data-completeness B 组）：卡片列集合 = 最新 N 版 ∪ 性能可得 2 版，
+# ⚠️ **不含主力补充列**（那是文档的事，卡片一向只放 V1/V2）。
+# ⚠️ 3 是版面上限不是口径：CardKit 表格列宽由内容撑开，列多了桌面端会截断
+#    （实测长文案已经被截成「⚠️ 数据未同步（截至...」），故单元格一律走 CELL_BREVITY 短文案。
+CARD_VERSION_COLS="${CRASH_REPORT_CARD_VERSION_COLS:-3}"
 
 # ── 阈值红绿灯（R3 / D5）：脚本顶部集中可配常量 ────────────────────────
 # 红档 = 已拍板；黄/绿 = explore 建议值落地，全部显式标注「待对齐」。
@@ -241,13 +246,17 @@ mkdir -p "$TMP"
 # ── 查询助手（全部带版本过滤；{{VERSIONS}} 的值是带引号的逗号列表，谓词写在 SQL 文件里）──
 vlist() { printf '"%s"' "$1"; }   # 单版本 → "1.5.4"（多版本形式保留给未来 N>1 的合并查询）
 
-q() { # $1=sql文件 $2=表名 $3=窗口天数 $4=版本 → CSV（无表头）
+# ⚠️ q() 只服务性能三查（perf-traces / perf-screens / perf-network），窗口一律是**完整日闭区间**——
+#    故直接收两端日期，不再收「天数」。⛔ 起止由调用方显式算好传入，本函数不设默认值：
+#    共享层一旦有默认窗口，漏传时会静默用错窗口（bin/lib/query.sh 顶部同一条纪律）。
+q() { # $1=sql文件 $2=表名 $3=起日 $4=止日 $5=版本 → CSV（无表头）
   local _t0=$SECONDS _rc=0 _out
-  _out="$(bqq csv "$(q_render "$1" TABLE="$2" DAYS="$3" VERSIONS="$(vlist "$4")")" \
+  [ -n "$3" ] && [ -n "$4" ] || { echo "" ; return 0; }
+  _out="$(bqq csv "$(q_render "$1" TABLE="$2" LCD_START="$3" LCD_END="$4" VERSIONS="$(vlist "$5")")" \
     | tail -n +2)" || _rc=$?
-  audit query q "$(jq -cn --arg sql "$1" --arg tbl "$2" --arg days "$3" --arg ver "$4" \
+  audit query q "$(jq -cn --arg sql "$1" --arg tbl "$2" --arg from "$3" --arg to "$4" --arg ver "$5" \
     --argjson rows "$(printf '%s' "$_out" | grep -c . || true)" --argjson secs "$((SECONDS - _t0))" --argjson rc "$_rc" \
-    '{fn:"q",sql:$sql,table:$tbl,days:$days,version:$ver,rows:$rows,secs:$secs,rc:$rc}')"
+    '{fn:"q",sql:$sql,table:$tbl,from:$from,to:$to,version:$ver,rows:$rows,secs:$secs,rc:$rc}')"
   [ -n "$_out" ] && printf '%s\n' "$_out"
   return 0
 }
@@ -301,9 +310,12 @@ qhours() { # $1=crash表 $2=版本 → CSV（无表头）
   [ -n "$_out" ] && printf '%s\n' "$_out"
   return 0
 }
-q1d() { # $1=sql文件 $2=表名 $3=距今天数 $4=版本 → 单行 JSON 对象（无数据/超时 → {}）
+# ⚠️ 第三参是「窗口参数」不是固定语义：daily-crash-1d / daily-sessions-1d 用 {{DAYS}}（距今天数），
+#    daily-perf-1d 用 {{DAY}}（完整日日期 YYYY-MM-DD）。两个占位符都喂进去，各 SQL 各取所需——
+#    q_render 对**多传**不报错（那是通用包装的常态），只对漏传当场失败。
+q1d() { # $1=sql文件 $2=表名 $3=窗口参数（天数 或 YYYY-MM-DD）$4=版本 → 单行 JSON 对象（无数据/超时 → {}）
   local _t0=$SECONDS _rc=0 _out
-  _out="$(bqq json "$(q_render "$1" TABLE="$2" DAYS="$3" VERSIONS="$(vlist "$4")")" \
+  _out="$(bqq json "$(q_render "$1" TABLE="$2" DAYS="$3" DAY="$3" VERSIONS="$(vlist "$4")")" \
     | jq -c '.[0] // {}' 2>/dev/null)" || _rc=$?
   [ -n "$_out" ] || _out='{}'
   audit query q1d "$(jq -cn --arg sql "$1" --arg tbl "$2" --arg days "$3" --arg ver "$4" \
@@ -349,15 +361,34 @@ table_max() { [ -n "$1" ] || { echo ""; return 0; }
     '{fn:"table_max",table:$tbl,max:$max,secs:$secs,rc:$rc}')"
   [ -n "$_out" ] && printf '%s\n' "$_out"
   return 0; }
-# 性能表「该版本最新可用单日」距今天数（1=昨日）；无数据 → 空。带版本过滤：不同版本的最新可用日不同。
-perf_day_offset() { [ -n "$1" ] && [ -n "$2" ] || { echo ""; return 0; }
+# 性能表在完整日窗口内**有数据的版本清单**（change crash-data-completeness B 组）。
+# ⛔ 判据只有一条：该版本在窗口内有没有行。**MUST NOT 引入任何会话量门槛**——
+#    `MIN_SESSIONS` 由 5 中和为 1 是 2026-08-22 的实测决定（Android 1.5.4 被叫停后从卡片上完全消失），
+#    用「性能数据有没有」绕回一个等价的会话量门槛同样是禁止的（Non-goal）。
+# ⚠️ tasks 2.2 原文是「逐个查该版本有没有值」（每候选一条，最多 4 条 × 2 端）。
+#    改为**一次 DISTINCT 查全窗口**：判据完全相同，查询数从最多 8 条降到 2 条。
+# ⚠️ 同一条查询顺带把**残日**（> LCD，即那 7 小时未完整的尾巴）也数出来：
+#    某版本「窗口内 0 行、残日有行」⇒ 明天 LCD 推进一天它就有数据了，第 3 态细分据此说出
+#    「预计 X 到位」而不是空口承诺（change crash-data-completeness C 组）。多一列不多一条查询。
+perf_version_scan() { # $1=perf表 $2=起日 $3=止日(LCD) → TSV「版本 窗口内行数 残日行数」
+  [ -n "$1" ] && [ -n "$2" ] && [ -n "$3" ] || { echo ""; return 0; }
   local _t0=$SECONDS _rc=0 _out
-  _out="$(bqq csv "SELECT DATE_DIFF(CURRENT_DATE(), MAX(DATE(event_timestamp)), DAY) AS off FROM \`$1\` WHERE app_display_version = '$2'" \
-    | tail -n +2 | tail -1)" || _rc=$?
-  audit query perf_day_offset "$(jq -cn --arg tbl "$1" --arg ver "$2" --arg off "$_out" --argjson secs "$((SECONDS - _t0))" --argjson rc "$_rc" \
-    '{fn:"perf_day_offset",table:$tbl,version:$ver,offset:$off,secs:$secs,rc:$rc}')"
+  _out="$(bqq csv "SELECT app_display_version AS v,
+      COUNTIF(DATE(event_timestamp) BETWEEN '$2' AND '$3') AS in_win,
+      COUNTIF(DATE(event_timestamp) > '$3') AS in_tail
+    FROM \`$1\` WHERE DATE(event_timestamp) >= '$2' GROUP BY v" \
+    | tail -n +2 | grep -v '^$' | csv2tsv || true)" || _rc=$?
+  audit query perf_version_scan "$(jq -cn --arg tbl "$1" --arg from "$2" --arg to "$3" \
+    --argjson n "$(printf '%s' "$_out" | grep -c . || true)" --argjson secs "$((SECONDS - _t0))" --argjson rc "$_rc" \
+    '{fn:"perf_version_scan",table:$tbl,from:$from,to:$to,versions:$n,secs:$secs,rc:$rc}')"
   [ -n "$_out" ] && printf '%s\n' "$_out"
-  return 0; }
+  return 0
+}
+# 从 perf_version_scan 的 TSV 里取某一列非零的版本清单。⛔ 走 csv2tsv 的产物按制表符切，
+#    不裸 cut -d,（版本号不含逗号，但这条纪律不因「这次碰巧安全」而破例）。
+scan_vers() { # $1=scan TSV $2=列号(2=窗口内 3=残日) → 该列 > 0 的版本
+  printf '%s\n' "$1" | awk -F'\t' -v c="$2" 'NF>=3 && $c+0 > 0 {print $1}' || true
+}
 
 # ── 三态数据判定（design D6，顺序不可颠倒）────────────────────────
 # 1 表不存在 → table_missing；2 表整体窗口内无数据 → stale；3 表有数据但该版本 0 行 → no_version
@@ -547,6 +578,22 @@ CRASH_UNTIL="$(newest_ts "$IOS_CRASH_MAX" "$AND_CRASH_MAX")"; [ -n "$CRASH_UNTIL
 DATA_UNTIL="$(newest_ts "$IOS_PERF_MAX" "$AND_PERF_MAX")";    [ -n "$DATA_UNTIL" ]  || DATA_UNTIL="—"
 ADOPTION_UNTIL="$(newest_ts "$IOS_SESS_MAX" "$AND_SESS_MAX")"; [ -n "$ADOPTION_UNTIL" ] || ADOPTION_UNTIL="—"
 
+# ── 性能窗口：完整日（change crash-data-completeness，design D1/D2）──────
+# LCD = DATE(DATA_UNTIL) − 1，性能段取整日闭区间 [LCD−(PERF_DAYS−1), LCD]，DoD 取 LCD vs LCD−1。
+# ⚠️ **只动性能段**：崩溃段（crashlytics 当日可见）与放量段（sessions 走 REALTIME 活表）
+#    数据源新鲜度不同，完整日切分对它们没必要且平白损失新鲜度（Non-goal）。
+# ⚠️ LCD 取**两端合并后**的 DATA_UNTIL（与既有各段截止标注同源，全报告一个窗口）；
+#    某端滞后更多时，它在窗口尾部自然没有行——那由既有的 per-platform stale_days() 告警负责，
+#    ⛔ 不在这里按端各算一个窗口（两端两套日期会让同一张表的两列不可比）。
+PERF_LCD="$(last_complete_day "$DATA_UNTIL")"
+PERF_WIN_START="$(day_shift "$PERF_LCD" "-$((PERF_DAYS - 1))")"
+PERF_PREV_DAY="$(day_shift "$PERF_LCD" -1)"
+if [ -n "$PERF_LCD" ]; then
+  echo "  性能完整日窗口：${PERF_WIN_START} ~ ${PERF_LCD}（DoD ${PERF_LCD} vs ${PERF_PREV_DAY}）"
+else
+  echo "  ⚠️ 性能表无最新时间戳，完整日窗口无法确定——性能段走既有缺数三态第 2 态"
+fi
+
 # ── 版本解析（唯一源 = sessions 活表，design D1）────────────────────
 step "解析版本清单"
 resolve_versions() { # $1=sessions表 → CSV「version,sessions,devices」（无表头，未排序）
@@ -561,13 +608,43 @@ IOS_NEWEST="$(pick_newest "$IOS_VER_CSV" "$VERSION_COUNT")"
 AND_NEWEST="$(pick_newest "$AND_VER_CSV" "$VERSION_COUNT")"
 IOS_TOPSESS="$(pick_top_sessions "$IOS_VER_CSV")"
 AND_TOPSESS="$(pick_top_sessions "$AND_VER_CSV")"
-IOS_COLS="$(union_versions "$IOS_NEWEST" "$IOS_TOPSESS" "$MAX_VERSION_COLS")"
-AND_COLS="$(union_versions "$AND_NEWEST" "$AND_TOPSESS" "$MAX_VERSION_COLS")"
+# 性能段分域选版（B 组）：候选 = 该端最新 4 版（想要 2 + 回溯上限 2，design D4）
+IOS_PERF_SCAN="$(perf_version_scan "$IOS_PERF_TBL" "$PERF_WIN_START" "$PERF_LCD")"
+AND_PERF_SCAN="$(perf_version_scan "$AND_PERF_TBL" "$PERF_WIN_START" "$PERF_LCD")"
+IOS_PERF_AVAIL="$(scan_vers "$IOS_PERF_SCAN" 2)"; IOS_PERF_TAIL="$(scan_vers "$IOS_PERF_SCAN" 3)"
+AND_PERF_AVAIL="$(scan_vers "$AND_PERF_SCAN" 2)"; AND_PERF_TAIL="$(scan_vers "$AND_PERF_SCAN" 3)"
+IOS_PERF_VERS="$(pick_versions_perf "$(pick_newest "$IOS_VER_CSV" $((VERSION_COUNT + 2)))" "$IOS_PERF_AVAIL" "$VERSION_COUNT" 2)"
+AND_PERF_VERS="$(pick_versions_perf "$(pick_newest "$AND_VER_CSV" $((VERSION_COUNT + 2)))" "$AND_PERF_AVAIL" "$VERSION_COUNT" 2)"
+# ⚠️ 4 个候选全无性能数据、而性能表本身有行 → 不是「新版还没同步」而是导出退化，必须说出来
+#    （design D4：不继续往下翻，转既有「数据未同步」口径的告警文案）。
+PERF_VER_WARN=""
+for _pv in "iOS:$IOS_PERF_VERS:$IOS_PERF_AVAIL" "Android:$AND_PERF_VERS:$AND_PERF_AVAIL"; do
+  _pn="${_pv%%:*}"; _rest="${_pv#*:}"; _sel="${_rest%%:*}"; _av="${_rest#*:}"
+  if [ -z "$_sel" ] && [ -n "$_av" ]; then
+    PERF_VER_WARN="${PERF_VER_WARN}${PERF_VER_WARN:+；}${_pn} 最新 $((VERSION_COUNT + 2)) 版在性能窗口内均无数据"
+  fi
+done
+[ -n "$PERF_VER_WARN" ] && echo "  ⚠️ 数据未同步：${PERF_VER_WARN}——性能表有行但都不属于这些版本，疑似导出退化"
+# 文档列集合 = 最新 N 版 ∪ 主力 2 版 ∪ 性能可得 2 版（上限 MAX_VERSION_COLS）
+IOS_COLS="$(union_versions "$(printf '%s\n%s\n' "$IOS_NEWEST" "$IOS_PERF_VERS")" "$IOS_TOPSESS" "$MAX_VERSION_COLS")"
+AND_COLS="$(union_versions "$(printf '%s\n%s\n' "$AND_NEWEST" "$AND_PERF_VERS")" "$AND_TOPSESS" "$MAX_VERSION_COLS")"
+# 卡片列集合：最新 N 版 ∪ 性能可得 2 版（不含主力）
+IOS_CARD_COLS="$(union_versions "$IOS_NEWEST" "$IOS_PERF_VERS" "$CARD_VERSION_COLS")"
+AND_CARD_COLS="$(union_versions "$AND_NEWEST" "$AND_PERF_VERS" "$CARD_VERSION_COLS")"
+ver_newest_of() { [ "$1" = ios ] && printf '%s' "$IOS_NEWEST" || printf '%s' "$AND_NEWEST"; }
+# 该版本列是不是「只因为性能才进来的」——卡片与文档表头都要解释一个旧版本为什么占着一列。
+# ⚠️ 只标这一种：最新 N 版里的列本来就该在，标了反而每列都是噪音。
+# ⚠️ 卡片用短角标：6 列下表头也吃宽度，实发验证「iOS 1.5.3 性能兜底」这种长表头会被截。
+#    ⛔ 短到只剩「·性能」是有代价的——它不再自解释，故卡片说明段必须留着那句完整解释。
+perf_only_tag() { # $1=plat $2=版本 → 角标或空
+  if printf '%s\n' "$(ver_newest_of "$1")" | grep -qx -- "$2"; then printf ''; return 0; fi
+  if [ "$CELL_BREVITY" = 1 ]; then printf -- '·性能'; else printf ' 性能兜底'; fi
+}
 # 最新版 / 上一版（告警与版本间对比的两端）
 IOS_V1="$(printf '%s\n' "$IOS_NEWEST" | sed -n 1p)"; IOS_V2="$(printf '%s\n' "$IOS_NEWEST" | sed -n 2p)"
 AND_V1="$(printf '%s\n' "$AND_NEWEST" | sed -n 1p)"; AND_V2="$(printf '%s\n' "$AND_NEWEST" | sed -n 2p)"
-echo "  iOS     最新 $VERSION_COUNT 版：$(printf '%s' "$IOS_NEWEST" | tr '\n' ' ')· 主力：$(printf '%s' "$IOS_TOPSESS" | tr '\n' ' ')· 列：$(printf '%s' "$IOS_COLS" | tr '\n' ' ')"
-echo "  Android 最新 $VERSION_COUNT 版：$(printf '%s' "$AND_NEWEST" | tr '\n' ' ')· 主力：$(printf '%s' "$AND_TOPSESS" | tr '\n' ' ')· 列：$(printf '%s' "$AND_COLS" | tr '\n' ' ')"
+echo "  iOS     最新 $VERSION_COUNT 版：$(printf '%s' "$IOS_NEWEST" | tr '\n' ' ')· 主力：$(printf '%s' "$IOS_TOPSESS" | tr '\n' ' ')· 性能可得：$(printf '%s' "$IOS_PERF_VERS" | tr '\n' ' ')· 文档列：$(printf '%s' "$IOS_COLS" | tr '\n' ' ')· 卡片列：$(printf '%s' "$IOS_CARD_COLS" | tr '\n' ' ')"
+echo "  Android 最新 $VERSION_COUNT 版：$(printf '%s' "$AND_NEWEST" | tr '\n' ' ')· 主力：$(printf '%s' "$AND_TOPSESS" | tr '\n' ' ')· 性能可得：$(printf '%s' "$AND_PERF_VERS" | tr '\n' ' ')· 文档列：$(printf '%s' "$AND_COLS" | tr '\n' ' ')· 卡片列：$(printf '%s' "$AND_CARD_COLS" | tr '\n' ' ')"
 # 版本解析失败不静默回退全版本（那等于偷偷改口径）：显式标记，各段渲染成「版本解析失败」。
 IOS_VER_OK=1; [ -n "$IOS_V1" ] || IOS_VER_OK=0
 AND_VER_OK=1; [ -n "$AND_V1" ] || AND_VER_OK=0
@@ -641,9 +718,9 @@ collect_window() { # $1=plat键 $2=版本 $3=crash表 $4=sess表 $5=perf表 $6=c
   # 性能
   : > "$traces"; : > "$screens"; : > "$net"
   if [ -n "$5" ]; then
-    q perf-traces.sql  "$5" "$PERF_DAYS" "$v" > "$traces"  || true
-    q perf-screens.sql "$5" "$PERF_DAYS" "$v" > "$screens" || true
-    q perf-network.sql "$5" "$PERF_DAYS" "$v" > "$net"     || true
+    q perf-traces.sql  "$5" "$PERF_WIN_START" "$PERF_LCD" "$v" > "$traces"  || true
+    q perf-screens.sql "$5" "$PERF_WIN_START" "$PERF_LCD" "$v" > "$screens" || true
+    q perf-network.sql "$5" "$PERF_WIN_START" "$PERF_LCD" "$v" > "$net"     || true
   fi
   prows=$(( $(wc -l < "$traces") + $(wc -l < "$screens") + $(wc -l < "$net") ))
   # `|| true` 不是防御性冗余：性能表停更时 traces 为空，grep 无匹配返回 1，pipefail 把整条
@@ -766,17 +843,20 @@ echo "  全版本 crash-free：iOS ${IOS_CF_ALL:-—}% · Android ${AND_CF_ALL:-
 # ── 天级单日值：只跟踪最新 N 版（主力补充列不进 1d/历史，design D11 成本控制）──
 step "天级单日值（DoD/WoW 基准，仅最新 $VERSION_COUNT 版）"
 collect_1d() { # $1=plat键 $2=版本 $3=crash表 $4=sess表 $5=perf表
-  local p="$1" v="$2" key="$1-$2" c1d='{}' s1d='{}' pf='{}' pfp='{}' off pday pprev
+  local p="$1" v="$2" key="$1-$2" c1d='{}' s1d='{}' pf='{}' pfp='{}' pday pprev
   [ -n "$3" ] && c1d="$(q1d daily-crash-1d.sql    "$3" 1 "$v")" || true
   [ -n "$4" ] && s1d="$(q1d daily-sessions-1d.sql "$4" 1 "$v")" || true
-  # 性能批量表滞后 ~2 天且各版本滞后不同：按「该版本最新可用单日」及其前一日取值，并记录实际日期（D7）
-  off="$(perf_day_offset "$5" "$v")"; off="${off:-1}"
-  case "$off" in ''|*[!0-9]*) off=1;; esac
-  if [ -n "$5" ]; then
-    pf="$(q1d  daily-perf-1d.sql "$5" "$off" "$v")" || true
-    pfp="$(q1d daily-perf-1d.sql "$5" "$((off + 1))" "$v")" || true
+  # DoD 两端都取**完整日**：LCD vs LCD−1（change crash-data-completeness）。
+  # ⛔ 不再按「该版本最新可用单日」取（原 perf_day_offset）——表的最后一个日历日恒为 7 小时残日，
+  #    MAX(DATE(...)) 正好取中它，于是「今日」是 7 小时切片、「昨日」是完整天，环比两边口径不同，
+  #    差值无意义（2026-08-27 实测 iOS 1.5.4：残日 08-26 仅 29 样本 P95 548ms，完整日 08-25 192 样本 P95 1044ms，
+  #    照旧口径会渲染成「启动 P95 −496ms ↓」的假改善）。
+  # ⚠️ 全平台共用一个 LCD：某版本在 LCD 当天没有行时两端都为 null，走既有缺数渲染，不回退到别的日期。
+  if [ -n "$5" ] && [ -n "$PERF_LCD" ]; then
+    pf="$(q1d  daily-perf-1d.sql "$5" "$PERF_LCD" "$v")" || true
+    pfp="$(q1d daily-perf-1d.sql "$5" "$PERF_PREV_DAY" "$v")" || true
   fi
-  pday="$(day_ago "$off")"; pprev="$(day_ago "$((off + 1))")"
+  pday="$PERF_LCD"; pprev="$PERF_PREV_DAY"
   [ -n "$c1d" ] || c1d='{}'; [ -n "$s1d" ] || s1d='{}'
   [ -n "$pf" ]  || pf='{}';  [ -n "$pfp" ] || pfp='{}'
   jq -n --argjson c "$c1d" --argjson s "$s1d" \
@@ -798,15 +878,22 @@ collect_1d() { # $1=plat键 $2=版本 $3=crash表 $4=sess表 $5=perf表
 for v in $IOS_NEWEST; do collect_1d ios "$v" "$IOS_CRASH_TBL" "$SESS_IOS" "$IOS_PERF_TBL"; done
 for v in $AND_NEWEST; do collect_1d and "$v" "$AND_CRASH_TBL" "$SESS_AND" "$AND_PERF_TBL"; done
 dv_() { local f="$TMP/d-$1-$2.json"; [ -s "$f" ] || { echo ""; return 0; }
-  jq -r --arg p "$3" '(getpath($p | split(".")) // "") | tostring | select(. != "null")' "$f" 2>/dev/null || echo ""; }
+  jq -r --arg p "$3" '(getpath($p | split(".")) // "") | tostring | select(. != "null")' "$f" 2>/dev/null || echo ""
+}
 
 # ── 历史基准（按版本存储；旧口径行自愈丢弃，design D9）──────────────
 HISTORY="$STATE/metrics-history.jsonl"
 # 保留 90 天而非 7 天：环比只需要昨日与 D-7，但月度回顾、拉长 sparkline 都需要更长的序列，
 # 而 90 行 JSONL 也就 25KB——为省这点体积把历史砍掉不划算。
 HISTORY_KEEP="${CRASH_REPORT_HISTORY_KEEP:-90}"
+# 本轮写进历史的性能窗口口径。⚠️ 只有真的取到了完整日窗口才算 complete_day——
+# LCD 为空时性能段整段走缺数，标成 complete_day 会让明天的 WoW 以为两边可比。
+HISTORY_WINDOW_MODE=legacy
+if [ -n "$PERF_LCD" ]; then HISTORY_WINDOW_MODE=complete_day; fi
 SPARK_DAYS="${CRASH_REPORT_SPARK_DAYS:-7}"   # sparkline 只取最近 N 天，别把 90 个方块画出来
 YESTERDAY="$(day_ago 1)"; D7="$(day_ago 7)"
+# 性能 WoW 的基准日：⚠️ 锚在 LCD 而不是跑批日——性能段两端都必须是完整日（LCD vs LCD−7）。
+PERF_D7="$(day_shift "$PERF_LCD" -7)"
 HIST_ARR='[]'
 if [ -f "$HISTORY" ]; then
   TOTAL_LINES=$(grep -c '' "$HISTORY" 2>/dev/null || echo 0)
@@ -819,7 +906,85 @@ fi
 # 同版本同指标取历史值：$1=日期 $2=plat $3=版本 $4=字段
 hist_val() { jq -r --arg d "$1" --arg p "$2" --arg v "$3" --arg k "$4" \
   '.[] | select(.day == $d) | .[$p][$v][$k] // empty' <<<"$HIST_ARR" 2>/dev/null | head -1 || true; }
+# 性能 WoW 专用：按**记录里的 perf_day** 取，⛔ 不按跑批日 `.day` 取（change crash-data-completeness）。
+# 起因：旧口径每个版本各按自己的「最新可用单日」取值，同一次跑批里 perf_day 能差出 5 天
+#（实测 2026-08-22 那轮：iOS 1.5.4 记的是 08-17、1.5.3 记的是 08-18）。
+# 按 `.day == 今天−7` 取到的那条，它的 perf_day 与本轮 LCD 相差多少**完全不确定**——
+# ⚠️ 「WoW」这个名字会让人以为两边隔 7 天，实际隔几天没人知道，差值不可解释。
+# 取最后一条：同一 perf_day 可能有多轮跑批（当天重跑），最后一条是最完整的那次。
+hist_val_perfday() { jq -r --arg d "$1" --arg p "$2" --arg v "$3" --arg k "$4" \
+  '.[] | select(.[$p][$v].perf_day == $d) | .[$p][$v][$k] // empty' <<<"$HIST_ARR" 2>/dev/null | tail -1 || true; }
+# 跨口径标注（design D8 / 5.3）：WoW 基准那一行是旧口径时必须说出来。
+# ⚠️ 缺 `window_mode` 的旧行一律读作 legacy——⛔ 不能默认成 complete_day，
+#    那等于把「含 7 小时残日的值」和完整天值悄悄放在一起比。
+hist_mode_perfday() { # $1=perf_day $2=plat $3=版本 → window_mode；查不到该行 → 空
+  jq -r --arg d "$1" --arg p "$2" --arg v "$3" \
+    '[.[] | select(.[$p][$v].perf_day == $d) | (.window_mode // "legacy")] | last // ""' \
+    <<<"$HIST_ARR" 2>/dev/null || true
+}
+# 口径切换日 = 历史里第一条 complete_day 记录的日期；一条都没有说明本轮就是切换日。
+# ⚠️ 切满 7 天后 LCD-7 自然落在 complete_day 区间里，标注**自动消失**，不需要人工摘。
+WINDOW_SWITCH_DAY="$(jq -r '[.[] | select((.window_mode // "legacy") == "complete_day") | .day] | first // ""' <<<"$HIST_ARR" 2>/dev/null || true)"
+[ -n "$WINDOW_SWITCH_DAY" ] || WINDOW_SWITCH_DAY="$DAY"
 # sparkline 序列（按文件顺序旧→新，同版本）
+# ── 第 3 态细分（change crash-data-completeness C 组，design D5/D6/D7）────
+# ⛔ **这不是第 4 态**：既有缺数三态的判据、顺序、文案一律不动
+#    （表未同步 → ⚠️ 数据未同步（探测不带版本过滤）→ 该版本无数据）。
+#    本段只在**第 3 态内部**分两种，且发生在前两态判定之后。文档与注释统一称「第 3 态细分」。
+#
+# 两种子情况的处置完全不同，旧渲染把它们压成同一句「— 该版本无数据」：
+#   ① 尚无数据——这版从来没在性能表里出现过。正常滞后，明天就有，不用查。
+#   ② 本轮未取到——历史有值、这轮没有。取数故障或导出退化，**要查**。
+#
+# ⛔ **只给日期不给数值**（偏离 design D7 的「253ms（沿用 08-25）」写法）：五个性能格子
+#    没有一个能搬历史值——启动 P50/P95 格子是 3 天滚动窗、历史是单日；慢帧最差页/冻结是
+#    「最差页单页」、历史是「平台级聚合」；接口错误率格子是窗口 top10 端点、历史是全量
+#    （daily-perf-1d.sql 顶部自己写着「两套取数人群不同，不可直接混比」）。
+#    把历史值放进「3d」标签下的格子，正是 crash-metric-change 核心事实 2 禁的事。
+#    ⚠️ 判据仍然读历史——「这版以前有没有产出过性能数据」是个布尔，与口径无关。
+# ⚠️ 日期必须给（design D7）：不带日期的「本轮未取到」在连续多轮失败时会一直显示同一句话，
+#    看不出已经僵住——latest_event 冻结在历史峰值那天就是这么来的，同一个坑不再踩第二次。
+PERF_HIST_KEYS='["start_p50_1d","start_p95_1d","slow_pct_1d","frozen_pct_1d","net_err_pct_1d"]'
+# ⛔ 判据必须显式判 `!= null`，**MUST NOT 用真值性判断**：慢帧 / 冻结 / 接口错误率的 `0`
+#    是合法且常见的值（2026-08-27 实测 Android 1.5.4 冻结 0.0%），当成缺失就会把
+#    「今天确实取到了 0」渲染成「本轮未取到」——把好消息读成故障。
+hist_lookup() { # $1=plat $2=版本 $3=指标key → "值<TAB>日期"，历史里全为 null → 空
+  jq -r --arg p "$1" --arg v "$2" --arg k "$3" \
+    '[.[] | select((.[$p][$v][$k] // null) != null) | "\(.[$p][$v][$k])\t\(.day)"] | last // ""' \
+    <<<"$HIST_ARR" 2>/dev/null || true
+}
+# 该版本最后一次产出**任何**性能值的日期（判据用，不取值）
+hist_perf_last_day() { # $1=plat $2=版本 → YYYY-MM-DD 或空
+  jq -r --arg p "$1" --arg v "$2" --argjson ks "$PERF_HIST_KEYS" \
+    '[.[] | select([.[$p][$v][$ks[]] // null] | map(. != null) | any) | .day] | last // ""' \
+    <<<"$HIST_ARR" 2>/dev/null || true
+}
+# 预计到位日：该版本在**残日**里已有行 ⇒ 明天 LCD 推进一天它就进窗口了。
+# ⛔ 残日里也没有就不给日期——空口承诺「明天就有」比不说更糟。
+perf_eta_of() { # $1=plat $2=版本 → YYYY-MM-DD 或空
+  local tail; [ "$1" = ios ] && tail="$IOS_PERF_TAIL" || tail="$AND_PERF_TAIL"
+  if printf '%s\n' "$tail" | grep -qx -- "$2"; then day_shift "$DAY" 1; else printf ''; fi
+}
+# 第 3 态细分后的性能单元格文案。前两态原样委托给 state_text()，⛔ 一字不改。
+state_text_perf() { # $1=state $2=plat $3=版本 $4=表整体最新时间戳
+  local d eta
+  if [ "$1" != no_version ]; then state_text "$1" "$4"; return 0; fi
+  d="$(hist_perf_last_day "$2" "$3")"
+  if [ -n "$d" ]; then
+    # ⚠️ 短文案也**必须保留日期**：日期才是「僵了多久」的唯一线索，措辞可以砍
+    if [ "$CELL_BREVITY" = 1 ]; then printf '⚠️ 未取到 %s' "${d:5}"
+    else printf '⚠️ 本轮未取到（上次有值 %s）' "$d"; fi
+    return 0
+  fi
+  eta="$(perf_eta_of "$2" "$3")"
+  if [ -n "$eta" ]; then
+    if [ "$CELL_BREVITY" = 1 ]; then printf -- '— 预计 %s' "${eta:5}"
+    else printf -- '— 尚无数据（预计 %s 到位）' "$eta"; fi
+  else
+    state_text no_version "$4"
+  fi
+}
+
 spark_hist() { jq -r --arg p "$1" --arg v "$2" --arg k "$3" --argjson n "$SPARK_DAYS" \
   '.[-$n:][] | .[$p][$v][$k] // empty' <<<"$HIST_ARR" 2>/dev/null || true; }
 spark_rate() { jq -r --arg p "$1" --arg v "$2" --argjson n "$SPARK_DAYS" \
@@ -982,7 +1147,7 @@ sample_note() { # $1=plat $2=版本
   return 0
 }
 cell() { # $1=plat $2=版本 $3=行键
-  local st val samp lbl wn wp
+  local st val samp lbl wn wp wscr
   case "$3" in
     anr_brief) [ "$1" = ios ] && st=ok || st="$(mv_ "$1" "$2" crash.state)";;   # iOS 用 perf 数据，状态在分支内自行判定
     crash_free|crash_count|crash_rate|crash_affected|anr_count|anr_rate|nonfatal_count|crash_brief) st="$(mv_ "$1" "$2" crash.state)";;
@@ -993,7 +1158,8 @@ cell() { # $1=plat $2=版本 $3=行键
     case "$3" in
       crash_free|crash_count|crash_rate|crash_affected|anr_count|anr_rate|nonfatal_count|crash_brief|anr_brief) printf '%s' "$(state_text "$st" "$([ "$1" = ios ] && echo "$IOS_CRASH_MAX" || echo "$AND_CRASH_MAX")")";;
       sessions) printf '—';;
-      *) printf '%s' "$(state_text "$st" "$([ "$1" = ios ] && echo "$IOS_PERF_MAX" || echo "$AND_PERF_MAX")")";;
+      # ⚠️ 只有性能各行走细分（C 组）；上面崩溃各行仍走原 state_text，判据与文案一字未动
+      *) printf '%s' "$(state_text_perf "$st" "$1" "$2" "$([ "$1" = ios ] && echo "$IOS_PERF_MAX" || echo "$AND_PERF_MAX")")";;
     esac
     return 0
   fi
@@ -1038,7 +1204,8 @@ cell() { # $1=plat $2=版本 $3=行键
     # ⚠️ 两端窗口不同（ANR 7d / 冻结 3d），单元格内各自标注；口径注声明两者不可比。
     anr_brief)      if [ "$1" = ios ]; then
                       if [ "$(mv_ "$1" "$2" perf.state)" != "ok" ]; then
-                        printf '%s' "$(state_text "$(mv_ "$1" "$2" perf.state)" "$IOS_PERF_MAX")"
+                        # iOS 的「卡死信号」装的是冻结帧率，属性能数据，同样走第 3 态细分
+                        printf '%s' "$(state_text_perf "$(mv_ "$1" "$2" perf.state)" "$1" "$2" "$IOS_PERF_MAX")"
                       else
                         val="$(mv_ "$1" "$2" perf.frozen)"
                         if [ -z "$val" ]; then printf -- '— 样本不足'
@@ -1061,7 +1228,11 @@ cell() { # $1=plat $2=版本 $3=行键
                     # 附样本量（决策 D5）：94% 在 3 次打开和 3000 次打开上是完全不同的结论
                     if [ -n "$val" ]; then
                       samp="$(mv_ "$1" "$2" perf.worst_samples)"
-                      lbl="$(mv_ "$1" "$2" perf.worst_screen) ${val}%"
+                      # ⚠️ 卡片砍页面名、文档保留完整（6 列下实发验证被截断，见 screen_brief 注释）。
+                      # ⛔ 样本量那个括注不能砍：94% 在 3 次打开和 3000 次打开上是完全不同的结论（决策 D5）。
+                      wscr="$(mv_ "$1" "$2" perf.worst_screen)"
+                      [ "$CELL_BREVITY" = 1 ] && wscr="$(screen_brief "$wscr")"
+                      lbl="${wscr} ${val}%"
                       [ -n "$samp" ] && lbl="${lbl}（${samp} 次）"
                       cell_color "$val" "$SLOW_FRAME_RED" "$SLOW_FRAME_YELLOW" "$lbl"
                     else printf -- '— 样本不足'; fi;;
@@ -1160,21 +1331,32 @@ ROW_DEFS="$ROW_DEFS_DOC"   # 兼容：verdict_line 等按全量行集合遍历
 build_card_table() {
   CELL_BREVITY=1
   local cols='[{"name":"metric","display_name":"指标","data_type":"text","width":"auto","horizontal_align":"left"}]'
-  local rows='[]' key label rowj i=0 pk pn v
-  for pv in "ios:iOS:$IOS_V1" "ios:iOS:$IOS_V2" "and:Android:$AND_V1" "and:Android:$AND_V2"; do
-    pk="${pv%%:*}"; rest="${pv#*:}"; pn="${rest%%:*}"; v="${rest#*:}"
-    [ -n "$v" ] || continue
-    i=$((i + 1))
-    cols="$(printf '%s' "$cols" | jq -c --arg n "c$i" --arg d "$pn $v" \
-      '. + [{name:$n,display_name:$d,data_type:"lark_md",width:"auto",horizontal_align:"left"}]')"
+  local rows='[]' key label rowj i=0 pk pn v tag
+  # ⚠️ 列名必须是 c1…cN：CardKit 把 `ios` / `android` 当**平台变体键**，用它们做列名
+  #    在 DRY RUN 里毫无异常，只有真发一张才炸。
+  # ⚠️ 列集合由 IOS_CARD_COLS / AND_CARD_COLS 给（最新 N 版 ∪ 性能可得 2 版），
+  #    ⛔ 不再硬写 V1/V2——性能可得版本可能不在最新两版里（change crash-data-completeness B 组）。
+  for pp in "ios:iOS:$IOS_CARD_COLS" "and:Android:$AND_CARD_COLS"; do
+    pk="${pp%%:*}"; rest="${pp#*:}"; pn="${rest%%:*}"
+    for v in ${rest#*:}; do
+      [ -n "$v" ] || continue
+      i=$((i + 1))
+      # 只给「因为性能才进来的列」打角标：它在崩溃/放量行里是旧版本，读者需要知道它为什么在这
+      tag="$(perf_only_tag "$pk" "$v")"
+      cols="$(printf '%s' "$cols" | jq -c --arg n "c$i" --arg d "$pn $v$tag" \
+        '. + [{name:$n,display_name:$d,data_type:"lark_md",width:"auto",horizontal_align:"left"}]')"
+    done
   done
   while IFS='|' read -r key label; do
     [ -n "$key" ] || continue
     rowj="$(jq -cn --arg m "$label" '{metric:$m}')"; i=0
-    for pv in "ios:$IOS_V1" "ios:$IOS_V2" "and:$AND_V1" "and:$AND_V2"; do
-      pk="${pv%%:*}"; v="${pv#*:}"; [ -n "$v" ] || continue
-      i=$((i + 1))
-      rowj="$(printf '%s' "$rowj" | jq -c --arg k "c$i" --arg val "$(cell "$pk" "$v" "$key")" '. + {($k):$val}')"
+    for pp in "ios:$IOS_CARD_COLS" "and:$AND_CARD_COLS"; do
+      pk="${pp%%:*}"
+      for v in ${pp#*:}; do
+        [ -n "$v" ] || continue
+        i=$((i + 1))
+        rowj="$(printf '%s' "$rowj" | jq -c --arg k "c$i" --arg val "$(cell "$pk" "$v" "$key")" '. + {($k):$val}')"
+      done
     done
     rows="$(printf '%s' "$rows" | jq -c --argjson r "$rowj" '. + [$r]')"
   done <<< "$ROW_DEFS_CARD"
@@ -1328,13 +1510,23 @@ build_table() { # $1=plat $2=版本列 $3=V1 $4=V2 $5=最新版列表 $6=主力�
       columns:$c,rows:$r}'
 }
 
-ver_summary() { # $1=最新版 $2=上一版 $3=版本列 → 「1.5.4 → 1.5.3（+主力 1.5.1）」式摘要
-  local extra
+# ⛔ 补充列必须**逐个说明它为什么在这**：原来一律写「+主力」，而 change crash-data-completeness
+#    之后补充列还可能是「性能兜底」（那一版会话量可能很小，说成主力是睁眼说瞎话）。
+ver_summary() { # $1=最新版 $2=上一版 $3=版本列 $4=主力版列表 $5=性能可得版列表
+  local v lbl out=""
   [ -n "$1" ] || { printf '版本解析失败'; return 0; }
   printf '%s' "$1"
   [ -n "$2" ] && printf ' vs %s' "$2"
-  extra="$(printf '%s\n' "$3" | grep -vx "$1" | { [ -n "$2" ] && grep -vx "$2" || cat; } | tr '\n' ' ' | sed 's/ *$//')"
-  [ -n "$extra" ] && printf '（+主力 %s）' "$extra"
+  for v in $3; do
+    if [ "$v" = "$1" ]; then continue; fi
+    if [ -n "$2" ] && [ "$v" = "$2" ]; then continue; fi
+    # 主力优先：它在会话量上本来就该有一列，性能只是顺带；反过来标会丢掉更重要的那个理由
+    if printf '%s\n' "${4:-}" | grep -qx -- "$v"; then lbl="主力"
+    elif printf '%s\n' "${5:-}" | grep -qx -- "$v"; then lbl="性能兜底"
+    else lbl="补充"; fi
+    out="${out}${out:+ · }+${lbl} ${v}"
+  done
+  [ -n "$out" ] && printf '（%s）' "$out"
   return 0
 }
 # 会话量 top2（主力版本）说明：重合时也要明说，否则读者分不清是「重合」还是「没做这件事」
@@ -1349,8 +1541,8 @@ topsess_note() { # $1=主力版本列表 $2=最新版本列表 → 一句话
 }
 IOS_TOP_NOTE="$(topsess_note "$IOS_TOPSESS" "$IOS_NEWEST")"
 AND_TOP_NOTE="$(topsess_note "$AND_TOPSESS" "$AND_NEWEST")"
-IOS_VER_SUM="$(ver_summary "$IOS_V1" "$IOS_V2" "$IOS_COLS")"
-AND_VER_SUM="$(ver_summary "$AND_V1" "$AND_V2" "$AND_COLS")"
+IOS_VER_SUM="$(ver_summary "$IOS_V1" "$IOS_V2" "$IOS_COLS" "$IOS_TOPSESS" "$IOS_PERF_VERS")"
+AND_VER_SUM="$(ver_summary "$AND_V1" "$AND_V2" "$AND_COLS" "$AND_TOPSESS" "$AND_PERF_VERS")"
 
 step "组装卡片"
 CARD_TABLE="$(build_card_table)"
@@ -1360,9 +1552,9 @@ HEADER_TITLE="📊 ${DAY:5} $TS_HM 崩溃 & 性能"
 HEADER_COLOR="blue"; [ -n "$ALERTS" ] && HEADER_COLOR="red"
 SESS_FALLBACK_NOTE=""
 { [ "$SESS_IOS_FALLBACK" = 1 ] || [ "$SESS_AND_FALLBACK" = 1 ]; } && SESS_FALLBACK_NOTE="；⚠️ 放量回退批量表（可能停更）"
-NOTE_MD="$(printf '本报告只统计最新 %s 个版本（会话量 top2 不在其中时补「主力」列）；跨版本合计值不再输出。\n取数区间 性能 %sd：%s\n取数区间 放量 %sd：%s\n取数区间 崩溃 %sd：%s%s\n崩溃=BigQuery 事件级（含已关闭 issue）· 崩溃率=事件数/会话数 · Crash-free=会话口径（**与控制台的用户口径不可比**，且为下界估计）· 卡死信号行**双端指标不同不可比**：Android=ANR 率（%sd，与 Play 门槛口径亦不同），iOS=冻结帧率（%sd，系统层无 ANR 概念）· 非致命双端不可比 · 慢帧>16ms / 冻结>700ms 为帧级占比\n格内对比 = 最新版 − 上一版（箭头跟数值方向、颜色跟好坏）；表头括号内为该版本的 **会话数/设备数**（设备数才是「多少人在用」，会话数会被同一人反复启动放大）；影响集中行取该端事件最多的版本；同版本 DoD/WoW 与完整 13 项指标见日报文档' \
+NOTE_MD="$(printf '本报告只统计最新 %s 个版本（会话量 top2 不在其中时补「主力」列）；跨版本合计值不再输出。\n带「性能兜底」角标的列是**性能表里可得的最新版本**——性能批量表比崩溃/放量滞后约 2 天，新版在它里面常年零行，那一列的性能值本来就取不到。⛔ 该列的崩溃/放量数字是**这个旧版本自己的**，不是新版的。\n取数区间 性能 %sd：%s\n取数区间 放量 %sd：%s\n取数区间 崩溃 %sd：%s%s\n崩溃=BigQuery 事件级（含已关闭 issue）· 崩溃率=事件数/会话数 · Crash-free=会话口径（**与控制台的用户口径不可比**，且为下界估计）· 卡死信号行**双端指标不同不可比**：Android=ANR 率（%sd，与 Play 门槛口径亦不同），iOS=冻结帧率（%sd，系统层无 ANR 概念）· 非致命双端不可比 · 慢帧>16ms / 冻结>700ms 为帧级占比\n格内对比 = 最新版 − 上一版（箭头跟数值方向、颜色跟好坏）；表头括号内为该版本的 **会话数/设备数**（设备数才是「多少人在用」，会话数会被同一人反复启动放大）；影响集中行取该端事件最多的版本；同版本 DoD/WoW 与完整 13 项指标见日报文档' \
   "$VERSION_COUNT" \
-  "$PERF_DAYS"  "$(win_compact "$RUN_EPOCH" "$TZ_LABEL" "$PERF_DAYS" "$DATA_UNTIL")" \
+  "$PERF_DAYS"  "$(win_days "$PERF_WIN_START" "$PERF_LCD" "$RUN_EPOCH" "$DATA_UNTIL")" \
   "$DAYS"       "$(win_compact "$RUN_EPOCH" "$TZ_LABEL" "$DAYS" "$ADOPTION_UNTIL")" \
   "$CRASH_DAYS" "$(win_compact "$RUN_EPOCH" "$TZ_LABEL" "$CRASH_DAYS" "$CRASH_UNTIL")" "$SESS_FALLBACK_NOTE" \
   "$CRASH_DAYS" "$PERF_DAYS")"
@@ -1389,7 +1581,7 @@ CARD_JSON="$(jq -n \
 # （change crash-card-brief D3：ROW_DEFS 必须拆成 _CARD / _DOC，三个调用点各自指定）。
 md_table_doc() { # $1=plat $2=版本列 $3=V1 $4=V2
   local key label v
-  printf '| 指标 |'; for v in $2; do printf ' %s |' "$v"; done; [ -n "$4" ] && printf ' 对比 |'; printf '\n'
+  printf '| 指标 |'; for v in $2; do printf ' %s%s |' "$v" "$(perf_only_tag "$1" "$v")"; done; [ -n "$4" ] && printf ' 对比 |'; printf '\n'
   printf '|---|'; for v in $2; do printf -- '---|'; done; [ -n "$4" ] && printf -- '---|'; printf '\n'
   while IFS='|' read -r key label; do
     [ -n "$key" ] || continue
@@ -1401,25 +1593,33 @@ md_table_doc() { # $1=plat $2=版本列 $3=V1 $4=V2
 }
 
 # 卡片的 markdown 回退视图：与结构化卡片同形态（列 = 平台×版本），投递失败时人也能读。
-md_table() { # 无参数：直接用全局的四个版本列
-  local key label pv pk pn v rest
+# ⚠️ 与 build_card_table() 是**同一张表的两套渲染**（这里出 markdown 预览，那里出 CardKit JSON）：
+#    列集合改一处必须改两处，漏一处的表现是「DRY RUN 预览 4 列、真发出去 6 列」——
+#    预览与实发不一致，正是这个仓库最难排查的一类。
+md_table() { # 无参数：直接用全局的卡片版本列
+  local key label pp pk pn v rest
   CELL_BREVITY=1
   printf '| 指标 |'
-  for pv in "ios:iOS:$IOS_V1" "ios:iOS:$IOS_V2" "and:Android:$AND_V1" "and:Android:$AND_V2"; do
-    pk="${pv%%:*}"; rest="${pv#*:}"; pn="${rest%%:*}"; v="${rest#*:}"
-    [ -n "$v" ] && printf ' %s %s |' "$pn" "$v"
+  for pp in "ios:iOS:$IOS_CARD_COLS" "and:Android:$AND_CARD_COLS"; do
+    pk="${pp%%:*}"; rest="${pp#*:}"; pn="${rest%%:*}"
+    for v in ${rest#*:}; do
+      [ -n "$v" ] && printf ' %s %s%s |' "$pn" "$v" "$(perf_only_tag "$pk" "$v")"
+    done
   done
   printf '\n|---|'
-  for pv in "ios:$IOS_V1" "ios:$IOS_V2" "and:$AND_V1" "and:$AND_V2"; do
-    [ -n "${pv#*:}" ] && printf -- '---|'
+  for pp in "ios:$IOS_CARD_COLS" "and:$AND_CARD_COLS"; do
+    for v in ${pp#*:}; do [ -n "$v" ] && printf -- '---|'; done
   done
   printf '\n'
   while IFS='|' read -r key label; do
     [ -n "$key" ] || continue
     printf '| %s |' "$label"
-    for pv in "ios:$IOS_V1" "ios:$IOS_V2" "and:$AND_V1" "and:$AND_V2"; do
-      pk="${pv%%:*}"; v="${pv#*:}"; [ -n "$v" ] || continue
-      printf ' %s |' "$(cell "$pk" "$v" "$key" | sed -e 's|<font color=[a-z]*>||g' -e 's|</font>||g')"
+    for pp in "ios:$IOS_CARD_COLS" "and:$AND_CARD_COLS"; do
+      pk="${pp%%:*}"
+      for v in ${pp#*:}; do
+        [ -n "$v" ] || continue
+        printf ' %s |' "$(cell "$pk" "$v" "$key" | sed -e 's|<font color=[a-z]*>||g' -e 's|</font>||g')"
+      done
     done
     printf '\n'
   done <<< "$ROW_DEFS_CARD"
@@ -1475,17 +1675,24 @@ dodwow_rows() { # $1=plat $2=版本
   [ "$1" = ios ] || _row "ANR 率" "$arate" "$ary" "$ar7" pp "%"
   # 非致命是**计数**不是百分比：单位必须用 n，否则 delta_cell 会渲染成「+3.00pp」
   _row "非致命" "$(dv_ "$1" "$2" nonfatal_events_1d)" "$(hist_val "$YESTERDAY" "$1" "$2" nonfatal_events_1d)" "$(hist_val "$D7" "$1" "$2" nonfatal_events_1d)" n ""
-  _row "启动 P50" "$(dv_ "$1" "$2" start_p50_1d)" "$(dv_ "$1" "$2" prev.start_p50_1d)" "$(hist_val "$D7" "$1" "$2" start_p50_1d)" ms "ms"
-  _row "启动 P95" "$(dv_ "$1" "$2" start_p95_1d)" "$(dv_ "$1" "$2" prev.start_p95_1d)" "$(hist_val "$D7" "$1" "$2" start_p95_1d)" ms "ms"
-  _row "慢帧（平台级）" "$(dv_ "$1" "$2" slow_pct_1d)" "$(dv_ "$1" "$2" prev.slow_pct_1d)" "$(hist_val "$D7" "$1" "$2" slow_pct_1d)" pp "%"
-  _row "冻结" "$(dv_ "$1" "$2" frozen_pct_1d)" "$(dv_ "$1" "$2" prev.frozen_pct_1d)" "$(hist_val "$D7" "$1" "$2" frozen_pct_1d)" pp "%"
-  _row "接口错误率" "$(dv_ "$1" "$2" net_err_pct_1d)" "$(dv_ "$1" "$2" prev.net_err_pct_1d)" "$(hist_val "$D7" "$1" "$2" net_err_pct_1d)" pp "%"
+  _row "启动 P50" "$(dv_ "$1" "$2" start_p50_1d)" "$(dv_ "$1" "$2" prev.start_p50_1d)" "$(hist_val_perfday "$PERF_D7" "$1" "$2" start_p50_1d)" ms "ms"
+  _row "启动 P95" "$(dv_ "$1" "$2" start_p95_1d)" "$(dv_ "$1" "$2" prev.start_p95_1d)" "$(hist_val_perfday "$PERF_D7" "$1" "$2" start_p95_1d)" ms "ms"
+  _row "慢帧（平台级）" "$(dv_ "$1" "$2" slow_pct_1d)" "$(dv_ "$1" "$2" prev.slow_pct_1d)" "$(hist_val_perfday "$PERF_D7" "$1" "$2" slow_pct_1d)" pp "%"
+  _row "冻结" "$(dv_ "$1" "$2" frozen_pct_1d)" "$(dv_ "$1" "$2" prev.frozen_pct_1d)" "$(hist_val_perfday "$PERF_D7" "$1" "$2" frozen_pct_1d)" pp "%"
+  _row "接口错误率" "$(dv_ "$1" "$2" net_err_pct_1d)" "$(dv_ "$1" "$2" prev.net_err_pct_1d)" "$(hist_val_perfday "$PERF_D7" "$1" "$2" net_err_pct_1d)" pp "%"
   return 0
 }
 # 对比口径说明：一个版本块只说一次
 dodwow_note() { # $1=plat $2=版本
-  printf '天级单日值 · 崩溃/放量按昨日；性能按最近可用日（%s vs %s）· DoD=日环比 · WoW=周环比' \
-    "$(dv_ "$1" "$2" perf_day)" "$(dv_ "$1" "$2" perf_prev_day)"
+  printf '天级单日值 · 崩溃/放量按昨日；性能按最近完整日（DoD %s vs %s · WoW 基准 %s）· DoD=日环比 · WoW=周环比' \
+    "$(dv_ "$1" "$2" perf_day)" "$(dv_ "$1" "$2" perf_prev_day)" "${PERF_D7:-—}"
+  # 跨口径 WoW 必须带标注，⛔ 不能静默给数（design D8；与「两套口径分离存储不可混比」同一条纪律）
+  local _m; _m="$(hist_mode_perfday "${PERF_D7:-}" "$1" "$2")"
+  if [ -n "$_m" ] && [ "$_m" != complete_day ]; then
+    printf '；⚠️ 本行 WoW 跨口径：基准日 %s 取的是旧口径（该版本自己的最新可用单日，可能含 7 小时残日），口径切换于 %s，切满 7 天后此标注自动消失' \
+      "$PERF_D7" "$WINDOW_SWITCH_DAY"
+  fi
+  return 0
 }
 dodwow_block() { # markdown 版
   local name today d w
@@ -1706,7 +1913,7 @@ xml_table() { # $1=plat $2=版本列 $3=V1 $4=V2
   printf '<table>\n<thead><tr><th background-color="%s">指标</th>' "$XC_HEAD"
   for v in $2; do
     if [ "$first" = 1 ]; then printf '<th background-color="%s">%s 最新</th>' "$XC_HILITE" "$v"; first=0
-    else printf '<th background-color="%s">%s</th>' "$XC_HEAD" "$v"; fi
+    else printf '<th background-color="%s">%s%s</th>' "$XC_HEAD" "$v" "$(perf_only_tag "$1" "$v")"; fi
   done
   [ -n "$4" ] && printf '<th background-color="%s">对比</th>' "$XC_HEAD"
   printf '</tr></thead>\n<tbody>\n'
@@ -1804,7 +2011,8 @@ REPORT="$STATE/reports/$DAY-daily.md"
 {
   printf '# 崩溃 & 性能日报 · %s\n\n' "$DAY"
   printf '> **本报告只统计最新 %s 个版本**：iOS %s · Android %s\n' "$VERSION_COUNT" "$IOS_VER_SUM" "$AND_VER_SUM"
-  printf '> 性能 %sd：**%s**\n' "$PERF_DAYS" "$(win_full "$RUN_EPOCH" "$TZ_LABEL" "$PERF_DAYS" "$DATA_UNTIL")"
+  # 性能段是完整日闭区间（无时刻），故不走 win_full 的双时区时刻串；崩溃/放量段口径未变仍走原样。
+  printf '> 性能 %sd：**%s**（数据截止 %s）\n' "$PERF_DAYS" "$(win_days "$PERF_WIN_START" "$PERF_LCD" "$RUN_EPOCH" "$DATA_UNTIL")" "$DATA_UNTIL"
   printf '> 放量 %sd：**%s**\n' "$DAYS" "$(win_full "$RUN_EPOCH" "$TZ_LABEL" "$DAYS" "$ADOPTION_UNTIL")"
   printf '> 崩溃 %sd：**%s**\n' "$CRASH_DAYS" "$(win_full "$RUN_EPOCH" "$TZ_LABEL" "$CRASH_DAYS" "$CRASH_UNTIL")"
   printf '> iOS %s · Android %s\n' "$IOS_TOP_NOTE" "$AND_TOP_NOTE"
@@ -2219,12 +2427,18 @@ plat_hist_obj() { # $1=plat键 $2=版本列表 → {"<ver>":{…}}
   done
   printf '%s' "$acc"
 }
-HISTORY_LINE="$(jq -cn --arg day "$DAY" \
+# ⚠️ `window_mode` 标记本行的**性能字段**取自哪套窗口口径（change crash-data-completeness，design D8）：
+#   legacy       —— 旧口径。perf_day 取「该版本自己的最新可用单日」，⚠️ 那一天**可能是 7 小时的残日**
+#   complete_day —— 新口径。perf_day 恒为 LCD，两端都是完整天
+# ⛔ **不回填、不重算历史**：原始数据还在 BigQuery，但重跑多天 × 双端 × 多版本成本高，
+#    且旧报告已经发出去了，改历史会让报告与历史对不上。缺这个字段的旧行一律按 legacy 读。
+# ⚠️ 崩溃/放量字段口径未变，本标记只约束性能那几项——跨口径比较由渲染层标注（5.3）。
+HISTORY_LINE="$(jq -cn --arg day "$DAY" --arg wm "$HISTORY_WINDOW_MODE" \
   --argjson vers "$(jq -cn --argjson i "$(printf '%s' "$IOS_NEWEST" | jq -Rsc 'split("\n")|map(select(length>0))')" \
                            --argjson a "$(printf '%s' "$AND_NEWEST" | jq -Rsc 'split("\n")|map(select(length>0))')" '{ios:$i,android:$a}')" \
   --argjson io "$(plat_hist_obj ios "$IOS_NEWEST")" \
   --argjson ao "$(plat_hist_obj and "$AND_NEWEST")" \
-  '{day:$day, versions:$vers, ios:$io, android:$ao}')"
+  '{day:$day, window_mode:$wm, versions:$vers, ios:$io, android:$ao}')"
 {
   printf '%s' "$HIST_ARR" | jq -c --arg d "$DAY" '.[] | select(.day != $d)'
   printf '%s\n' "$HISTORY_LINE"

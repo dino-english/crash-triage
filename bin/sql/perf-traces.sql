@@ -9,7 +9,9 @@ FROM `{{TABLE}}`
 WHERE event_type = 'DURATION_TRACE'
   AND event_name NOT IN ('_app_in_foreground', '_app_in_background')
   AND app_display_version IN ({{VERSIONS}})
-  AND event_timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {{DAYS}} DAY)
+  -- 完整日闭区间（change crash-data-completeness）：⛔ 不再锚在跑批时刻——
+  -- 表每天只灌到 06:59 UTC，锚在跑批时刻会把最后那 7 小时（固定是东亚上午）掺进窗口。
+  AND DATE(event_timestamp) BETWEEN '{{LCD_START}}' AND '{{LCD_END}}'
 GROUP BY trace
 ORDER BY n DESC
 LIMIT 12

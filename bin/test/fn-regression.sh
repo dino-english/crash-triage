@@ -61,4 +61,77 @@ h_assert_contains "$(acls 'API Error: 429 rate limit' 1)" '额度耗尽'   '429 
 h_assert_contains "$(acls 'random failure' 7)"           '未识别'     '⛔ 无错误码时明说未识别'
 h_assert_contains "$(acls '' 9)"                          '未识别'     '⛔ 日志缺失时不谎称原因'
 
+
+echo "── 第 3 态细分（C 组：⛔ 0 不得被当成缺失）──"
+h_load "$ROOT/bin/crash-daily.sh" hist_lookup hist_perf_last_day perf_eta_of state_text_perf state_text
+PERF_HIST_KEYS='["start_p50_1d","start_p95_1d","slow_pct_1d","frozen_pct_1d","net_err_pct_1d"]'
+CELL_BREVITY=0
+IOS_PERF_TAIL=""; AND_PERF_TAIL=""; DAY="2026-08-27"
+. "$ROOT/bin/lib/core/format.sh"   # ⛔ 用真的 day_shift，夹具里造个假的等于没测
+
+# ① 全 null：这版从没产出过性能数据 → 不能说「本轮未取到」
+HIST_ARR='[{"day":"2026-08-25","ios":{"1.5.5":{"start_p50_1d":null,"start_p95_1d":null,"slow_pct_1d":null,"frozen_pct_1d":null,"net_err_pct_1d":null}}}]'
+h_assert_eq "" "$(h_run hist_perf_last_day ios 1.5.5)" '全 null → 无「最后有值日」'
+out="$(h_run state_text_perf no_version ios 1.5.5 '2026-08-26 06:59 UTC')"
+h_assert_absent "$out" '本轮未取到' '⛔ 从没有过数据的版本不得报成「本轮未取到」'
+
+# ② 历史有值、本轮 null → 必须报「本轮未取到」且**必须带日期**（design D7）
+HIST_ARR='[{"day":"2026-08-24","ios":{"1.5.4":{"start_p50_1d":"281.0","start_p95_1d":"1038.0","slow_pct_1d":null,"frozen_pct_1d":null,"net_err_pct_1d":null}}},
+           {"day":"2026-08-25","ios":{"1.5.4":{"start_p50_1d":null,"start_p95_1d":null,"slow_pct_1d":null,"frozen_pct_1d":null,"net_err_pct_1d":null}}}]'
+h_assert_eq "2026-08-24" "$(h_run hist_perf_last_day ios 1.5.4)" '取最后一个有值的日期，不是最后一条记录'
+out="$(h_run state_text_perf no_version ios 1.5.4 '2026-08-26 06:59 UTC')"
+h_assert_contains "$out" '本轮未取到' '历史有值 + 本轮无 → 判为取数故障'
+h_assert_contains "$out" '2026-08-24' '⚠️ 沿用/未取到文案必须带日期（不然连续多轮失败看不出僵住）'
+
+# ③ ⛔ 本轮取到 0：0 是慢帧/冻结/错误率的合法值，MUST NOT 被当成缺失
+HIST_ARR='[{"day":"2026-08-25","and":{"1.5.4":{"start_p50_1d":null,"start_p95_1d":null,"slow_pct_1d":null,"frozen_pct_1d":"0.0","net_err_pct_1d":null}}}]'
+h_assert_eq "2026-08-25" "$(h_run hist_perf_last_day and 1.5.4)" '⛔ 冻结率 0.0 是有值——真值性判断会把它读成 null'
+h_assert_eq "0" "$(h_run hist_lookup and 1.5.4 frozen_pct_1d | cut -f1 | cut -d. -f1)" '⛔ hist_lookup 取得回 0'
+HIST_ARR='[{"day":"2026-08-25","and":{"1.5.4":{"start_p50_1d":null,"start_p95_1d":null,"slow_pct_1d":null,"frozen_pct_1d":0,"net_err_pct_1d":null}}}]'
+h_assert_eq "2026-08-25" "$(h_run hist_perf_last_day and 1.5.4)" '⛔ 数字 0（非字符串）同样算有值'
+
+# ④ 预计到位日：只有残日里真有行才敢给日期
+HIST_ARR='[]'
+IOS_PERF_TAIL="1.5.5"
+out="$(h_run state_text_perf no_version ios 1.5.5 '2026-08-26 06:59 UTC')"
+h_assert_contains "$out" '2026-08-28' '残日已有行 → 明天 LCD 推进即到位'
+IOS_PERF_TAIL=""
+out="$(h_run state_text_perf no_version ios 1.5.5 '2026-08-26 06:59 UTC')"
+h_assert_contains "$out" '该版本无数据' '⛔ 残日也没有就回落既有第 3 态文案，不空口承诺'
+
+# ⑤ 前两态一字不动
+out="$(h_run state_text_perf stale ios 1.5.5 '2026-08-26 06:59 UTC')"
+h_assert_eq "⚠️ 数据未同步（截至 2026-08-26 06:59 UTC）" "$out" '⛔ 第 2 态文案原样委托给 state_text'
+out="$(h_run state_text_perf table_missing ios 1.5.5 '—')"
+h_assert_eq "表未同步" "$out" '⛔ 第 1 态文案原样委托'
+
+echo "── 口径断裂标记（D 组 5.1/5.3：⛔ 跨口径不得静默给数）──"
+h_load "$ROOT/bin/crash-daily.sh" hist_mode_perfday dodwow_note
+HIST_ARR='[{"day":"2026-08-18","ios":{"1.5.3":{"perf_day":"2026-08-18","start_p95_1d":"715.0"}}},
+           {"day":"2026-08-27","window_mode":"complete_day","ios":{"1.5.3":{"perf_day":"2026-08-25","start_p95_1d":"980.0"}}}]'
+h_assert_eq "legacy" "$(h_run hist_mode_perfday 2026-08-18 ios 1.5.3)" \
+  '⛔ 缺 window_mode 的旧行读作 legacy（默认成 complete_day 等于把残日值和完整天悄悄混比）'
+h_assert_eq "complete_day" "$(h_run hist_mode_perfday 2026-08-25 ios 1.5.3)" \
+  '有 window_mode 就按它读'
+h_assert_eq "" "$(h_run hist_mode_perfday 2026-08-01 ios 1.5.3)" \
+  '查不到该基准日 → 空（⛔ 没有基准不等于跨口径，不能乱标）'
+
+# dodwow_note 的跨口径分支。⚠️ 取值用**真的 dv_**读真夹具文件，不写同名 stub——
+# check-scripts 第 3 项会把夹具里的同名函数判成「共享函数没收口」，而且 stub 掉取值等于
+# 把「dv_ 读不到文件时返回什么」这一半也一起测没了。
+h_load "$ROOT/bin/crash-daily.sh" dv_
+TMP="$T"
+printf '%s\n' '{"perf_day":"2026-08-25","perf_prev_day":"2026-08-24","start_p95_1d":"980.0"}' > "$T/d-ios-1.5.3.json"
+PERF_D7=2026-08-18; WINDOW_SWITCH_DAY=2026-08-27
+out="$(h_run dodwow_note ios 1.5.3)"
+h_assert_contains "$out" '本行 WoW 跨口径' '基准是旧口径 → 必须标注'
+h_assert_contains "$out" '2026-08-27'      '标注里要说清口径何时切换的'
+PERF_D7=2026-08-25
+out="$(h_run dodwow_note ios 1.5.3)"
+h_assert_absent "$out" '跨口径' '⛔ 基准同为新口径时不得误标（切满 7 天后标注要自动消失）'
+PERF_D7=2026-08-01
+out="$(h_run dodwow_note ios 1.5.3)"
+h_assert_absent "$out" '跨口径' '⛔ 无基准时不标'
+
+
 h_summary

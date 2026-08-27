@@ -592,19 +592,52 @@ tbl_max() { [ -n "$1" ] || { echo ""; return 0; }
     | tail -n +2 | tail -1 || true; }
 PERF_OK=0
 IOS_PERF_STALE=""; AND_PERF_STALE=""; IOS_PERF_MAX=""; AND_PERF_MAX=""   # bq 不可用时也要有定义（set -u）
+PERF_UNTIL=""; PERF_LCD=""; PERF_WIN_START=""                          # 同上：完整日窗口三件套
+PERF_WINDOW_MODE=legacy   # 本轮性能窗口口径；⚠️ 只有真取到 LCD 才算 complete_day
+PERF_WOW_CROSS=0          # 本轮有没有出现「新口径 vs 旧口径」的 WoW（决定表下要不要出那句解释）
 IOS_PERF_TBL="$PROJECT.firebase_performance.com_prime_dino_english_IOS"
 AND_PERF_TBL="$PROJECT.firebase_performance.com_prime_dino_english_ANDROID"
 PERF_ROWS=""    # TSV：平台/版本/启动P50/启动P95/慢帧最差页/慢帧率/冻结率/接口错误率（列以制表符分隔）
 # 周环比基准（7.4）：按 (平台,版本) 存最近几轮的性能快照，供 WoW 对比；无基准则显式标明而非显示零变化。
 PERF_HISTORY="$STATE/perf-history.jsonl"
+PERF_MISSING=""   # TSV「平台 版本 kind 日期」：kind=stale_fetch(本轮未取到) / never(尚无数据)
+# 第 3 态细分（change crash-data-completeness C 组，与 L1 同一判据）。
+# ⛔ 数据源是 **perf-history.jsonl**（性能侧 p50/p95），⚠️ tasks 3.6 原文写的
+#    `weekly-metrics.jsonl` 是**崩溃侧**周度基准（crash/cfree/anr/nf），里面没有任何性能字段。
+# ⛔ 也不可混用 L1 的 metrics-history.jsonl——那是天级口径（见本文件 4b 段既有注释）。
+# ⛔ 判据必须显式判 `!= null`，MUST NOT 用真值性判断（0 是合法值，见 L1 同名约束）。
+perf_hist_last_day() { # $1=平台名(iOS/Android) $2=版本 → 最后一次有值的日期，无则空
+  [ -s "$PERF_HISTORY" ] || { echo ""; return 0; }
+  jq -rs --arg p "$1" --arg v "$2" \
+    '[.[] | select(.platform==$p and .version==$v and ((.p50 != null) or (.p95 != null))) | .day] | last // ""' \
+    "$PERF_HISTORY" 2>/dev/null || true
+}
 PERF_HISTORY_KEEP="${CRASH_REPORT_PERF_HISTORY_KEEP:-12}"   # 12 周，约一季度
 if [ "$ADOPT_OK" = "1" ]; then
   step "性能段（bq，窗口 ${WEEK_DAYS}d）"
   perf_row() { # $1=平台标签 $2=perf表 $3=版本 → 一行 TSV（失败字段留空，由调用方判定缺数原因）
-    local pname="$1" tbl="$2" ver="$3" traces screens net p50 p95 wscreen wslow frozen neterr
-    traces="$(bqq csv "$(q_render perf-traces.sql TABLE="$tbl" DAYS="$WEEK_DAYS" VERSIONS="\"$ver\"")" | tail -n +2 || true)"
-    screens="$(bqq csv "$(q_render perf-screens.sql TABLE="$tbl" DAYS="$WEEK_DAYS" VERSIONS="\"$ver\"")" | tail -n +2 || true)"
-    net="$(bqq csv "$(q_render perf-network.sql TABLE="$tbl" DAYS="$WEEK_DAYS" VERSIONS="\"$ver\"")" | tail -n +2 || true)"
+    local pname="$1" tbl="$2" ver="$3" traces screens net p50 p95 wscreen wslow frozen neterr _lastd
+    # 完整日闭区间 [LCD−(WEEK_DAYS−1), LCD]；窗口两端由调用方算好，⛔ 共享层不设默认值（bin/lib/query.sh）。
+    # 无 LCD（性能表连 MAX 都取不到）时不发查询：空日期喂给 BETWEEN 会让 BigQuery 报类型错，
+    # 徒增一条失败查询与一段 stderr，而结果与直接留空完全一样。
+    if [ -z "$PERF_LCD" ]; then
+      # 整行皆空 = 该版本本轮没有任何性能数据 → 分两种情况登记，供表下注解区分
+    # 「正常滞后，明天就有」与「取数故障，要查」（design D5 第 3 态细分）。
+    if [ -z "${p50}${p95}${wscreen}${frozen}${neterr}" ]; then
+      _lastd="$(perf_hist_last_day "$pname" "$ver")"
+      if [ -n "$_lastd" ]; then PERF_MISSING="${PERF_MISSING}${pname}	${ver}	stale_fetch	${_lastd}
+"
+      else PERF_MISSING="${PERF_MISSING}${pname}	${ver}	never	
+"
+      fi
+    fi
+    PERF_ROWS="${PERF_ROWS}${pname}	${ver}	—	—	—	—	—	—	—（无基准）
+"
+      return 0
+    fi
+    traces="$(bqq csv "$(q_render perf-traces.sql TABLE="$tbl" LCD_START="$PERF_WIN_START" LCD_END="$PERF_LCD" VERSIONS="\"$ver\"")" | tail -n +2 || true)"
+    screens="$(bqq csv "$(q_render perf-screens.sql TABLE="$tbl" LCD_START="$PERF_WIN_START" LCD_END="$PERF_LCD" VERSIONS="\"$ver\"")" | tail -n +2 || true)"
+    net="$(bqq csv "$(q_render perf-network.sql TABLE="$tbl" LCD_START="$PERF_WIN_START" LCD_END="$PERF_LCD" VERSIONS="\"$ver\"")" | tail -n +2 || true)"
     # `|| true`：性能表停更时 traces 为空，grep 无匹配返回 1，pipefail 让赋值整体失败，
     # set -e 直接杀掉整跑（同源问题在 L1 是误报告警，见 crash-daily.sh collect_window）。
     p50="$(printf '%s\n' "$traces" | grep '^_app_start,' | cut -d, -f3 | head -1 || true)"
@@ -621,13 +654,16 @@ if [ "$ADOPT_OK" = "1" ]; then
     # last 会取到同一天早些时候的跑批（同日重跑各追加一条），实测 2026-08-24 三次跑批后
     # iOS 1.5.3 报「WoW 持平」，而真上周（08-22 578ms → 701ms）应是 +123ms（analyst G9）。
     # 基准日直接写进文案（vs 08-17），读者自己能看出比的是哪天——比隐式假设「上周」诚实。
-    local prev_rec prev_p95="" prev_day="" wow="" wow_cell="—（无基准）"
+    local prev_rec prev_p95="" prev_day="" prev_mode="" wow="" wow_cell="—（无基准）"
     if [ -s "$PERF_HISTORY" ]; then
       prev_rec="$(jq -cs --arg p "$pname" --arg v "$ver" --arg c "$WOW_CUT" \
         '[.[] | select(.platform==$p and .version==$v and .day <= $c)] | last // empty' "$PERF_HISTORY" 2>/dev/null || true)"
       if [ -n "$prev_rec" ]; then
         prev_p95="$(printf '%s' "$prev_rec" | jq -r '.p95 // empty' 2>/dev/null || true)"
         prev_day="$(printf '%s' "$prev_rec" | jq -r '.day // empty' 2>/dev/null || true)"
+        # ⛔ 基准是旧口径就必须说出来，不能静默给数（design D8）：旧口径的 7 天窗首尾两天残缺，
+        #    与完整日窗比出来的差值里混着「窗口形状变了」这一项，读者会当成真实变化。
+        prev_mode="$(printf '%s' "$prev_rec" | jq -r '.window_mode // "legacy"' 2>/dev/null || true)"
       fi
     fi
     if [ -n "${prev_p95:-}" ] && [ -n "$p95" ]; then
@@ -636,6 +672,10 @@ if [ "$ADOPT_OK" = "1" ]; then
         if [ "$delta" -gt 0 ] 2>/dev/null; then wow="（WoW P95 +${delta}ms↑ 变差 vs ${prev_day}）"; wow_cell="+${delta}ms↑（vs ${prev_day}）"
         elif [ "$delta" -lt 0 ] 2>/dev/null; then wow="（WoW P95 ${delta}ms↓ 变好 vs ${prev_day}）"; wow_cell="${delta}ms↓（vs ${prev_day}）"
         else wow="（WoW P95 持平 vs ${prev_day}）"; wow_cell="持平（vs ${prev_day}）"; fi
+        # 跨口径就在格子里挂个记号，完整解释放表下说一次——⛔ 每格重复一整句会把列宽撑爆
+        if [ -n "$prev_mode" ] && [ "$prev_mode" != complete_day ]; then
+          wow_cell="${wow_cell} ⚠️跨口径"; wow="${wow}⚠️ 基准为旧窗口口径"; PERF_WOW_CROSS=1
+        fi
       fi
     else
       wow="（无近周基准，本轮建立）"
@@ -653,8 +693,13 @@ if [ "$ADOPT_OK" = "1" ]; then
           'select((.platform==$p and .version==$v and .day==$d) | not)' "$PERF_HISTORY" > "$_ph" 2>/dev/null \
           && mv "$_ph" "$PERF_HISTORY" || rm -f "$_ph"
       fi
+      # ⚠️ window_mode 标记这条记录取自哪套窗口（change crash-data-completeness，design D8）：
+      #   legacy       —— 锚在跑批时刻的 7 天滚动窗，首尾两天都残缺
+      #   complete_day —— 完整日闭区间 [LCD-6, LCD]
+      # ⛔ 不回填不重算旧行；缺该字段的旧行一律读作 legacy。
       jq -nc --arg p "$pname" --arg v "$ver" --arg d "$DAY" --arg p50 "${p50:-}" --arg p95 "${p95:-}" \
-        '{platform:$p, version:$v, day:$d, p50:($p50|tonumber? // null), p95:($p95|tonumber? // null)}' >> "$PERF_HISTORY"
+        --arg wm "$PERF_WINDOW_MODE" \
+        '{platform:$p, version:$v, day:$d, window_mode:$wm, p50:($p50|tonumber? // null), p95:($p95|tonumber? // null)}' >> "$PERF_HISTORY"
     fi
   }
   PERF_OK=1
@@ -663,6 +708,15 @@ if [ "$ADOPT_OK" = "1" ]; then
   AND_PERF_STALE="$(stale_days "$RUN_EPOCH" "$AND_PERF_MAX" "$WEEK_DAYS")"
   [ -n "$IOS_PERF_STALE" ] && echo "  ⚠️ iOS 性能表已停更 ${IOS_PERF_STALE} 天（截至 ${IOS_PERF_MAX}）"
   [ -n "$AND_PERF_STALE" ] && echo "  ⚠️ Android 性能表已停更 ${AND_PERF_STALE} 天（截至 ${AND_PERF_MAX}）"
+  # 完整日窗口（change crash-data-completeness，与 L1 同一判据、同一实现）：
+  # ⚠️ LCD 必须由**性能表**的 MAX 算出——下方「取数区间」的 DATA_UNTIL 取的是 sessions 活表，
+  #    那是实时源、恒为「刚才」，拿它算 LCD 会得到今天，把整个残日全掺进来。⛔ 两者不可混用。
+  PERF_UNTIL="$(printf '%s\n%s\n' "$IOS_PERF_MAX" "$AND_PERF_MAX" | grep -v '^$' | sort -r | head -1 || true)"
+  PERF_LCD="$(last_complete_day "$PERF_UNTIL")"
+  PERF_WIN_START="$(day_shift "$PERF_LCD" "-$((WEEK_DAYS - 1))")"
+  if [ -n "$PERF_LCD" ]; then PERF_WINDOW_MODE=complete_day; fi
+  if [ -n "$PERF_LCD" ]; then echo "  性能完整日窗口：$PERF_WIN_START ~ $PERF_LCD"
+  else echo "  ⚠️ 性能表无最新时间戳，完整日窗口无法确定——性能段各列留空走既有缺数渲染"; fi
   while IFS= read -r v; do [ -n "$v" ] && perf_row "iOS" "$IOS_PERF_TBL" "$v"; done <<< "$IOS_TOP2_VERS"
   while IFS= read -r v; do [ -n "$v" ] && perf_row "Android" "$AND_PERF_TBL" "$v"; done <<< "$AND_TOP2_VERS"
   # 保留最近 N 条同 (platform,version) 记录：避免无限增长
@@ -957,10 +1011,28 @@ perf_md() {
   fi
   [ -n "$IOS_PERF_STALE" ] && printf '> ⚠️ **iOS 性能表已停更 %s 天**（截至 %s）——窗口内 0 行，下表 iOS 各列为空是数据源断更，不是「本周无异常」。\n\n' "$IOS_PERF_STALE" "$IOS_PERF_MAX"
   [ -n "$AND_PERF_STALE" ] && printf '> ⚠️ **Android 性能表已停更 %s 天**（截至 %s）——窗口内 0 行，下表 Android 各列为空是数据源断更，不是「本周无异常」。\n\n' "$AND_PERF_STALE" "$AND_PERF_MAX"
+  # 完整日窗口标注（design D2）：窗口 + 滞后 + 上游进度三者都给。⛔ 与上方「取数区间 7d」不是一回事——
+  # 那一行是崩溃/放量段的口径（锚在跑批时刻的 sessions 活表），性能段是完整日闭区间，两套口径不可混读。
+  [ -n "$PERF_LCD" ] && printf '> 性能窗口：**%s**\n\n' "$(win_days "$PERF_WIN_START" "$PERF_LCD" "$RUN_EPOCH" "$PERF_UNTIL")"
   [ -n "$PERF_ROWS" ] || { printf '（本次未取到性能数据）\n'; return 0; }
   printf '| 平台 | 版本 | 启动 P50 | 启动 P95 | P95 WoW | 慢帧最差页 | 慢帧率 | 冻结率 | 接口错误率 |\n|---|---|---|---|---|---|---|---|---|\n'
   printf '%s' "$PERF_ROWS" | awk -F'\t' 'NF>=9{printf "| %s | %s | %sms | %sms | %s | %s | %s%% | %s%% | %s%% |\n",$1,$2,$3,$4,$9,$5,$6,$7,$8}'
   printf '%s\n' '> WoW 基准 = 同 (平台,版本) 至少 4 天前的最近一轮（基准日已标注）；「—（无基准）」= 尚无足够早的记录，⛔ 不是持平。'
+  if [ "$PERF_WOW_CROSS" = 1 ]; then
+    printf '%s\n' '> ⚠️ **标「跨口径」的 WoW 不可当作真实变化**：本轮性能窗口已切换为完整日闭区间，而基准那一轮取的是锚在跑批时刻的滚动窗（首尾两天残缺）。差值里混着「窗口形状变了」这一项。⛔ 历史不回填不重算，切满一轮后此标注自动消失。'
+  fi
+  # 第 3 态细分（C 组）：整行为空的版本在这里说清是哪一种，⛔ 不在 6 个格子里各重复一遍。
+  # ⚠️ 只给日期不给数值——性能表里的滚动窗口值与 perf-history 存的单轮值口径不同，搬过来会误导。
+  if [ -n "$PERF_MISSING" ]; then
+    printf '%s' "$PERF_MISSING" | while IFS=$'\t' read -r _mp _mv _mk _md; do
+      [ -n "$_mp" ] || continue
+      if [ "$_mk" = stale_fetch ]; then
+        printf '> ⚠️ **%s %s 本轮未取到性能数据**（上次有值 %s）——历史有值说明这版产出过数据，属取数故障或导出退化，⛔ 不是「这版没问题」。\n' "$_mp" "$_mv" "$_md"
+      else
+        printf '> — %s %s 尚无性能数据：该版本从未在性能表出现过，属批量表滞后的正常表现。\n' "$_mp" "$_mv"
+      fi
+    done
+  fi
 }
 
 MSG="$(cat <<MSG_END

@@ -38,6 +38,14 @@ h_load() { # $1=脚本 $2..=函数名…
     if [ -z "$src" ]; then
       echo "❌ 夹具：在 $f 里找不到函数 $fn" >&2; H_FAIL=$((H_FAIL+1)); return 1
     fi
+    # ⛔ 抽多了必须当场失败：h_extract 靠「列 0 的 `}`」定位结尾，被抽的函数若以 `; }` 收尾，
+    #    它会一路吞掉后面的顶层代码并连同 eval（实测吞进 `HISTORY="$STATE/…"`，报的是
+    #    `STATE: unbound variable`——错误信息与真正的原因毫无关系）。
+    #    判据：函数体里不该出现**列 0 的顶层赋值**。碰巧无害时静默通过才是最坏的结果。
+    if printf '%s\n' "$src" | grep -qE '^[A-Za-z_][A-Za-z0-9_]*='; then
+      echo "❌ 夹具：抽取 $fn 时越过了函数结尾（$f 里它没有以列 0 的 } 收尾）" >&2
+      H_FAIL=$((H_FAIL+1)); return 1
+    fi
     eval "$src" || { echo "❌ 夹具：$fn 无法加载" >&2; H_FAIL=$((H_FAIL+1)); return 1; }
   done
 }
@@ -88,6 +96,13 @@ h_assert_contains() { # $1=实际 $2=期望子串 $3=说明
     (*"$2"*) H_PASS=$((H_PASS+1)); echo "  ✅ $3";;
     (*) H_FAIL=$((H_FAIL+1)); echo "  ❌ $3：输出里没有 [$2]"; printf '%s\n' "$1" | head -3 | sed 's/^/     /';;
   esac
+}
+
+h_assert_eq() { # $1=期望 $2=实际 $3=说明
+  # ⚠️ 与 h_assert_contains 的分工：凡是「文案一字未动」「必须正好是这个值」的断言必须用这个，
+  #    contains 会让「多打了一句话」「少了日期」这类回归悄悄通过。
+  if [ "$1" = "$2" ]; then H_PASS=$((H_PASS+1)); echo "  ✅ $3"
+  else H_FAIL=$((H_FAIL+1)); echo "  ❌ $3"; echo "     期望 [$1]"; echo "     实际 [$2]"; fi
 }
 
 h_assert_absent() { # $1=实际 $2=不该出现的子串 $3=说明
