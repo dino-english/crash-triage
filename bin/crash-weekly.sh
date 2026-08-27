@@ -383,7 +383,12 @@ FILLPY
     fi
     # 去掉增量尾部空行：每轮追加都会带一行，累积下来时间线里全是空行
     printf '%s\n' "$(cat "$LEDGER_TL_DEDUP")" > "$LEDGER_TL_DEDUP".t && mv "$LEDGER_TL_DEDUP".t "$LEDGER_TL_DEDUP"
-    if [ -s "$LEDGER_TL_DEDUP" ]; then
+    # ⛔ 判据必须是「有没有内容」不是 `[ -s ]`（有没有字节）：上一行的 `printf '%s\n'` 在内容为空时
+    #    **仍然写出一个换行**，文件 1 字节 → `[ -s ]` 判非空 → 把那个空行追进台账，而下面那句
+    #    「跳过追加（幂等）」永远走不到。2026-08-27 连跑两轮实测：条目数 23 → 23 没增长，
+    #    但空行 6 → 7——⚠️ 幂等看起来成立，实际每一轮「无新增条目」的跑批都在往时间线里塞空行。
+    #    `$(cat …)` 会剥掉全部尾随换行，故内容只剩空白时这里判空，正是想要的语义。
+    if [ -n "$(cat "$LEDGER_TL_DEDUP")" ]; then
       LEDGER_TMP2="$(mktemp)"
       awk -v tlf="$LEDGER_TL_DEDUP" '
         /<!-- LEDGER:TIMELINE:END -->/ { while ((getline line < tlf) > 0) print line }
