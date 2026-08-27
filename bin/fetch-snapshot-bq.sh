@@ -55,6 +55,12 @@ SNAP="$OUT_DIR/snapshot.json"
 . "$ROOT/bin/lib.sh" || { echo "❌ 外壳层缺失：bin/lib.sh" >&2; exit 1; }
 # shellcheck disable=SC1091
 . "$ROOT/bin/lib/bq.sh" || { echo "❌ 外壳层缺失：bin/lib/bq.sh" >&2; exit 1; }
+# SQL 占位符替换唯一入口。⚠️ 本脚本原先自己写 sed 替换链，与 L1 共用同两份 SQL——
+# 给那两份 SQL 加新占位符时只改一边，这里就会把 `{{NEW}}` 原样喂给 BigQuery：语法错 →
+# bq_json 按设计返回 `[]` → **台账 NON_FATAL 现状表悄悄清空**。⛔ 不响的那种失败最难发现，
+# 故收口到 q_render（漏传当场失败并指名文件与占位符，change crash-lib-consolidation 3.5）。
+# shellcheck disable=SC1091
+. "$ROOT/bin/lib/query.sh" || { echo "❌ 外壳层缺失：bin/lib/query.sh" >&2; exit 1; }
 # 沿用原有 stderr 汇集位置（随 runs/ 留存作跑批物证）。⚠️ 这行预设同时是承重墙：
 # bq_init 的默认分支引用 ${TS}，而本脚本不定义 TS——删掉这行会死于 unbound variable。
 BQ_ERRLOG="$OUT_DIR/bq-stderr.log"
@@ -77,8 +83,7 @@ bq_json() { # $1=SQL文本 → JSON 数组（失败返回空数组，由调用�
 
 platform_rows() { # $1=平台键(ios/android) $2=crashlytics表 → JSON 数组
   local sql
-  sql="$(sed -e "s|{{TABLE}}|$2|g" -e "s|{{DAYS}}|$DAYS|g" -e "s|{{LIMIT}}|$LIMIT|g" \
-           "$SQL_DIR/crash-issues-all.sql")"
+  sql="$(q_render crash-issues-all.sql TABLE="$2" DAYS="$DAYS" LIMIT="$LIMIT")" || return 0
   bq_json "$sql"
 }
 
@@ -88,11 +93,11 @@ platform_rows() { # $1=平台键(ios/android) $2=crashlytics表 → JSON 数组
 NF_LIMIT="${CRASH_REPORT_LEDGER_NF_LIMIT:-10}"
 nonfatal_rows() { # $1=平台键 $2=crashlytics表 → JSON 数组
   local sql
-  sql="$(sed -e "s|{{TABLE}}|$2|g" -e "s|{{DAYS}}|$DAYS|g" -e "s|{{LIMIT}}|$NF_LIMIT|g" \
-           -e 's|{{VERSIONS}}|{{ALLVER}}|g' "$SQL_DIR/crash-nonfatal-issues.sql")"
   # 台账跨版本追踪，与 crash-issues-all.sql 同理**刻意不加版本过滤**——
   # 加了会让「上一版修好、这版没复发」的 issue 从现状表凭空消失、时间线断档。
-  sql="$(printf '%s' "$sql" | sed -e '/AND application.display_version IN ({{ALLVER}})/d')"
+  # ⚠️ 现在把「不过滤」表达成**传空谓词**，而不是先换哨兵再 sed 删整行：
+  #    删行一旦因空白字符不匹配而静默失败，查询就变成 `version IN ('')` → 0 行 → 台账清空。
+  sql="$(q_render crash-nonfatal-issues.sql TABLE="$2" DAYS="$DAYS" LIMIT="$NF_LIMIT" VER_FILTER="")" || return 0
   bq_json "$sql"
 }
 

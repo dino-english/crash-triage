@@ -263,8 +263,11 @@ q() { # $1=sql文件 $2=表名 $3=起日 $4=止日 $5=版本 → CSV（无表头
 qc() { # $1=sql文件 $2=crashlytics表 $3=sessions表 $4=窗口天数 $5=版本 → JSON
   # 崩溃查询用 --format=json + jq 渲染：issue 标题是自由文本可能含逗号，CSV+awk 会错列。
   local _t0=$SECONDS _rc=0 _out
+  # ⚠️ VER_FILTER 是**整条谓词**（crash-nonfatal-issues.sql 用它）：日报按版本分列故传完整过滤；
+  #    台账跨版本追踪传空串。⛔ 多传占位符不是异常——qc 是通用包装，某份 SQL 用不到几个是设计如此。
   _out="$(bqq json "$(q_render "$1" TABLE="$2" SESSIONS_TABLE="$3" DAYS="$4" \
-                  VERSIONS="$(vlist "$5")" LIMIT="${ISSUE_LIMIT:-20}" FG_NORM="${SQL_FG_NORM}")")" || _rc=$?
+                  VERSIONS="$(vlist "$5")" VER_FILTER="AND application.display_version IN ($(vlist "$5"))" \
+                  LIMIT="${ISSUE_LIMIT:-20}" FG_NORM="${SQL_FG_NORM}")")" || _rc=$?
   audit query qc "$(jq -cn --arg sql "$1" --arg tbl "$2" --arg days "$4" --arg ver "$5" \
     --argjson rows "$(printf '%s' "$_out" | jq 'length' 2>/dev/null || echo -1)" --argjson secs "$((SECONDS - _t0))" --argjson rc "$_rc" \
     '{fn:"qc",sql:$sql,table:$tbl,days:$days,version:$ver,rows:$rows,secs:$secs,rc:$rc}')"

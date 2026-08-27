@@ -26,7 +26,14 @@ SELECT
   FORMAT_TIMESTAMP('%Y-%m-%d %H:%M UTC', MAX(event_timestamp))         AS latest
 FROM `{{TABLE}}`
 WHERE error_type = 'NON_FATAL'
-  AND application.display_version IN ({{VERSIONS}})
+  -- ⚠️ 下一行的占位符收的是**整条谓词**，不是只替换值：
+  --   · 日报按版本分列 → 传 `AND application.display_version IN ("1.5.4")`
+  --   · 台账跨版本追踪 → 传**空串**，⛔ 加了过滤会让「上一版修好、这版没复发」的 issue
+  --     从现状表凭空消失、时间线断档。
+  -- ⛔ 原来是「值占位符 + 台账侧用 sed 把整行删掉」——那种写法把「故意不过滤」藏在一条
+  --    sed 表达式里，且绕过了 q_render 的漏传检查（change crash-lib-consolidation 3.5）。
+  -- ⚠️ 注释里**不要写占位符字面量**：q_render 是全文字面替换，会把注释里那处也换掉。
+  {{VER_FILTER}}
   AND event_timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {{DAYS}} DAY)
 GROUP BY issue_id
   -- 并列时补确定性 tie-breaker，否则两次跑批行序会互换（见 crash-issues.sql 同处注释）
