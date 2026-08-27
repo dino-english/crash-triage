@@ -128,9 +128,26 @@
 > 侥幸取中完整日；**挪到 08:30(=00:30 UTC) 残日已落地，单独挪 cron 会直接制造假信号**。
 > 故本组必须与第 1~3 组同一次部署，留到 deploy 时执行。
 
-- [ ] 4.1 hermes cronjob 07:00 → 08:30（+08）。⚠️ **不在本仓库**，改动位置与回退方式记进 `docs/CLAUDE-部署与运维.md`
-- [ ] 4.2 与第 1 组同批切换，不拆两次发布（design D9）
-- [ ] 4.3 切换后首轮核对 `health-daily.json` 的 `data_until` 应前进一天
+- [x] 4.1 2026-08-27 已改。生产机 Mac mini：`hermes cron edit 72f0850e6688 --schedule "30 8 * * *"`
+  （`0 7 * * *` → `30 8 * * *`，next run 2026-08-28T08:30:00+08:00）。
+  **回退**：`hermes cron edit 72f0850e6688 --schedule "0 7 * * *"`。
+  ⚠️ job id：crash-daily = `72f0850e6688`，crash-weekly = `6d834f1f6da5`（`30 5 * * 1`，未改）。
+  改后两条链路间隔 3 小时，满足「L2 与 L1 至少间隔 60 分钟」的既有约束。
+  ⚠️ 非交互 ssh 里 `hermes cron list` 要先 `. ~/.local/state/crash-triage/path.env; export PATH`，
+  否则 `update.sh` 会报「无 hermes cron 任务」——那是文档里记着的假故障
+- [x] 4.2 同批：代码 `68afc40` 合入 main 并部署到生产（HEAD 核对一致、check-scripts 全绿）后，紧接着改 cron。
+
+  ⚠️ **第 1 组的验证澄清了 D9 没说清的一点**——两者并非对称，顺序只能是「先代码后 cron」：
+
+  | 组合 | 结果 |
+  |---|---|
+  | 新代码 + 旧 cron 07:00 | ✅ 安全。数据比目标态旧一天，但无假信号 |
+  | 旧代码 + 新 cron 08:30 | ⛔ 危险。残日已落地，`MAX(DATE(...))` 取中 7 小时残日，DoD 直接出假改善 |
+  | 新代码 + 新 cron | ✅ 目标态 |
+- [ ] 4.3 ⏸ 待 2026-08-28 08:30 首轮跑批后核对。
+  ⚠️ 判据：`health-daily.json` 的 `data_until` 应从 `2026-08-26 06:59 UTC` 前进到 `2026-08-27 06:59 UTC`
+  （08:30 = 00:30 UTC，此时前一日分区已于约 23:54 UTC 落地）。
+  连同 7.4 一起走 `/morning-verify`。
 
 ## 5. 口径断裂标记（design D8）
 

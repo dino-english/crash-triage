@@ -25,10 +25,21 @@ STATE="${CRASH_REPORT_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/crash-tri
 
 **实际调度器是 Hermes cron**（`~/.hermes/cron/jobs.json`），两个 job 都是 `no_agent=true` + `script`：
 
-| job | 调度 | 包装脚本 |
-|---|---|---|
-| `crash-daily` | `0 7 * * *` | `~/.hermes/scripts/crash-daily.sh` |
-| `crash-weekly` | `30 5 * * 1` | `~/.hermes/scripts/crash-weekly.sh` |
+| job | job id | 调度 | 包装脚本 |
+|---|---|---|---|
+| `crash-daily` | `72f0850e6688` | `30 8 * * *` | `~/.hermes/scripts/crash-daily.sh` |
+| `crash-weekly` | `6d834f1f6da5` | `30 5 * * 1` | `~/.hermes/scripts/crash-weekly.sh` |
+
+**改调度**：`hermes cron edit <job id> --schedule "<cron 表达式>"`（改完 `hermes cron list` 核对 `Next run`）。
+⚠️ 非交互 ssh 里必须先 `. ~/.local/state/crash-triage/path.env; export PATH`，否则 `hermes` 不在 PATH，
+`update.sh` 会报「无 hermes cron 任务」——那是假故障，不是真的没注册。
+
+⚠️ **L1 由 `0 7 * * *` 改为 `30 8 * * *`**（2026-08-27，change `crash-data-completeness` 第 4 组）。
+回退：`hermes cron edit 72f0850e6688 --schedule "0 7 * * *"`。
+理由：perf 分区约 23:54 UTC 落地，而 07:00(+08) = 23:00 UTC **系统性地早 54 分钟**，白白多背一天滞后。
+⛔ **这个改动必须在新代码之后**，顺序反了会出假信号：旧代码用 `MAX(DATE(event_timestamp))` 取「最新可用单日」，
+23:00 UTC 跑时残日还没落地、侥幸取中完整日；挪到 00:30 UTC 残日已落地，就会拿 7 小时切片去比完整天
+（实测 iOS 1.5.4：残日 29 样本 P95 548ms vs 完整日 192 样本 1044ms，渲染成「−496ms ↓」的假改善，F33）。
 
 包装脚本由 `bin/install.sh` 生成（写死 `ROOT` / `STATE` / `CHAT_ID` / `LARK_PROFILE` 后 exec 主脚本），**勿手改**——改配置重跑 `install.sh` / `update.sh`。`stdout` 重定向到 `/dev/null`：`--no-agent` 会把 stdout 原样投递，而卡片由脚本自己用 lark-cli 发。
 
