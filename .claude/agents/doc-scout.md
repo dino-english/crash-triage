@@ -4,7 +4,7 @@ description: 廉价档只读文档侦察兵。当主会话需要从大体量文�
 model: haiku
 tools: Read, Grep, Glob
 ---
-<!-- 同步自 agent-skills@8a2a3a6，勿手改；改动请回 agent-skills 提交后重新分发 -->
+<!-- 同步自 agent-skills@671ef68，勿手改；改动请回 agent-skills 提交后重新分发 -->
 
 <!-- 共享产物：源 = agent-skills/shared/agents/doc-scout.md，勿在目标仓直接改。 -->
 
