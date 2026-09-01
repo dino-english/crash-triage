@@ -1296,7 +1296,6 @@ REPORT="$STATE/reports/$DAY-weekly.md"
   printf '# 崩溃周报 · %s %s\n\n' "$DAY" "$WEEK_TAG"
   printf '> 取数区间 %sd：**%s**\n' "$WEEK_DAYS" "$WIN_FULL"
   printf '> 窗口起点 = 本次跑批时刻 − %s 天（SQL 下界）；终点 = sessions 活表实际取到的最新数据。\n' "$WEEK_DAYS"
-  printf '> 本次运行 %s · 审计 $STATE/audit/weekly-%s.events.jsonl\n\n' "$RUN_ID" "$RUN_ID"
   printf '## 一、本周变化\n\n%s\n\n' "$CHANGES_MD_DOC"
   [ -n "$RECUR_MD" ] && printf '%s\n\n' "$RECUR_MD"
   [ -n "$RECUR_MD" ] && printf '> ⚠️ 「回归」指该 issue 在**上一轮基准日**（取基准里 `last` 的最大值，**不是「上周」**）无记录、本轮重新出现。判定窗口是崩溃段的滚动窗口——「消失」是**窗口内无事件**，⛔ 不等于「已修复」。⛔ 只给分数不给百分比：基准规模小（实测 14 项），百分比是伪精度。\n\n'
@@ -1319,7 +1318,9 @@ REPORT="$STATE/reports/$DAY-weekly.md"
   printf '\n## 四、TOP %s 事件下钻（近 %s 天，主力版本）\n\n' "$DD_TOP_N" "$WEEK_DAYS"
   printf '%s\n' '> ⛔ 各维度占比的分母是**该 issue 自己的事件数**，**不是该维度的崩溃率**——页面 / 前后台 / 内存档都没有会话分母（`firebase_sessions` 表无对应字段）。占比高只说明「这个 issue 集中在这里」，⛔ 不说明「这里更容易崩」。'
   printf '%s\n' '> ⚠️ **两端口径不同不可并读**：Android = FATAL + ANR（实测按受影响安装排第一的是个 ANR，纯致命榜会让它消失）；iOS = NON_FATAL（近 60 天仅 5 次致命崩溃）。'
-  printf '%s\n' '> ⚠️ 责任帧 `owner` 标识的是崩溃栈中**责任帧的归属**，**不是谁触发了崩溃**——`SYSTEM` 不等于非自家问题。⚠️ 本段结论**未经人工复核**。'
+  # 去重（change crash-report-readability）：owner 的完整读法在三段「归因」注解里已经写过一遍，
+  # 此处只留交叉引用 + 本段特有的「未经人工复核」。⛔ 不是删掉，是不在同一份文档里说两遍。
+  printf '%s\n' '> ⚠️ 责任帧 `owner` 的读法同三段「归因」注解（**不是谁触发了崩溃**）。⚠️ 本段结论**未经人工复核**。'
   printf '%s\n\n' '> ⛔ 机型**不给 top 值当结论**：实测 per-issue 的唯一机型数≈影响安装数（一设备一机型），此时「top 机型」只是随机一台设备。只在真正集中时才点名，样本仅 1 台时明说判不了。'
   dd_block "$DD_AND_CSV" "Android" "FATAL + ANR" "${DD_AND_OK:-1}"
   dd_block "$DD_IOS_CSV" "iOS" "NON_FATAL" "${DD_IOS_OK:-1}"
@@ -1337,6 +1338,10 @@ REPORT="$STATE/reports/$DAY-weekly.md"
   # D2（analyst）：NOTE_MD 里的分析层说明与下方「分析层：…」段重复——文档侧剥掉那一行，
   # ⛔ 不能改 NOTE_MD 本身（卡片与它逐字节共用，卡片读者看不到下面那段）。
   printf '## 六、口径\n\n%s\n' "$(printf '%s\n' "$NOTE_MD" | grep -v '本周无深度分析' | grep -v '根因与修复方案见完整报告' || true)"
+  # 排障信息下沉（change crash-report-readability）：run_id 与审计路径不是判读须知，
+  # 读者不需要、排障才需要——原先摆在文档开头与取数区间并列，权重被读成同一级。
+  # ⚠️ 只加在文档侧：NOTE_MD 被卡片与群消息逐字节共用，改它本身会把审计路径塞进卡片（F37）。
+  printf '\n> 本次运行 %s · 审计 $STATE/audit/weekly-%s.events.jsonl（排障用，非判读须知）\n' "$RUN_ID" "$RUN_ID"
   # 数据/分析分层的可见化：读者必须能一眼看出「本周没有根因分析」是模型不可用，
   # 而不是「本周没问题」。缺分析和无异常是两件完全不同的事。
   if [ "$ANALYSIS_OK" = "1" ]; then
