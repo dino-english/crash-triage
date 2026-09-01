@@ -39,7 +39,7 @@ h_load "$ROOT/bin/crash-weekly.sh" _chg_rows
 out="$(h_run _chg_rows ios new "🆕 新增" 1 0)"
 h_assert_contains "$out" '`aaaa0000`' "卡片版：反引号包裹的 8 位 id"
 h_assert_eq "" "$(printf '%s' "$out" | grep -o '（.*）' || true)" "单版本 issue **无**版本括注"
-h_assert_eq "" "$(printf '%s' "$out" | grep -o 'console.firebase' || true)" "卡片版无链接"
+h_assert_eq "" "$(printf '%s' "$out" | grep -o 'console.firebase' || true)" "want_link=0 → 无链接（表格单元格路径用；⚠️ 卡片的 markdown 块自 crash-card-issue-links 起改用 want_link=1）"
 
 out="$(h_run _chg_rows ios spiked "📈 暴涨" 1 0)"
 h_assert_contains "$out" "（1.5.4 12 · 1.5.6 8）" "跨版本 issue 出版本括注"

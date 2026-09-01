@@ -896,11 +896,15 @@ sec() { # $1=平台名 $2=json key $3=1 带控制台链接（文档用），0/�
   return 0
 }
 # 卡片版不带链接、文档版带链接（design D7）。⛔ 两者出自同一个 sec()，不是两份拷贝。
-CHANGES_MD="$(sec "iOS" ios 0; printf '\n'; sec "Android" android 0)"
-CHANGES_MD_DOC="$(sec "iOS" ios 1; printf '\n'; sec "Android" android 1)"
+# ⚠️ 卡片版**也带链接**（change crash-card-issue-links）：段一在卡片里的载体是 markdown 块，
+#    2026-09-01 实发实测**可点且列宽无变化**——`[2a800b33](url)` 只显示锚文本，与纯文本一样宽。
+#    ⛔ 原先禁掉是把「裸 URL」与「markdown 链接」混为一谈了。卡片是多数人唯一会看的产物，
+#    最该能下钻的地方不能只给灰色文本。⛔ 表格单元格另说：实测不渲染链接，那边保持无链接。
+CHANGES_MD="$(sec "iOS" ios 1; printf '\n'; sec "Android" android 1)"
 # ⚠️ **消费点有三个，别只数两个**（2026-09-01 实施本 change 时就因此改错了地方）：
 #   群消息 message.md（MSG heredoc）· 卡片（--arg ch）· 周报文档（printf '## 一、本周变化'）。
-#   前两个是聊天侧，用无链接的 CHANGES_MD；只有周报文档用 CHANGES_MD_DOC。
+#   三者现在**用同一份带链接的内容**（change crash-card-issue-links 实测：卡片的 markdown 块
+#   链接可点且不改宽度）。⛔ 但消费点仍是三个——改这里之前照样要数清楚。
 
 # ── 复发率（change crash-recurrence-rate）────────────────────────────────
 # ⛔ **给分数不给百分比**：基准实测只有 14 个 key，1 个回归 = 7.1%、2 个 = 14.3%——
@@ -941,7 +945,6 @@ else
   WEEK_STATE="quiet";    WEEK_TAG="· ✅ 本周无新增"
   CHANGES_MD="$(printf '**✅ 本周无新增 / 暴涨 / 消失的 issue**\n\niOS FATAL issue %s 个 · Android FATAL issue %s 个（近 7 天）' \
     "$(echo "$DIFF" | jq -r '.ios.total')" "$(echo "$DIFF" | jq -r '.android.total')")"
-  CHANGES_MD_DOC="$CHANGES_MD"   # 平稳周两版一致（无条目可挂链接）
 fi
 
 IOS_BR="$(git -C "$REPOS_ROOT/dino-english-ios" rev-parse --abbrev-ref HEAD)"
@@ -1296,7 +1299,7 @@ REPORT="$STATE/reports/$DAY-weekly.md"
   printf '# 崩溃周报 · %s %s\n\n' "$DAY" "$WEEK_TAG"
   printf '> 取数区间 %sd：**%s**\n' "$WEEK_DAYS" "$WIN_FULL"
   printf '> 窗口起点 = 本次跑批时刻 − %s 天（SQL 下界）；终点 = sessions 活表实际取到的最新数据。\n' "$WEEK_DAYS"
-  printf '## 一、本周变化\n\n%s\n\n' "$CHANGES_MD_DOC"
+  printf '## 一、本周变化\n\n%s\n\n' "$CHANGES_MD"
   [ -n "$RECUR_MD" ] && printf '%s\n\n' "$RECUR_MD"
   [ -n "$RECUR_MD" ] && printf '> ⚠️ 「回归」指该 issue 在**上一轮基准日**（取基准里 `last` 的最大值，**不是「上周」**）无记录、本轮重新出现。判定窗口是崩溃段的滚动窗口——「消失」是**窗口内无事件**，⛔ 不等于「已修复」。⛔ 只给分数不给百分比：基准规模小（实测 14 项），百分比是伪精度。\n\n'
   printf '## 二、主力版本（近 %s 天会话量 top2 ∪ 当日 top1）\n\n' "$WEEK_DAYS"
