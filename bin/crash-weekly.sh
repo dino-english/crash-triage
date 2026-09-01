@@ -480,14 +480,45 @@ DD_TOP_N="${CRASH_REPORT_DD_TOP_N:-3}"
 DD_MODEL_CONC_PCT="${CRASH_REPORT_DD_MODEL_CONC_PCT:-60}"
 DIM_ABSENT=""          # TSV：平台 \t 版本 \t 有无FATAL \t 有无页面事件——供维度段显式说明缺席原因
 ADOPT_ROWS=""          # TSV：平台 \t 版本 \t 会话 \t 设备 \t 崩溃事件 \t 崩溃率 \t crash-free \t ANR \t 非致命
+# ⛔ 入选理由**另开查找表，不进 ADOPT_ROWS**：后者是 9 列，第 10 列会被 9 变量的 read 吸进
+#    最后一个字段；而把理由拼进「版本」列会污染 weekly-metrics.jsonl 的 WoW 匹配键
+#    （同一版本这周「窗口主力」、下周「当日主力」就匹配不上，环比静默断档）。
+ADOPT_REASONS=""       # TSV：平台 \t 版本 \t 入选理由
 ADOPT_OK=0
 
 if command -v bq >/dev/null 2>&1 && bqq csv 'SELECT 1' >/dev/null 2>&1; then
   ADOPT_OK=1
   step "主力版本放量（bq）"
-  top2_versions() { # $1=sessions表 → 「版本,会话,设备」前两行（按会话量降序）
-    bqq csv "$(q_render latest-versions.sql TABLE="$1" DAYS="$WEEK_DAYS" MIN_SESSIONS="$MIN_SESSIONS")" \
-      | tail -n +2 | sort -t, -k2,2 -nr | head -2 || true
+  # 主力版本集合 = 窗口内会话量 top2 ∪ **当日**会话量 top1，上限 3（change crash-report-version-alignment）。
+  # ⛔ 单靠「近 N 天累计」是滞后积分量，发版周会系统性选中正在退役的版本：实测 2026-08-31，
+  #    Android 1.5.6 当日 855 会话（占 93%），7 天累计 1819 落后 1.5.5 的 2064 而落榜，
+  #    于是周报二/三/四段整体在描述当天合计仅 66 个会话的两个版本，1.5.6 上的 3 条 FATAL 一条未呈现。
+  # ⛔ **不换判据、只补一列**：窗口累计答「盘子里的大头」，当日答「现在线上跑什么」，
+  #    两者分歧本身就是要看见的信息。与日报的「主力版本补列」「性能兜底选版」同构。
+  # ⛔ **不得掺任何会话量门槛**：排序取 top1，不筛选——门槛会把刚放量或被叫停的新版静默剔除
+  #    （MIN_SESSIONS 早已中和为 1，此处不得绕回来）。小样本由 SAMPLE_SESSION_MIN 标出，不藏起来。
+  # ⚠️ 补入版本的会话/设备取**窗口口径**（与其余列同窗），⛔ 不能塞当日数字进来混窗。
+  # ⚠️ 当日窗口用 DAYS=1（与日报放量段、告警小样本回退同一个窗口），
+  #    ⛔ 不用性能段那个「最后一个完整日」——sessions 是活表，没有残日问题。
+  main_versions() { # $1=sessions表 → 「版本,会话,设备,理由」最多 3 行
+    local _all _top2 _d1v _row
+    _all="$(bqq csv "$(q_render latest-versions.sql TABLE="$1" DAYS="$WEEK_DAYS" MIN_SESSIONS="$MIN_SESSIONS")" \
+      | tail -n +2 | sort -t, -k2,2 -nr || true)"
+    [ -n "$_all" ] || return 0
+    _top2="$(printf '%s\n' "$_all" | head -2)"
+    _d1v="$(bqq csv "$(q_render latest-versions.sql TABLE="$1" DAYS=1 MIN_SESSIONS="$MIN_SESSIONS")" \
+      | tail -n +2 | sort -t, -k2,2 -nr | head -1 | cut -d, -f1 || true)"
+    printf '%s\n' "$_top2" | while IFS= read -r _row; do
+      [ -n "$_row" ] || continue
+      if [ -n "$_d1v" ] && [ "${_row%%,*}" = "$_d1v" ]; then printf '%s,窗口+当日\n' "$_row"
+      else printf '%s,窗口主力\n' "$_row"; fi
+    done
+    # 当日 top1 不在窗口 top2 内 → 补一行，⚠️ 取它在**窗口**里的会话/设备（同窗不混）
+    if [ -n "$_d1v" ] && ! printf '%s\n' "$_top2" | cut -d, -f1 | grep -qx "$_d1v"; then
+      _row="$(printf '%s\n' "$_all" | awk -F, -v v="$_d1v" '$1==v{print; exit}')"
+      [ -n "$_row" ] && printf '%s,当日主力\n' "$_row"
+    fi
+    return 0
   }
   # ANR 与 NON_FATAL 计数：两者 is_fatal 均为 FALSE，crash-rate.sql 取不到
   # 影响面维度（change crash-impact-summary）：机型 / 系统版本 top3，用于跨周对比适配面变化。
@@ -528,7 +559,7 @@ if command -v bq >/dev/null 2>&1 && bqq csv 'SELECT 1' >/dev/null 2>&1; then
   for entry in "iOS|$PROJECT.firebase_sessions.com_prime_dino_english_IOS_REALTIME|$PROJECT.firebase_crashlytics.com_prime_dino_english_IOS_REALTIME" \
                "Android|$PROJECT.firebase_sessions.com_prime_dino_english_ANDROID_REALTIME|$PROJECT.firebase_crashlytics.com_prime_dino_english_ANDROID_REALTIME"; do
     IFS='|' read -r pname stbl ctbl <<< "$entry"
-    while IFS=, read -r ver sess dev; do
+    while IFS=, read -r ver sess dev why; do
       [ -n "$ver" ] || continue
       if [ "$pname" = "iOS" ]; then IOS_TOP2_VERS="${IOS_TOP2_VERS}${ver}
 "; else AND_TOP2_VERS="${AND_TOP2_VERS}${ver}
@@ -557,6 +588,8 @@ if command -v bq >/dev/null 2>&1 && bqq csv 'SELECT 1' >/dev/null 2>&1; then
       fi
       ADOPT_ROWS="${ADOPT_ROWS}${pname}	${ver}	${sess}	${dev}	${cev:-—}	${rate}	${cfree}	${anrcell}	${nfev:-0} 次
 "
+      ADOPT_REASONS="${ADOPT_REASONS}${pname}	${ver}	${why:-窗口主力}
+"
       echo "  ${pname} ${ver}：${sess} 会话 / ${dev} 设备 / 崩溃 ${cev:-—} 次 ${rate} / crash-free ${cfree} / ANR ${anrcell} / 非致命 ${nfev:-0} 次"
       # 维度只在该版本确有事件时才查——零事件的版本查了必然全空，白花查询。
       # ⛔ **闸门必须按各维度自己的 error_type 判**，不能一律用 FATAL 数 ${cev}：
@@ -579,7 +612,7 @@ if command -v bq >/dev/null 2>&1 && bqq csv 'SELECT 1' >/dev/null 2>&1; then
       fi
       # ⛔ **版本缺席必须显式留痕**，不能靠「文件不存在」静默省略（镜头 6：缺失可不可见）
       DIM_ABSENT="${DIM_ABSENT}${pname}\t${ver}\t${_has_fatal}\t${_has_screen}\n"
-    done <<< "$(top2_versions "$stbl")"
+    done <<< "$(main_versions "$stbl")"
   done
 else
   echo "--- ⚠️ bq 不可用，跳过主力版本放量段（不影响变化摘要）---"
@@ -924,17 +957,31 @@ if [ -n "$IOS_PERF_STALE" ] || [ -n "$AND_PERF_STALE" ]; then
   _ast="正常"; [ -n "$AND_PERF_STALE" ] && _ast="停更 ${AND_PERF_STALE} 天（截至 ${AND_PERF_MAX}）"
   PERF_STALE_NOTE="$(printf '\n🟡 **性能数据源停更** — iOS %s · Android %s；Firebase→BigQuery 导出未产出，非流水线故障，本周性能段不可读作「平稳」。' "$_ist" "$_ast")"
 fi
-NOTE_MD="$(printf '变化摘要口径：BigQuery 事件级（含已关闭 issue，全版本），近 %s 天窗，**纯脚本取数不经模型**。\n取数区间 %sd：%s\n主力版本 = 近 %s 天会话量 top2（日报看的是「版本号最新的 2 个版本」，两者互补，不可混比）。\n崩溃率 = 事件数/会话数 · 对照分支：iOS %s · Android %s
+NOTE_MD="$(printf '变化摘要口径：BigQuery 事件级（含已关闭 issue，全版本），近 %s 天窗，**纯脚本取数不经模型**。\n取数区间 %sd：%s\n主力版本 = 近 %s 天会话量 top2 **∪ 当日会话量 top1**（上限 3，每行标注入选理由）。⚠️ 「当日主力」那一版的窗口累计可能很小——它入选是因为**现在线上跑的是它**，与「盘子里的大头」是两个问题。日报看的是「版本号最新的 2 个版本」，三者互补，不可混比。\n崩溃率 = 事件数/会话数 · 对照分支：iOS %s · Android %s
 Crash-free 会话率 = 1 − 崩溃会话数/会话数，**会话口径**。⚠️ 与控制台首屏的**用户**口径不同、**不可直接对照**（用户率通常更低）；用户率不可得——两个数据源的用户标识不同源。本值为**下界估计**，真实值不低于所示数字。
 ANR 仅 Android（iOS 系统层无此概念）；ANR 率与崩溃率同分母，**与 Play 的用户感知 ANR 率口径不同，不可对照商店门槛**。非致命双端**不可比**（收口点覆盖不同）。\n%s%s' \
   "$WEEK_DAYS" "$WEEK_DAYS" "$WIN_COMPACT" "$WEEK_DAYS" "$IOS_BR" "$AND_BR" "$ANALYSIS_NOTE" "$PERF_STALE_NOTE")"
+
+# 入选理由查找（bash 3.2 无关联数组，用行匹配）。⚠️ 取不到时回落「窗口主力」而不是空——
+# 空单元格会被读成「渲染坏了」，而绝大多数情形本来就是窗口主力。
+adopt_reason() { # $1=平台 $2=版本 → stdout: 入选理由
+  local _r
+  _r="$(printf '%s' "$ADOPT_REASONS" | awk -F'\t' -v p="$1" -v v="$2" '$1==p && $2==v {print $3; exit}')"
+  printf '%s' "${_r:-窗口主力}"
+}
 
 # 主力版本表（markdown 与卡片共用同一批数据）
 adopt_md() {
   [ -n "$ADOPT_ROWS" ] || { printf '（本次未取到放量数据）\n'; return 0; }
   # ⚠️ 列头显式标 FATAL（analyst G5）——同一行并排三类事件，「崩溃」不标口径会被当总数
-  printf '| 平台 | 版本 | 会话 | 设备 | 崩溃(FATAL) | FATAL率 | Crash-free 会话 | ANR | 非致命 |\n|---|---|---|---|---|---|---|---|---|\n'
-  printf '%s' "$ADOPT_ROWS" | awk -F'\t' 'NF>=9{printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s |\n",$1,$2,$3,$4,$5,$6,$7,$8,$9}'
+  # ⛔ 逐列标注入选理由，**不得一律写「主力」**——「当日主力」那一版的窗口累计可能很小，
+  #    读者必须能看出这一列的分母基础与其余列不同。
+  printf '| 平台 | 版本 | 入选 | 会话 | 设备 | 崩溃(FATAL) | FATAL率 | Crash-free 会话 | ANR | 非致命 |\n|---|---|---|---|---|---|---|---|---|---|\n'
+  printf '%s' "$ADOPT_ROWS" | while IFS=$'\t' read -r _p _v _s _d _c _r _f _a _n; do
+    [ -n "$_p" ] || continue
+    printf '| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n' \
+      "$_p" "$_v" "$(adopt_reason "$_p" "$_v")" "$_s" "$_d" "$_c" "$_r" "$_f" "$_a" "$_n"
+  done
 }
 
 # 影响面维度段（change crash-impact-summary）。⛔ 与性能段同一条硬约束：只给可定位对象，不出根因——
@@ -1142,7 +1189,7 @@ MSG="$(cat <<MSG_END
 
 $CHANGES_MD
 
-**🚀 主力版本（近 ${WEEK_DAYS} 天会话量 top2）**
+**🚀 主力版本（近 ${WEEK_DAYS} 天会话量 top2 ∪ 当日 top1）**
 
 $(adopt_md)
 > $NOTE_MD
@@ -1150,7 +1197,14 @@ MSG_END
 )"
 
 # 结构化卡片（CardKit v2，与日报同款；agent 原样投递，仅回填 __REPORT_URL__）
-ADOPT_JSON="$(printf '%s' "$ADOPT_ROWS" | awk -F'\t' 'NF>=9{printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",$1,$2,$3,$4,$5,$6,$7,$8,$9}' \
+# ⚠️ 卡片只给**补入那一版**打角标（`·当日`）：窗口 top 通常同时也是当日 top，全都打上等于
+#    稳态每行都多三个字，白占列宽；而需要解释的恰恰是那个「窗口累计落榜、当日却是大头」的版本。
+#    ⛔ 角标只进卡片显示，不进 ADOPT_ROWS，更不进 weekly-metrics.jsonl（那会污染 WoW 匹配键）。
+ADOPT_JSON="$(printf '%s' "$ADOPT_ROWS" | while IFS=$'\t' read -r _p _v _s _d _c _r _f _a _n; do
+    [ -n "$_p" ] || continue
+    _tag=""; [ "$(adopt_reason "$_p" "$_v")" = "当日主力" ] && _tag=" ·当日"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$_p" "${_v}${_tag}" "$_s" "$_d" "$_c" "$_r" "$_f" "$_a" "$_n"
+  done \
   | jq -Rsc 'split("\n") | map(select(length>0) | split("\t")
       | {plat:.[0], ver:.[1], sess:.[2], dev:.[3], crash:.[4], rate:.[5], cfree:.[6], anr:.[7], nf:.[8]})')"
 # 只有真出现变化才红；基线与平稳周都是蓝——红色要留给「需要看一眼」的场合
@@ -1246,7 +1300,7 @@ REPORT="$STATE/reports/$DAY-weekly.md"
   printf '## 一、本周变化\n\n%s\n\n' "$CHANGES_MD_DOC"
   [ -n "$RECUR_MD" ] && printf '%s\n\n' "$RECUR_MD"
   [ -n "$RECUR_MD" ] && printf '> ⚠️ 「回归」指该 issue 在**上一轮基准日**（取基准里 `last` 的最大值，**不是「上周」**）无记录、本轮重新出现。判定窗口是崩溃段的滚动窗口——「消失」是**窗口内无事件**，⛔ 不等于「已修复」。⛔ 只给分数不给百分比：基准规模小（实测 14 项），百分比是伪精度。\n\n'
-  printf '## 二、主力版本（近 %s 天会话量 top2）\n\n' "$WEEK_DAYS"
+  printf '## 二、主力版本（近 %s 天会话量 top2 ∪ 当日 top1）\n\n' "$WEEK_DAYS"
   adopt_md
   printf '\n> 日报盯的是「版本号最新的 2 个版本」（新版发得怎么样），本段盯的是「承载用户最多的版本」（盘子里的大头）。\n'
   printf '> 两段版本集常常不同，各自回答不同的问题，**不可混比**。\n'
