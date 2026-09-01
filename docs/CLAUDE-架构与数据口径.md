@@ -215,7 +215,12 @@ L2 拆两层，**数据不依赖模型**：
   - **prompt 侧策略是单一变量 `FACT_CACHE_POLICY`**，两处 heredoc 插值引用——
     **消除重复而不是检测重复**。prompt 没有语法检查、改漏一份不报错；
     而 prompt 的唯一可靠检查是**对产物的断言**：`bash bin/test/assert-fact-cache.sh`。
-- **Android `fix_commit` 恒为 null**——Android 未采用「提交信息带 Crashlytics issue ID」约定，必须渲染成 `—` 而不是「未修」（后者得出错误结论）。
+- ⛔ **「Android `fix_commit` 恒为 null」是已订正的过期结论**（2026-09-01）。原判断来自 2026-08-07 的一次核实
+  「全仓 0 处 32 位 hex 引用」，但 Android 自 **08-19** 起就在写 `Crashlytics: <32位id>`（写在 **subject**），
+  iOS 08-31 写 `Crashlytics issue: <32位id>`（写在 **body**）——**不是没人写，是扫描器只认一种没人用的写法**
+  （`[crash:<8位>]`，两仓近 90 天各 0 条）。改扫描器后反扫从 **0 条变 6 条**（iOS 2 / Android 4），
+  4 个 Android id 经 BigQuery 复核全是真 issue。⚠️ 必须扫**整条 message**，只扫 subject 会漏掉 iOS 那一半。
+  ⚠️ 未被任何一种形式标注的提交仍不参与自动对账，此时状态停留在上一轮，渲染 `—` 而非「未修」。
 
 ### 缺数三态（顺序不可颠倒）
 

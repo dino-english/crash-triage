@@ -134,7 +134,7 @@ cat "$STATE/health-daily.json"   # L1 健康（L2 是 health.json）；日志在
 
 ## 规格与台账
 
-OpenSpec 驱动（`openspec/`，schema `spec-driven`）。**动手改脚本前先看对应 change 的 design/tasks**——阈值、卡片结构、staleness 兜底都有记录的理由与取舍。台账由 **L2 独占产出**（change `crash-ledger-l2-ownership`），修复状态由 commit `[crash:<8位id>]` 反扫驱动，Android 无此约定故 `fix_commit` 恒 null（渲染 `—` 不是「未修」）。
+OpenSpec 驱动（`openspec/`，schema `spec-driven`）。**动手改脚本前先看对应 change 的 design/tasks**——阈值、卡片结构、staleness 兜底都有记录的理由与取舍。台账由 **L2 独占产出**（change `crash-ledger-l2-ownership`），修复状态由反扫两个业务仓库的 commit message 驱动。⚠️ **两种形式都认**：`[crash:<8位id>]`（最初约定，实测两仓近 90 天各 0 条）与 `Crashlytics[ issue]: <32位id>`（**事实上正在用的**，Android 写在 subject、iOS 写在 body）。⛔ 「Android 无此约定故 `fix_commit` 恒 null」是**已订正的过期结论**——2026-09-01 改扫描器后反扫从 0 条变 6 条。⚠️ 仍要扫**整条 message 不是 subject**（两仓落点不同）。
 
 ## 按任务继续阅读
 

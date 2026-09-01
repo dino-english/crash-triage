@@ -36,7 +36,17 @@ TMP_UNAVAIL="$(mktemp)"
 TMP_SHORT2FULL="$(mktemp)"   # jq 映射表：{"<short8>": ["<full32>", ...], ...}
 trap 'rm -f "$TMP_HITS" "$TMP_UNAVAIL" "$TMP_SHORT2FULL"' EXIT
 
-# ── 1. 扫两个仓库的 commit message，提取 [crash:<8位hex>] ──────────
+# ── 1. 扫两个仓库的 commit message，提取 issue id ──────────
+# **两种形式都认**（2026-09-01 实测订正）：
+#   ① `[crash:<8位hex>]`      —— 最初约定的形式，实测**两个仓库近 90 天各 0 条**
+#   ② `Crashlytics[ issue]: <32位hex>` —— **事实上正在用的形式**：
+#      Android 4 条（08-19 起，写在 **subject**）、iOS 1 条（08-31，写在 **body**）
+#      那 4 个 Android id 在 BigQuery 里全部查得到，是真 issue（85c581ed / a34175e5 /
+#      ce481263 / fa48b2eb）。
+# ⛔ 因此「Android 未采用约定故 fix_commit 恒 null」这条旧结论**已过期**——不是没人写，
+#    是我们只认一种没人用的写法。两端的「处置状态」列此前都是死的。
+# ⚠️ 必须扫**整条 message 而不是 subject**：两个仓库的落点不同（Android 在 subject、
+#    iOS 在 body），只扫 %s 会漏掉 iOS 那一半。
 # 每个 short id 在窗口内可能出现在多个 commit（同一修复多次跟进）；同一 short id 取最新一次
 # 提交作为「本次修复提交」的代表（git log 默认按提交时间倒序，故每个 short id 第一次出现
 # 即为窗口内最新的一条，去重逻辑在第 3 步用 awk 实现，同样不依赖关联数组）。
@@ -47,11 +57,18 @@ scan_repo() { # $1=仓库路径 $2=平台标签
     return 0
   fi
   # --all 覆盖所有分支（含未合并的修复分支）；只读 log，不 checkout / reset。
-  git -C "$repo" log --all --grep='\[crash:' --since="${WINDOW} days ago" \
+  # 多个 --grep 之间是 OR；⛔ 别写成单个带 \| 的模式，git 默认 BRE，正则风味容易踩空。
+  git -C "$repo" log --all --grep='\[crash:' --grep='[Cc]rashlytics' --since="${WINDOW} days ago" \
     --format='%H%x09%aI%x09%s' 2>/dev/null | while IFS=$'\t' read -r hash date subject; do
     [ -n "$hash" ] || continue
-    printf '%s\n' "$subject" | grep -oE '\[crash:[0-9a-fA-F]{8}\]' | grep -oE '[0-9a-fA-F]{8}' \
-      | tr 'A-Z' 'a-z' | while read -r short; do
+    _msg="$(git -C "$repo" show -s --format=%B "$hash" 2>/dev/null || true)"
+    # ⛔ 每个 grep 都要 `|| true`：无匹配返回 1，而 set -o pipefail 下会让整条管道失败（F31）。
+    {
+      printf '%s\n' "$_msg" | grep -oE '\[crash:[0-9a-fA-F]{8}\]' | grep -oE '[0-9a-fA-F]{8}' || true
+      printf '%s\n' "$_msg" | grep -oiE 'crashlytics( issue)?:[[:space:]]*[0-9a-fA-F]{32}' \
+        | grep -oE '[0-9a-fA-F]{32}' | cut -c1-8 || true
+    } | tr 'A-Z' 'a-z' | sort -u | while read -r short; do
+      [ -n "$short" ] || continue
       printf '%s\t%s\t%s\t%s\t%s\n' "$short" "${hash:0:8}" "$date" "$label" "$subject"
     done
   done >> "$TMP_HITS" || true
