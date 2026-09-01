@@ -434,6 +434,20 @@ _ledger_heading_id() { # $1=doc $2=标题文本 → stdout: block id（找不到
 # 在标题块之下定位表格并 block_replace。
 # ⚠️ 不缓存表格 id：block_replace 每次都会让表格拿到新 id，跨轮必须重查（design D3 第 6 点）。
 # ⚠️ section 返回的是 DocxXML 文本不是块结构 JSON——在 JSON 里找 type=="table" 永远落空。
+# ⛔ **`ok:true` 不等于操作生效**。飞书写指令可能返回 `ok:true` 但 `data.result="failed"` +
+#    `warnings=[degrade_code=1011,msg=Instruction produced no document changes.]`——
+#    调用成功、文档一个字没改。此前只判进程退出码，于是跑批日志打 ✅ 而台账实际为空，无人知晓。
+# 2026-09-01 实测两种触发路径：① profile 未配置（写操作降级空转）
+#    ② block_replace 的目标 id 已被上一次替换消费（同一 block 仅限一次，旧 id 立即失效）。
+# 与仓库既有纪律同源：**「成功」判据必须两端一致**——CLI 说调用成功、飞书说没改，就是不一致。
+# ⚠️ 这是**谓词函数**，返回非零是它的语义。⛔ 必须用在条件位（`if ! f`／`f && …`）——
+#    裸调会在 set -e + ERR trap 下触发告警（本仓库「新增检查不得走触发 ERR trap 的路径」）。
+_lark_write_ok() { # $1=lark-cli 的 JSON 输出 → 0=真生效 / 1=未生效
+  local _r
+  _r="$(printf '%s' "$1" | json_only | jq -r '.data.result // "success"' 2>/dev/null || echo success)"
+  [ "$_r" = "success" ]
+}
+
 _ledger_replace_table() { # $1=doc $2=heading_id $3=内容文件 $4=格式 $5=日志标签 → 0成功/1失败
   local doc="$1" hid="$2" f="$3" fmt="${4:-markdown}" label="$5" section tid
   section="$("${LK[@]}" docs +fetch --doc "$doc" --scope section --start-block-id "$hid" \
@@ -444,10 +458,38 @@ _ledger_replace_table() { # $1=doc $2=heading_id $3=内容文件 $4=格式 $5=�
     echo "  ❌ 台账同步失败：「${label}」下定位不到表格 block，中止（不退化为 overwrite）" >&2
     return 1
   fi
-  if ! (cd "$(dirname "$f")" && "${LK[@]}" docs +update --command block_replace \
+  # ⛔ **「无变更」有两种，必须分开**：内容与线上一致（平稳周的常态，正常）vs 写操作降级空转（故障）。
+  #    只判 result 会把前者也当失败——而「L2 平稳周照常投递」是既有硬约束（实测踩到过）。
+  # ⚠️ **不逐字比对**：取回的 markdown 带 <fragment> 包裹，链接与转义还有往返差异，
+  #    实测同一份内容两边差 386 字符。改用**扛得住往返的指纹**：数据行数 + 表内 8 位 id 集合。
+  local _cur _fp_cur _fp_want
+  _cur="$("${LK[@]}" docs +fetch --doc "$doc" --scope range --start-block-id "$tid" --end-block-id "$tid" \
+          --doc-format markdown --as "$LARK_AS" --format json 2>/dev/null \
+          | json_only | jq -r '.data.document.content // ""' 2>/dev/null || true)"
+  _fingerprint() { # stdin → "<数据行数>:<排序去重的 8 位 id 列表>"
+    local _t; _t="$(cat)"
+    printf '%s:%s' \
+      "$(printf '%s\n' "$_t" | grep -c '^| ' 2>/dev/null || echo 0)" \
+      "$(printf '%s\n' "$_t" | grep -oE '\b[0-9a-f]{8}\b' 2>/dev/null | sort -u | tr '\n' ',' || true)"
+  }
+  _fp_cur="$(printf '%s' "$_cur" | _fingerprint)"
+  _fp_want="$(_fingerprint < "$f")"
+  if [ -n "$_cur" ] && [ "$_fp_cur" = "$_fp_want" ]; then
+    echo "  ✅ 台账「${label}」内容与线上一致，跳过替换（平稳周常态，非故障）" >&2
+    return 0
+  fi
+  local _out
+  if ! _out="$(cd "$(dirname "$f")" && "${LK[@]}" docs +update --command block_replace \
         --doc "$doc" --block-id "$tid" --doc-format "$fmt" \
-        --content "@$(basename "$f")" --as "$LARK_AS" --format json >/dev/null); then
+        --content "@$(basename "$f")" --as "$LARK_AS" --format json 2>&1)"; then
     echo "  ❌ 台账同步失败：block_replace「${label}」出错（block-id=${tid}），中止（不退化为 overwrite）" >&2
+    return 1
+  fi
+  # ⛔ 退出码 0 还不够，必须判 result——否则「调用成功、文档没改」会被打成 ✅
+  if ! _lark_write_ok "$_out"; then
+    echo "  ❌ 台账同步失败：block_replace「${label}」调用成功但**文档未发生变更**（block-id=${tid}）" >&2
+    echo "     $(printf '%s' "$_out" | json_only | jq -rc '.data.warnings // []' 2>/dev/null || true)" >&2
+    echo "     常见原因：profile 未配置导致写操作降级 · 目标 block id 已被上一次 block_replace 消费（同一 block 仅限一次）" >&2
     return 1
   fi
   echo "  ✅ 台账「${label}」已同步（block_replace，block-id=${tid}）" >&2
@@ -504,12 +546,14 @@ sync_ledger() { # $1=doc_id  $2=FATAL现状表文件  $3=表格式(xml|markdown)
 
   # ── append 时间线增量（只增不改；无增量则跳过，不产生空 append）────────
   if [ -s "$tl_file" ]; then
-    if (cd "$(dirname "$tl_file")" && "${LK[@]}" docs +update --command append \
+    _tlout=""
+    if _tlout="$(cd "$(dirname "$tl_file")" && "${LK[@]}" docs +update --command append \
           --doc "$doc" --doc-format "$tl_fmt" --content "@$(basename "$tl_file")" \
-          --as "$LARK_AS" --format json >/dev/null); then
+          --as "$LARK_AS" --format json 2>&1)" && _lark_write_ok "$_tlout"; then
       echo "  ✅ 台账变更时间线已追加（$(wc -l < "$tl_file" | tr -d ' ') 行）" >&2
     else
-      echo "  ⚠️ 台账时间线追加失败（现状表已同步成功，不影响主链路）" >&2
+      echo "  ⚠️ 台账时间线追加失败或未生效（现状表已同步成功，不影响主链路）" >&2
+      echo "     $(printf '%s' "$_tlout" | json_only | jq -rc '.data.result // "?", (.data.warnings // [])' 2>/dev/null | tr '\n' ' ' || true)" >&2
     fi
   fi
   return 0

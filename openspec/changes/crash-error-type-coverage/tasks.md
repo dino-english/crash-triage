@@ -60,3 +60,22 @@
 - [x] 6.2 `CLAUDE.md` 的「数据口径」增：`is_fatal=TRUE ⟺ error_type='FATAL'`；ANR / NON_FATAL 各自的 SQL 与分母；iOS 无 ANR 概念及其近似信号
 - [x] 6.3 `CLAUDE.md` 的阈值段增 ANR 红黄线及其口径警告
 - [x] 6.4 记录 Open Question 的处置：**NON_FATAL 已拍板进台账**（见 3b）；**ANR 是否进台账仍未定**，本 change 不做
+
+## 3b.5 执行记录（2026-09-01）—— ⛔ 未通过，本 change 暂不归档
+
+按任务给的方式在自建测试文档上跑了 `CRASH_REPORT_LEDGER_DOC_ID=… bash bin/deliver.sh`。
+闸门本身**验到了**：日志打「🧪 自测台账同步：目标是显式指定的另一份文档（非 docs.json 里那份），放行」。
+
+但**没能验成三条断言**，原因是开发机环境而非代码：
+
+1. `deliver.sh` 用 `LK=(lark-cli --profile crash-triage)`，而该 profile 在开发机上 appId 为 null
+   → 写操作降级空转（`ok:true` / `result:"failed"` / degrade_code=1011）。
+2. 绕开 profile 后（`HERMES_HOME` 置位）两张现状表走到了新加的「内容一致则跳过」分支，
+   而时间线 append 报 degrade_code=4030004「无权限」——**同一条命令手工执行却成功**，
+   这条差异未查清，⛔ 不作结论。
+
+**三条断言只在手工逐条替换时验过**（FATAL/NON_FATAL 表各自替换为正确内容、时间线哨兵仍在、
+全程无 overwrite），⛔ **不等于 `deliver.sh` 驱动的路径已验**，故本项保持未勾。
+
+本轮真正的产出是另一件事：发现并修掉了 `deliver.sh` 的静默失败——见 F41 与
+`bin/test/fn-lark-write-result.sh`。生产台账未受任何影响（实测 0 条 2026-09-01 条目）。
