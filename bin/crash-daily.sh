@@ -1060,6 +1060,13 @@ fi
 # 本轮出现的全部 issue id（跨版本并集，来自 BigQuery）
 CUR_IDS="$(cat "$TMP"/issues-*.json 2>/dev/null | jq -rs '[.[][]?.issue_id] | unique | .[]' 2>/dev/null || true)"
 
+# ⛔ 链接版不加反引号：md2docx.py 的链接正则不处理嵌套行内代码。
+# ⚠️ 展示 8 位、href 用完整 32 位；取不到 URL 时回落纯短 id，不出半个链接。
+_id_link() { # $1=平台键(ios/android) $2=完整 issue id → markdown 链接或纯文本
+  local _u; _u="$(issue_url "$1" "$2")"
+  if [ -n "$_u" ]; then printf '[%s](%s)' "${2:0:8}" "$_u"; else printf '%s' "${2:0:8}"; fi
+}
+
 life_tag() { # $1=完整 issue id → 🆕新增 / 🔁回归 / 长期 / 空（基线轮）
   [ "$LIFECYCLE_OK" = 1 ] || { printf ''; return 0; }
   local last
@@ -1749,7 +1756,7 @@ issues_table() { # $1=plat $2=版本
   jq -r '.[] | [.issue_id, (if (.title // "") == "" then "—" else .title end), (.n|tostring), (.users|tostring), (((( .n|tonumber ) / (if (.users|tonumber) == 0 then 1 else (.users|tonumber) end) * 10 | round) / 10)|tostring), .latest] | @tsv' "$f" 2>/dev/null \
   | while IFS=$'\t' read -r fid ti n us cc la; do
       [ -n "$fid" ] || continue
-      printf '| %s | %s | %s | %s | %s | %s | %s |\n' "${fid:0:8}" "$(life_tag "$fid")" "$ti" "$n" "$us" "$cc" "$la"
+      printf '| %s | %s | %s | %s | %s | %s | %s |\n' "$(_id_link "$1" "$fid")" "$(life_tag "$fid")" "$ti" "$n" "$us" "$cc" "$la"
     done
   printf '\n'
 }
@@ -1960,31 +1967,41 @@ xml_issues() { # $1=plat $2=版本
     "$f" 2>/dev/null \
   | while IFS=$'\t' read -r fid ti n us cc la; do
       [ -n "$fid" ] || continue
-      printf '"%s","%s","%s","%s","%s","%s","%s"\n' "${fid:0:8}" "$(life_tag "$fid")" "$ti" "$n" "$us" "$cc" "$la" \
+      # 第 8 列是完整 32 位 id：**不显示**，只供渲染器构造链接（⛔ 不能用 8 位短 id 拼回去）
+      printf '"%s","%s","%s","%s","%s","%s","%s","%s"\n' "${fid:0:8}" "$(life_tag "$fid")" "$ti" "$n" "$us" "$cc" "$la" "$fid" \
         >> "$TMP/iss-$1-$2.csv"
     done
-  xml_csv_table "$TMP/iss-$1-$2.csv" 'Issue,状态,标题,事件,影响安装,集中度,最新' '1,2,3,4,5,6,7' 
+  xml_csv_table "$TMP/iss-$1-$2.csv" 'Issue,状态,标题,事件,影响安装,集中度,最新' '1,2,3,4,5,6,7' "1:8:$(issue_url_prefix "$1")"
 }
 xml_nonfatal() { # $1=plat $2=版本
   local f="$TMP/nonfatal-$1-$2.json"
   if [ ! -s "$f" ] || [ "$(jq 'length' "$f" 2>/dev/null || echo 0)" = "0" ]; then
     printf '<p><span text-color="gray">该版本窗口内无非致命异常</span></p>\n'; return 0
   fi
+  # 第 7 列是完整 32 位 id：不显示，只供渲染器构造链接
   jq -r '.[] | [.issue_id[0:8],
                 (if (.title // "") == "" then "—" else .title end),
                 (if (.subtitle // "") == "" then "—" else .subtitle end),
-                (.n|tostring), (.users|tostring), .latest] | @csv' \
+                (.n|tostring), (.users|tostring), .latest, .issue_id] | @csv' \
     "$f" 2>/dev/null > "$TMP/nf-$1-$2.csv" || true
-  xml_csv_table "$TMP/nf-$1-$2.csv" 'Issue,位置,异常,事件,影响,最新' '1,2,3,4,5,6'
+  xml_csv_table "$TMP/nf-$1-$2.csv" 'Issue,位置,异常,事件,影响,最新' '1,2,3,4,5,6' "1:7:$(issue_url_prefix "$1")"
 }
 # CSV → 彩色表格。**结构标签不能转义、字段值必须转义**——早期版本把整行喂给 xesc，
 # 结果 <tr><td> 全变成字面文本，飞书渲染出一张空表（2026-08-18 实测踩到）。
 # $1=csv $2=逗号分隔表头 $3=列规格（"列号:后缀"，列号从 1 起）
+# $4（可选）= 链接列规格 `<显示列号>:<完整id列号>:<URL前缀>`，缺省则行为与改造前**逐字节一致**。
+# ⚠️ 单元格一律 html.escape，直接塞 <a> 会被转义成字面文本——所以链接必须由渲染器自己生成。
+# ⛔ 只有显式传规格的调用点才产出链接；其余 9 个调用点一个字不变。
 xml_csv_table() {
   if [ ! -s "$1" ]; then printf '<p><span text-color="gray">（无数据）</span></p>\n'; return 0; fi
-  XC_HEAD="$XC_HEAD" XC_ZEBRA="$XC_ZEBRA" python3 - "$1" "$2" "$3" <<'XMLPY'
+  XC_HEAD="$XC_HEAD" XC_ZEBRA="$XC_ZEBRA" python3 - "$1" "$2" "$3" "${4:-}" <<'XMLPY'
 import sys, csv, html, os
 path, heads, spec = sys.argv[1], sys.argv[2].split(','), sys.argv[3].split(',')
+linkspec = sys.argv[4] if len(sys.argv) > 4 else ''
+link_disp = link_id = -1; link_pre = ''
+if linkspec:
+    _d, _i, link_pre = linkspec.split(':', 2)
+    link_disp, link_id = int(_d) - 1, int(_i) - 1
 head_bg, zebra = os.environ['XC_HEAD'], os.environ['XC_ZEBRA']
 cols = []
 for sp in spec:
@@ -2002,7 +2019,11 @@ for row in csv.reader(open(path, newline='')):
     tds = []
     for i, suf in cols:
         v = row[i].strip() if i < len(row) else ''
-        tds.append('<td%s>%s%s</td>' % (bg, e(v), e(suf)))
+        if i == link_disp and link_id >= 0 and link_id < len(row) and row[link_id].strip():
+            href = html.escape(link_pre + row[link_id].strip(), quote=True)
+            tds.append('<td%s><a href="%s">%s</a>%s</td>' % (bg, href, e(v), e(suf)))
+        else:
+            tds.append('<td%s>%s%s</td>' % (bg, e(v), e(suf)))
     out.append('<tr>' + ''.join(tds) + '</tr>')
 out += ['</tbody>', '</table>']
 print('\n'.join(out))
@@ -2225,10 +2246,11 @@ build_index() {
     # iOS 有「提交带 Crashlytics issue ID」硬规则（crash-prevention），fix_commit 可信；
     # Android 无此约定（2026-08-07 核实：全仓 0 处 32 位 hex 引用），null 只代表「提交里没写 id」，
     # 渲染成「🔴 未修」会得出错误结论——必须显示为不可判定。
-    jq -r '"### iOS\n\n| Issue | 标题 | 事件 | 修复提交 |\n|---|---|---|---|\n" +
-           ((.ios // []) | map("| \(.id[0:8]) | \(.title) | \(.events) | \(.fix_commit // "🔴 未修") |") | join("\n")) +
+    jq -r --arg ipre "$(issue_url_prefix ios)" --arg apre "$(issue_url_prefix android)" \
+       '"### iOS\n\n| Issue | 标题 | 事件 | 修复提交 |\n|---|---|---|---|\n" +
+           ((.ios // []) | map("| [\(.id[0:8])](\($ipre)\(.id)) | \(.title) | \(.events) | \(.fix_commit // "🔴 未修") |") | join("\n")) +
            "\n\n### Android\n\n| Issue | 标题 | 事件 | 修复状态 |\n|---|---|---|---|\n" +
-           ((.android // []) | map("| \(.id[0:8]) | \(.title) | \(.events) | — |") | join("\n"))' \
+           ((.android // []) | map("| [\(.id[0:8])](\($apre)\(.id)) | \(.title) | \(.events) | — |") | join("\n"))' \
       "$CRASH_JSON" 2>/dev/null || printf '（本次崩溃数据抓取失败）'
     printf '\n\n> Android 未采用「提交信息带 Crashlytics issue ID」的约定，**无法自动判定修复状态**（显示为 —）。\n'
     printf '> 其修复情况以每周 triage 报告的语义分析为准（见下方报告归档）。\n'

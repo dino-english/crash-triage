@@ -138,6 +138,11 @@ jq -n --argjson ios "$IOS_RAW" --argjson android "$AND_RAW" \
       events:       (.events | tonumber),
       users:        (.users  | tonumber),
       latest:       .latest,
+      # 版本构成（change crash-report-issue-identity）：⚠️ norm 是**显式选字段**，
+      # 不加这一行 SQL 新增的列会被静默丢弃。⚠️ 兼容旧快照：缺该列时置 null，
+      # 渲染层据此不出括注（⛔ 不得回落成空数组——空数组与「单版本」在渲染上不可区分）。
+      versions:     (if .versions == null then null
+                     else (.versions | map({version: .version, n: (.n | tonumber)})) end),
       fix_commit:   ($fixmap[(.id[0:8])].commit  // null),
       fix_branches: ($fixmap[(.id[0:8])].branches // null)
     });

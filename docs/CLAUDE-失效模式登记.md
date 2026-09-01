@@ -401,3 +401,22 @@ F21 是**有匹配才对**、F31 是**无匹配才对**。共同点是把 grep �
 - ⚠️ **L2 的基线提升在 NO_DELIVER 闸门之前**——「跑两次对比产物」在 L2 不成立。`bin/test/baseline.sh` 的快照回滚协议就是为此存在，⛔ 新增基准文件必须登记进 `bin/test/artifacts.sh`，否则回滚不还原它、两次跑批走不同分支。
 - ⚠️ **整跑 5 分钟以上，别设短超时**——进程被信号杀掉会触发 ERR trap，把「被杀」当故障告警**发进群**。
 - ⚠️ `BASELINE_KEEP_STATE=1` 的那一轮**不还原状态**，下一轮的还原点是它跑完之后——连跑结束时 `$STATE` 停在第一轮之后，不是跑批前。要回到跑批前得自己备份。
+
+## F36 · issue 开关状态不可得，别按「字段应该有」去找
+
+BigQuery Crashlytics 导出的 schema 里与 issue 相关的字段**只有** `issue_id` / `issue_title` /
+`issue_subtitle`（2026-09-01 `bq show --schema` 实测），**没有任何 state / closed / regressed 字段**。
+唯一能给出 OPEN/CLOSED 的通路是 MCP `topIssues`，而它只返回 OPEN issue——关闭即从列表消失，
+正是 `crash-source-bigquery-migration` 当初迁走的原因，且 2026-08-06 有过误关线上 issue 的事故。
+
+⛔ 台账图例不得把「消失」与「关闭」并列：**消失 = 滚动窗口内无事件**，不等于已修复，更不等于已关闭。
+与 `remote_config_feature_rollouts` 恒空那条同源——**先查有没有值，别按「字段存在」推断可用**。
+
+## F37 · 共享变量的消费点不数清就改，改完还长得挺对
+
+`CHANGES_MD`（周报段一）有**三个**消费点：群消息 `message.md`、飞书卡片、周报文档。
+2026-09-01 实施 `crash-report-issue-identity` 时按「只有两个」去改，结果把控制台链接加进了群消息、
+**周报文档反而一条都没有**——静态看不出来，是跑完 E2E 比对三份产物才发现的。
+
+与 F35（卡片表格的列集合有两个定义点）同族。⛔ 拆分或改共享渲染变量前先 `grep -n` 数清全部消费点，
+并把清单写进代码注释里，别让下一个人再数一遍。

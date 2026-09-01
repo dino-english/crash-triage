@@ -169,6 +169,61 @@ AGENT_LOG_BASE="$OUT_DIR/agent"
 ATTEMPTS="${CRASH_REPORT_AGENT_ATTEMPTS:-2}"
 AGENT_RC=1
 
+# ── 模型端点预检：本地代理未监听时尝试拉起（2026-09-01）─────────────
+# 起因：2026-08-28 ~ 09-01 连续 5 天、L1 与 L2 的每一次模型调用全部失败，而日志里只有
+#   `API Error: Connection refused — a firewall or proxy may be blocking it (ConnectionRefused)`
+#   ——不含任何 HTTP 状态码，于是 crash-weekly.sh 的错误码识别落进兜底分支，
+#   周报上只写「模型不可用（退出码 1）· 未能从日志识别 API 错误码」，没人知道要去拉什么。
+# 根因既不是额度也不是网络：本机 ~/.claude/settings.json 把 ANTHROPIC_BASE_URL 指向
+#   http://127.0.0.1:15721（由 cc-switch 提供，LaunchAgent com.ccswitch.desktop，
+#   RunAtLoad + KeepAlive 都为 true），而该应用 08-27 20:09 之后不在运行、端口无人监听。
+#   同期 curl https://api.anthropic.com 从该机 43ms 可达——**公网可达不等于端点可达**。
+#
+# ⛔ 只处理「已配置本机端点」这一种情况：未配 ANTHROPIC_BASE_URL、或它不指向本机时一律直接返回。
+#    远端可达性不在这里猜——那是模型调用自身连同既有重试/诊断路径的职责。
+# ⚠️ 全程不得失败退出。任何一步出错都只降级为「不预检」，让模型调用照常尝试。
+#    预检本身绝不能成为整跑失败的原因（新增检查不得走触发 ERR trap 的路径）。
+MODEL_PROXY_LABEL="${CRASH_REPORT_MODEL_PROXY_LABEL:-com.ccswitch.desktop}"
+MODEL_PROXY_WAIT="${CRASH_REPORT_MODEL_PROXY_WAIT:-20}"
+
+# stdout：本机端点的端口号；未配置、配置不可读或指向非本机时输出空串。
+_endpoint_port() {
+  local _url
+  _url="$(jq -r '.env.ANTHROPIC_BASE_URL // ""' "$HOME/.claude/settings.json" 2>/dev/null || true)"
+  case "$_url" in
+    http://127.0.0.1:*|http://localhost:*) printf '%s' "${_url##*:}" ;;
+    *)                                     printf '' ;;
+  esac
+}
+
+_port_listening() { lsof -nP -iTCP:"$1" -sTCP:LISTEN >/dev/null 2>&1; }
+
+# 返回值恒为 0：预检只做「尽力恢复 + 如实播报」，判定成败仍由模型调用本身负责。
+preflight_model_endpoint() {
+  local _port _waited
+  _port="$(_endpoint_port)"
+  [ -n "$_port" ] || return 0
+  _port_listening "$_port" && return 0
+
+  echo "  ⚠️ 模型端点 127.0.0.1:${_port} 无人监听，尝试拉起 ${MODEL_PROXY_LABEL}" >&2
+  launchctl kickstart -k "gui/$(id -u)/${MODEL_PROXY_LABEL}" >/dev/null 2>&1 || true
+
+  _waited=0
+  while [ "$_waited" -lt "$MODEL_PROXY_WAIT" ]; do
+    sleep 2
+    _waited=$((_waited + 2))
+    if _port_listening "$_port"; then
+      echo "  ✅ 模型端点已恢复（${_waited}s）" >&2
+      return 0
+    fi
+  done
+
+  echo "  ⚠️ 拉起后 ${MODEL_PROXY_WAIT}s 内端口仍无人监听；照常调用模型，失败按既有路径诊断" >&2
+  return 0
+}
+
+preflight_model_endpoint
+
 # allowedTools 必须逐个列只读工具（理由见上方注释块）。
 run_agent() { # $1=尝试序号；输出同时进 stdout（跑批日志）与 agent-<N>.log（事后排查）
   "${AGENT_CMD:-claude}" -p "$PROMPT" \

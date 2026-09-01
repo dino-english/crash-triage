@@ -24,6 +24,16 @@ SEEN_CUTOFF="${8:-}" # 基准保留期起点（YYYY-MM-DD），早于它的条�
 [ -s "$SNAPSHOT" ] || { echo "snapshot.json 为空：$SNAPSHOT" >&2; exit 1; }
 [ -s "$FIXMAP" ] || echo '{"mapped":{},"ambiguous":[],"platform_unavailable":[]}' > "$FIXMAP"
 
+# ⚠️ **函数不跨进程**：本脚本由 crash-weekly.sh 以子进程调用，父进程 source 的函数到不了这里，
+#    issue_url / issue_url_prefix 必须自己加载一次（与 fetch-snapshot-bq.sh 同一处理）。
+# ⚠️ 缺文件时降级为不带链接，⛔ 不阻塞台账渲染——台账内容比链接重要得多。
+CORE_LINK_OK=0
+if [ -f "$(dirname "$0")/lib/common.sh" ]; then
+  # shellcheck disable=SC1091
+  . "$(dirname "$0")/lib/common.sh" && CORE_LINK_OK=1
+fi
+[ "$CORE_LINK_OK" = 1 ] || { issue_url() { printf ''; }; issue_url_prefix() { printf ''; }; }
+
 # DIFF_FILE 可能是调用方传入的进程替换（<(...)），底层是命名管道，只能被消费一次——
 # 下方对同一份 diff 数据要读 6 次（2 平台 × new/resolved/spiked），第 2 次起会读到空，
 # 静默丢失时间线条目（2026-08-19 实测：DRY RUN 真实变化 5 条，时间线渲染出 0 条）。
@@ -69,7 +79,8 @@ fi
 # ── 逐平台构建现状表行 ──────────────────────────────────
 build_rows() { # $1=平台标签(iOS|Android) $2=snapshot key(ios|android)
   local label="$1" key="$2"
-  jq -r --arg label "$label" --arg key "$key" --arg day "$DAY" \
+  local urlpre; urlpre="$(issue_url_prefix "$key")"
+  jq -r --arg label "$label" --arg key "$key" --arg day "$DAY" --arg urlpre "$urlpre" \
     --slurpfile fm "$FIXMAP" --argjson prev "$PREV_JSON" \
     --argjson seen "$SEEN_JSON" --arg prevday "$SEEN_PREV_DAY" --argjson lcok "$LIFECYCLE_OK" '
     ($fm[0].mapped // {}) as $mapped |
@@ -109,7 +120,7 @@ build_rows() { # $1=平台标签(iOS|Android) $2=snapshot key(ios|android)
              elif $p.note != null then $p.note
              else "" end)
     } |
-    "| \(.platform) | \(.short) | \(.title) | \(.type) | \(.first_seen) | \(.disposition) | \(.status_badge) | \(.events) | \(.note) |"
+    "| \(.platform) | \(if $urlpre == "" then .short else "[\(.short)](\($urlpre)\(.full))" end) | \(.title) | \(.type) | \(.first_seen) | \(.disposition) | \(.status_badge) | \(.events) | \(.note) |"
   ' "$SNAPSHOT"
 }
 
@@ -130,9 +141,10 @@ NF_TABLE=""
 nf_rows() { # $1=平台标签 $2=snapshot key
   # 空标题必须渲染成「—」：iOS 存在 issue_title 为空的记录（实测 a7cb1856），
   # 空单元格会被读成「渲染坏了」。`// "—"` 挡不住空字符串，必须显式判空。
-  jq -r --arg label "$1" --arg key "$2" '
+  local urlpre; urlpre="$(issue_url_prefix "$2")"
+  jq -r --arg label "$1" --arg key "$2" --arg urlpre "$urlpre" '
     ((.nonfatal[$key]) // [])[] |
-    "| \($label) | \(.issue_id[0:8]) | \(if (.title // "") == "" then "—" else .title end) | \(if (.subtitle // "") == "" then "—" else .subtitle end) | \(.n) | \(.users) | \(.latest) |"
+    "| \($label) | \(if $urlpre == "" then .issue_id[0:8] else "[\(.issue_id[0:8])](\($urlpre)\(.issue_id))" end) | \(if (.title // "") == "" then "—" else .title end) | \(if (.subtitle // "") == "" then "—" else .subtitle end) | \(.n) | \(.users) | \(.latest) |"
   ' "$SNAPSHOT" 2>/dev/null || true
 }
 NF_N_IOS="$(jq -r '((.nonfatal.ios) // []) | length' "$SNAPSHOT" 2>/dev/null || echo 0)"
@@ -150,26 +162,42 @@ if [ "$NF_N_IOS" != "0" ] || [ "$NF_N_AND" != "0" ]; then
 fi
 
 # ── 变更时间线：只记录真正的变化（新增/消失/暴涨/反扫命中的状态变更），平稳周不追加 ──
+# ⛔ 链接版不加反引号：md2docx.py 的链接正则不处理嵌套行内代码。
+_id_tok() { # $1=平台键 $2=完整id → 可点的 8 位短 id（无链接时退回反引号包裹）
+  local _u; _u="$(issue_url "$1" "$2")"
+  if [ -n "$_u" ]; then printf '[%s](%s)' "${2:0:8}" "$_u"; else printf '`%s`' "${2:0:8}"; fi
+}
 TIMELINE_LINES=""
 add_line() { TIMELINE_LINES="${TIMELINE_LINES}- ${DAY}：$1$([ -n "$REPORT_URL" ] && printf ' · [周报](%s)' "$REPORT_URL")
 "; }
 
+# ⚠️ 每条带 8 位 issue id（change crash-report-issue-identity）：标题不是稳定标识——
+# 同一条崩溃在责任帧命名与人工描述之间不可互推，2026-09-01 的一次人工比对因此把同一条
+# issue 判成了两条。时间线是回溯「这条崩溃何时首次出现」的唯一入口，只有标题时链路会断。
+# ⚠️ 加 id 改变了条目正文，而查重键正是「去掉 ` · [周报](` 后缀的正文」（crash-weekly.sh:377）——
+#    **重跑本 change 之前的旧周次**时，旧格式条目匹配不上新格式，会重复追加。
+#    稳态无影响（同一周内两次跑批都是新格式）。
 for plat_key_label in "ios:iOS" "android:Android"; do
   key="${plat_key_label%%:*}"; label="${plat_key_label##*:}"
-  while IFS=$'\t' read -r title events; do
+  while IFS=$'\t' read -r id title events; do
     [ -n "$title" ] || continue
-    add_line "🆕 [$label] 新增 ${title}（$events 事件）"
-  done < <(jq -r --arg k "$key" '(.[$k].new // [])[] | [.title, .events] | @tsv' "$DIFF_FILE" 2>/dev/null || true)
+    add_line "🆕 [$label] 新增 $(_id_tok "$key" "$id") ${title}（$events 事件）"
+  done < <(jq -r --arg k "$key" '(.[$k].new // [])[] | [.id, .title, .events] | @tsv' "$DIFF_FILE" 2>/dev/null || true)
 
-  while IFS=$'\t' read -r title; do
+  while IFS=$'\t' read -r id title; do
     [ -n "$title" ] || continue
-    add_line "✅ [$label] 消失 $title"
-  done < <(jq -r --arg k "$key" '(.[$k].resolved // [])[] | .title' "$DIFF_FILE" 2>/dev/null || true)
+    add_line "🔁 [$label] 回归 $(_id_tok "$key" "$id") ${title}"
+  done < <(jq -r --arg k "$key" '(.[$k].regressed // [])[] | [.id, .title] | @tsv' "$DIFF_FILE" 2>/dev/null || true)
 
-  while IFS=$'\t' read -r title events; do
+  while IFS=$'\t' read -r id title; do
     [ -n "$title" ] || continue
-    add_line "📈 [$label] 暴涨 ${title}（$events 事件）"
-  done < <(jq -r --arg k "$key" '(.[$k].spiked // [])[] | [.title, .events] | @tsv' "$DIFF_FILE" 2>/dev/null || true)
+    add_line "✅ [$label] 消失 $(_id_tok "$key" "$id") $title"
+  done < <(jq -r --arg k "$key" '(.[$k].resolved // [])[] | [.id, .title] | @tsv' "$DIFF_FILE" 2>/dev/null || true)
+
+  while IFS=$'\t' read -r id title events; do
+    [ -n "$title" ] || continue
+    add_line "📈 [$label] 暴涨 $(_id_tok "$key" "$id") ${title}（$events 事件）"
+  done < <(jq -r --arg k "$key" '(.[$k].spiked // [])[] | [.id, .title, .events] | @tsv' "$DIFF_FILE" 2>/dev/null || true)
 done
 
 # 反扫命中的状态变更（已修待验/修了仍在）也进时间线——这是台账真正的价值：结论随代码事实更新

@@ -187,6 +187,37 @@ SNAP_NEW="$OUT_DIR/snapshot.json"
 [ -s "$SNAP_NEW" ] || fail "数据层未产出 snapshot.json"
 jq -e '.ios and .android' "$SNAP_NEW" >/dev/null || fail "快照 JSON 结构不符（缺 ios/android）"
 
+# ── 分析层实际执行者（change crash-report-issue-identity，spec crash-perf-data-analysis-split）──
+# ⛔ 只写「模型产出」不够：调用可能经本机代理转发到第三方端点，**请求的模型名与实际执行的模型名
+#    不必相同**。2026-09-01 实测生产机：ANTHROPIC_BASE_URL 指向本机 cc-switch，上游是
+#    azure-foundry，代理日志里 request_model=claude-opus-4-8 实际由 gpt-5.6-terra 执行，
+#    且 opus/sonnet/haiku/fable 四档全部映射到同一个模型。而分析层 prompt 与台账的证据分级
+#    （✅钻取确认 / ⚠️聚合推断）是按特定模型的行为调校的——读者若默认根因出自被请求的那个模型，
+#    「未经人工复核」这句标注就没有起到它该起的作用。
+# ⚠️ 只能取**运行环境的声明**，不是上游确认：代理可把请求改写并转发至任意上游，脚本侧无从证实。
+# ⛔ 取不到时如实写「无法确定」，**不得回落成请求时用的模型名**，更不得表述为某个厂商的模型。
+# ⚠️ 全程不失败：读不到配置只降级为「无法确定」，不得成为整跑失败的原因。
+model_provenance() { # stdout: 一行说明
+  local _cfg="$HOME/.claude/settings.json" _base _req _act _host
+  _base="$(jq -r '.env.ANTHROPIC_BASE_URL // ""'                "$_cfg" 2>/dev/null || true)"
+  _req="$(jq  -r '.env.ANTHROPIC_DEFAULT_OPUS_MODEL // ""'      "$_cfg" 2>/dev/null || true)"
+  _act="$(jq  -r '.env.ANTHROPIC_DEFAULT_OPUS_MODEL_NAME // ""' "$_cfg" 2>/dev/null || true)"
+  if [ -z "$_base" ] && [ -z "$_act" ]; then
+    printf '⚠️ **无法确定**（运行环境未声明端点与模型映射）'
+    return 0
+  fi
+  _host="$_base"
+  [ -n "$_host" ] || _host="（未声明，按默认端点）"
+  if [ -n "$_act" ] && [ -n "$_req" ] && [ "$_act" != "$_req" ]; then
+    printf '端点 `%s` · 模型映射 `%s` → `%s`' "$_host" "$_req" "$_act"
+  elif [ -n "$_act" ]; then
+    printf '端点 `%s` · 模型 `%s`' "$_host" "$_act"
+  else
+    printf '端点 `%s` · 模型未声明，**无法确定实际执行者**' "$_host"
+  fi
+  return 0
+}
+
 # ── 3b. 分析层：模型跑深度分析（可选，失败只降级）──────
 # 额度耗尽 / 超时 / 模型不可用都只让本周少一章分析，不影响数据、台账与投递。
 TRIAGE_REPORT="$OUT_DIR/report.md"
@@ -220,6 +251,16 @@ else
     _alog="$OUT_DIR/analysis/agent"
     _atxt="$(cat "${_alog}"*.log 2>/dev/null | tail -c 8000 || true)"
     _acode="$(printf '%s' "$_atxt" | grep -oE 'API Error: [0-9]{3}' | grep -oE '[0-9]{3}' | tail -1 || true)"
+    # ⛔ **无 HTTP 码的失败也必须能被识别**。2026-08-28 ~ 09-01 实测：ANTHROPIC_BASE_URL 指向的
+    #    本机代理（cc-switch，127.0.0.1:15721）未运行时，日志只有
+    #    `API Error: Connection refused …（ConnectionRefused）`，一个数字都没有，
+    #    于是落进兜底分支写「未能识别 API 错误码」——而正确动作是「拉起本地代理」，
+    #    与「等额度恢复」南辕北辙。与 F29 同源：**猜错原因比不给原因更贵**。
+    # ⚠️ 判断放在 `if` 条件位上，grep 无匹配返回 1 不触发 ERR trap（F31 指的是命令位）。
+    if printf '%s' "$_atxt" | grep -q 'ConnectionRefused\|Connection refused'; then
+      ANALYSIS_SKIP_REASON="模型端点连接被拒（本机代理未运行）"
+      ANALYSIS_FIX_HINT="**与额度无关**；检查 ANTHROPIC_BASE_URL 指向的本机代理是否在监听（fetch-snapshot.sh 已尝试自动拉起，仍失败说明拉起也没成功），恢复后重跑本周即可补齐。"
+    else
     case "${_acode:-}" in
       (429) ANALYSIS_SKIP_REASON="模型额度耗尽（API 429）"
             ANALYSIS_FIX_HINT="额度恢复后重跑本周即可补齐。" ;;
@@ -232,6 +273,7 @@ else
       (*)   ANALYSIS_SKIP_REASON="模型不可用（退出码 ${TRIAGE_RC:-?}）"
             ANALYSIS_FIX_HINT="未能从日志识别 API 错误码，需看 ${_alog}-*.log 定位，⛔ 不要默认当成额度问题。" ;;
     esac
+    fi
   fi
   if [ -s "$OUT_DIR/analysis/report.md" ]; then
     cp "$OUT_DIR/analysis/report.md" "$TRIAGE_REPORT"
@@ -244,6 +286,20 @@ else
   fi
 fi
 
+# ⚠️ 本块原在台账渲染段（第 5 组）内，2026-09-01 上移至此：变化检测要读同一份基准判「回归」，
+#    而顶层「先用后定」会被 check-scripts 第 7 项拦下。⛔ 只移动位置，内容与时序语义未变
+#    （SEEN_FILE 的提升仍在跑批收尾，见文件末尾）。
+# ── 生命周期基准（change crash-report-correctness-fixes，design D4）────────────
+# spec crash-perf-issue-lifecycle 要求三态（新增 / 回归 / 长期），台账此前只有两态。
+# ⛔ **不复用 L1 的 issue_seen**：L1 取数走 `crash-issues.sql`（**带版本过滤**，只看最新 2 版），
+#    L2 走 `crash-issues-all.sql`（**刻意不带**，台账要跨版本追踪）。只在老版本上发生的 issue
+#    从不进 L1 基准，复用会让它们每周都被标成「🆕新增」——比现在的「全是遗留」更糟，因为它是错的。
+# 结构：{"<32位id>": {"first":"YYYY-MM-DD","last":"YYYY-MM-DD"}}，保留 90 天。
+SEEN_FILE="$STATE/issue-seen.json"
+SEEN_KEEP_DAYS="${CRASH_REPORT_SEEN_KEEP_DAYS:-90}"
+SEEN_NEXT_FILE="$OUT_DIR/issue-seen-next.json"
+[ -s "$SEEN_FILE" ] || echo '{}' > "$SEEN_FILE"
+
 # ── 4. 变化检测（纯 jq，不经模型）─────────────────────
 step "变化检测"
 # 首跑无基准时不能把全部 issue 当「新增」播报（2026-08-07 实测刷出 26 条）。
@@ -254,27 +310,37 @@ if [ ! -f "$SNAP_LAST" ]; then
   echo '{"ios":[],"android":[]}' > "$SNAP_LAST"
 fi
 
-DIFF="$(jq -n --slurpfile new "$SNAP_NEW" --slurpfile old "$SNAP_LAST" '
-  def bykey: map({key:.id, value:.}) | from_entries;
-  def plat($p):
-    ($new[0][$p] // []) as $n | ($old[0][$p] // []) as $o
-    | ($n | bykey) as $nm | ($o | bykey) as $om
-    | {
-        total:    ($n | length),
-        events:   ($n | map(.events) | add // 0),
-        new:      [ $n[] | select($om[.id] == null) ],
-        resolved: [ $o[] | select($nm[.id] == null) ],
-        spiked:   [ $n[] | select($om[.id] != null and .events >= ($om[.id].events * 2) and .events >= 5) ],
-        fixed_pending: [ $n[] | select(.fix_commit != null) ]
-      };
-  {ios: plat("ios"), android: plat("android")}
+# ⚠️ 「不在上一轮快照里」有两种情形，此前挤在同一个 new 桶里（change crash-report-issue-identity）：
+#    真正的新 issue，和**曾出现过、上一轮消失、本轮回来**的回归。两者处置方式不同——
+#    回归意味着修复失效或场景重现。台账用 90 天基准早已能判三态，而段一只跟上一轮快照比，
+#    于是同一轮跑批可以自相矛盾（2026-08-31 实测：`2a800b33` 台账标🆕新增、日报标长期）。
+# ⛔ 复用台账那份 SEEN_FILE，**不新建第三份基准**：保留期、清理、「上一轮取最大 last」三条规则
+#    都已在 spec 里定死并踩过坑，复制一份等于把三个坑重开一次。
+# ⛔ 读取必须在基准提升**之前**（提升在跑批收尾）——提升后每条的 last 都是今天，判定恒为「长期」。
+# ⚠️ 基准为空（首次建立）时 $sn 恒为 null，自动退回两态，与 render-ledger.sh 的回落一致。
+DIFF="$(jq -n --slurpfile new "$SNAP_NEW" --slurpfile old "$SNAP_LAST" --slurpfile seen "$SEEN_FILE" '
+  ($seen[0] // {}) as $sn
+  | def bykey: map({key:.id, value:.}) | from_entries;
+    def plat($p):
+      ($new[0][$p] // []) as $n | ($old[0][$p] // []) as $o
+      | ($n | bykey) as $nm | ($o | bykey) as $om
+      | {
+          total:    ($n | length),
+          events:   ($n | map(.events) | add // 0),
+          new:       [ $n[] | select($om[.id] == null and $sn[.id] == null) ],
+          regressed: [ $n[] | select($om[.id] == null and $sn[.id] != null) ],
+          resolved: [ $o[] | select($nm[.id] == null) ],
+          spiked:   [ $n[] | select($om[.id] != null and .events >= ($om[.id].events * 2) and .events >= 5) ],
+          fixed_pending: [ $n[] | select(.fix_commit != null) ]
+        };
+    {ios: plat("ios"), android: plat("android")}
 ')"
 
 if [ "$IS_BASELINE" = "1" ]; then
   CHANGED=0
   echo "  首次运行，建立基线（不报新增）"
 else
-  CHANGED=$(echo "$DIFF" | jq '[.ios,.android] | map(.new,.resolved,.spiked) | flatten | length')
+  CHANGED=$(echo "$DIFF" | jq '[.ios,.android] | map(.new,.regressed,.resolved,.spiked) | flatten | length')
   echo "  变化项：$CHANGED"
 fi
 
@@ -299,16 +365,6 @@ LEDGER_TIMELINE_FILE="$OUT_DIR/ledger-timeline-delta.md"
 LEDGER_NF_FILE="$OUT_DIR/ledger-nonfatal-table.md"
 LEDGER_RENDER_OK=0
 
-# ── 生命周期基准（change crash-report-correctness-fixes，design D4）────────────
-# spec crash-perf-issue-lifecycle 要求三态（新增 / 回归 / 长期），台账此前只有两态。
-# ⛔ **不复用 L1 的 issue_seen**：L1 取数走 `crash-issues.sql`（**带版本过滤**，只看最新 2 版），
-#    L2 走 `crash-issues-all.sql`（**刻意不带**，台账要跨版本追踪）。只在老版本上发生的 issue
-#    从不进 L1 基准，复用会让它们每周都被标成「🆕新增」——比现在的「全是遗留」更糟，因为它是错的。
-# 结构：{"<32位id>": {"first":"YYYY-MM-DD","last":"YYYY-MM-DD"}}，保留 90 天。
-SEEN_FILE="$STATE/issue-seen.json"
-SEEN_KEEP_DAYS="${CRASH_REPORT_SEEN_KEEP_DAYS:-90}"
-SEEN_NEXT_FILE="$OUT_DIR/issue-seen-next.json"
-[ -s "$SEEN_FILE" ] || echo '{}' > "$SEEN_FILE"
 # ⚠️ 基准是否已建立**必须在 render-ledger.sh 之前判**：跑批收尾会把 SEEN_FILE 覆盖成本轮值，
 # 之后再判永远是「已建立」。复发率的分母同理——见下方 RECUR_MD。
 SEEN_WAS_ESTABLISHED=0
@@ -753,25 +809,65 @@ WIN_FULL="$(win_full "$RUN_EPOCH" "$TZ_LABEL" "$WEEK_DAYS" "$DATA_UNTIL")"
 echo "  取数区间 ${WEEK_DAYS}d：$WIN_COMPACT"
 
 # ── 6. 组装播报 ───────────────────────────────────────
-sec() { # $1=平台名 $2=json key → markdown 变化摘要
-  local name="$1" k="$2"
+# ⚠️ 段一**同时进卡片与文档**（卡片的 markdown 块 / 文档正文），二者共用本组函数。
+#    Firebase 直达链接只能进文档：群卡片一屏十几条变化各挂一个 console URL，版面立刻不能看。
+# ⛔ 不为此复制出「卡片版」「文档版」两份渲染——那正是 F35 的形状（卡片表格的列集合有两个
+#    定义点，改一处就让预览与实发不一致）。改为**一个定义点、两次调用**，靠参数区分。
+_chg_rows() { # $1=平台key $2=桶名 $3=图标与词 $4=是否带事件数(1/0) $5=是否带链接(1/0)
+  local k="$1" bucket="$2" mark="$3" with_events="$4" want_link="$5"
+  local id title events vers vtxt suffix idtok u
+  while IFS=$'\t' read -r id title events vers; do
+    [ -n "$id" ] || continue
+    # 版本构成：⚠️ **只在跨版本时出括注**——单版本时它与主数字重复，只增噪音。
+    # ⛔ 全角括号先条件赋值再拼接，禁 ${var:+（...）}：bash 会把全角字节并进变量名。
+    vtxt=""
+    if [ -n "$vers" ] && [ "$vers" != "null" ] \
+       && [ "$(printf '%s' "$vers" | jq 'length' 2>/dev/null || echo 0)" -gt 1 ]; then
+      vtxt="（$(printf '%s' "$vers" | jq -r 'map("\(.version) \(.n)") | join(" · ")')）"
+    fi
+    suffix=""
+    [ "$with_events" = "1" ] && suffix=" · ${events} 事件"
+    # ⚠️ 展示用 8 位短 id，链接里用完整 32 位——两者各取所需，不需要反查。
+    # ⛔ 链接版**不加反引号**：md2docx.py 的链接正则是 `\[text\](url)`，不处理嵌套行内代码，
+    #    `[`id`](url)` 会渲染成字面反引号。聊天侧无链接，用反引号让 id 在正文里可辨。
+    idtok="\`${id:0:8}\`"
+    if [ "$want_link" = "1" ]; then
+      u="$(issue_url "$k" "$id")"
+      [ -n "$u" ] && idtok="[${id:0:8}]($u)"
+    fi
+    printf -- '- %s %s %s%s%s\n' "$mark" "$idtok" "$title" "$suffix" "$vtxt"
+  done < <(echo "$DIFF" | jq -r ".$k.${bucket}[]? | [.id, .title, (.events // \"\"), (if .versions == null then \"null\" else (.versions|tojson) end)] | @tsv" 2>/dev/null || true)
+  # ⛔ 必须显式 return 0：末尾的条件判断为假会让函数返回 1，而调用方在 set -e 下会整脚本退出。
+  return 0
+}
+
+sec() { # $1=平台名 $2=json key $3=1 带控制台链接（文档用），0/缺省不带（卡片用）
+  local name="$1" k="$2" want_link="${3:-0}"
   local total events
   total=$(echo "$DIFF" | jq -r ".$k.total")
   events=$(echo "$DIFF" | jq -r ".$k.events")
   # 口径已从 MCP topIssues（只含 OPEN）换成 BigQuery 事件级（含已关闭 issue），
   # 再写 OPEN 就是错的——已关闭但仍在崩的 issue 正是当初迁移的动机。
   printf '**%s** — FATAL issue %s 个 / 近 7 天 %s 事件\n' "$name" "$total" "$events"
-  [ "$IS_BASELINE" = "1" ] && { printf '（首次运行，建立基线，不列新增）\n'; return; }
-  echo "$DIFF" | jq -r ".$k.new[]?     | \"- 🆕 新增 \\(.title) · \\(.events) 事件\"" || true
-  echo "$DIFF" | jq -r ".$k.spiked[]?  | \"- 📈 暴涨 \\(.title) · \\(.events) 事件\"" || true
-  echo "$DIFF" | jq -r ".$k.resolved[]? | \"- ✅ 消失 \\(.title)\"" || true
+  [ "$IS_BASELINE" = "1" ] && { printf '（首次运行，建立基线，不列新增）\n'; return 0; }
+  # ⚠️ 顺序：新增 → 回归 → 暴涨 → 消失。「回归」与「新增」必须分列——回归意味着修复失效
+  #    或场景重现，与全新问题的处置方式不同（spec crash-perf-issue-lifecycle）。
+  _chg_rows "$k" new       "🆕 新增" 1 "$want_link"
+  _chg_rows "$k" regressed "🔁 回归" 1 "$want_link"
+  _chg_rows "$k" spiked    "📈 暴涨" 1 "$want_link"
+  _chg_rows "$k" resolved  "✅ 消失" 0 "$want_link"
   # Android 无 issue ID 提交约定，fix_commit 恒 null，该行只对 iOS 有意义
-  [ "$k" = "ios" ] && { echo "$DIFF" | jq -r ".$k.fixed_pending[]? | \"- 🛠️ 代码已修待验 \\(.title) · \\(.fix_commit)\"" || true; }
+  [ "$k" = "ios" ] && { echo "$DIFF" | jq -r ".$k.fixed_pending[]? | \"- 🛠️ 代码已修待验 \`\(.id[0:8])\` \(.title) · \(.fix_commit)\"" || true; }
   # 必须显式 return 0：末行的 [ ] && {...} 在 Android 分支上求值为假会让函数返回 1，
   # 而 CHANGES_MD="$(sec ...)" 在 set -e 下会因此整脚本退出（旧版嵌在 heredoc 里侥幸没暴露）。
   return 0
 }
-CHANGES_MD="$(sec "iOS" ios; printf '\n'; sec "Android" android)"
+# 卡片版不带链接、文档版带链接（design D7）。⛔ 两者出自同一个 sec()，不是两份拷贝。
+CHANGES_MD="$(sec "iOS" ios 0; printf '\n'; sec "Android" android 0)"
+CHANGES_MD_DOC="$(sec "iOS" ios 1; printf '\n'; sec "Android" android 1)"
+# ⚠️ **消费点有三个，别只数两个**（2026-09-01 实施本 change 时就因此改错了地方）：
+#   群消息 message.md（MSG heredoc）· 卡片（--arg ch）· 周报文档（printf '## 一、本周变化'）。
+#   前两个是聊天侧，用无链接的 CHANGES_MD；只有周报文档用 CHANGES_MD_DOC。
 
 # ── 复发率（change crash-recurrence-rate）────────────────────────────────
 # ⛔ **给分数不给百分比**：基准实测只有 14 个 key，1 个回归 = 7.1%、2 个 = 14.3%——
@@ -812,6 +908,7 @@ else
   WEEK_STATE="quiet";    WEEK_TAG="· ✅ 本周无新增"
   CHANGES_MD="$(printf '**✅ 本周无新增 / 暴涨 / 消失的 issue**\n\niOS FATAL issue %s 个 · Android FATAL issue %s 个（近 7 天）' \
     "$(echo "$DIFF" | jq -r '.ios.total')" "$(echo "$DIFF" | jq -r '.android.total')")"
+  CHANGES_MD_DOC="$CHANGES_MD"   # 平稳周两版一致（无条目可挂链接）
 fi
 
 IOS_BR="$(git -C "$REPOS_ROOT/dino-english-ios" rev-parse --abbrev-ref HEAD)"
@@ -1146,7 +1243,7 @@ REPORT="$STATE/reports/$DAY-weekly.md"
   printf '> 取数区间 %sd：**%s**\n' "$WEEK_DAYS" "$WIN_FULL"
   printf '> 窗口起点 = 本次跑批时刻 − %s 天（SQL 下界）；终点 = sessions 活表实际取到的最新数据。\n' "$WEEK_DAYS"
   printf '> 本次运行 %s · 审计 $STATE/audit/weekly-%s.events.jsonl\n\n' "$RUN_ID" "$RUN_ID"
-  printf '## 一、本周变化\n\n%s\n\n' "$CHANGES_MD"
+  printf '## 一、本周变化\n\n%s\n\n' "$CHANGES_MD_DOC"
   [ -n "$RECUR_MD" ] && printf '%s\n\n' "$RECUR_MD"
   [ -n "$RECUR_MD" ] && printf '> ⚠️ 「回归」指该 issue 在**上一轮基准日**（取基准里 `last` 的最大值，**不是「上周」**）无记录、本轮重新出现。判定窗口是崩溃段的滚动窗口——「消失」是**窗口内无事件**，⛔ 不等于「已修复」。⛔ 只给分数不给百分比：基准规模小（实测 14 项），百分比是伪精度。\n\n'
   printf '## 二、主力版本（近 %s 天会话量 top2）\n\n' "$WEEK_DAYS"
@@ -1190,6 +1287,8 @@ REPORT="$STATE/reports/$DAY-weekly.md"
   # 而不是「本周没问题」。缺分析和无异常是两件完全不同的事。
   if [ "$ANALYSIS_OK" = "1" ]; then
     printf '\n> 分析层：✅ 本周含深度分析（根因与修复方案**未经人工复核**，落地前须验证）。\n'
+    # spec：有分析时 MUST 同时标注实际执行分析的模型标识与端点归属，且标明是环境声明。
+    printf '> 执行者（**环境声明**，非上游确认）：%s\n' "$(model_provenance)"
   else
     printf '\n> 分析层：⚠️ **本周无深度分析** — %s。\n' "$ANALYSIS_SKIP_REASON"
     printf '> 以上数据、台账与变化检测均由 BigQuery + git 纯脚本产出，**不受影响**；缺的只是根因与修复方案。\n'

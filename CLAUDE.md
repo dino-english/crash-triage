@@ -70,6 +70,10 @@ cat "$STATE/health-daily.json"   # L1 健康（L2 是 health.json）；日志在
 - ⛔ `blame_frame.owner` 标识**责任帧归属**，不是「谁触发崩溃」——owner 与 library 必须一起给
 - ⚠️ issue「上一轮」取 `issue_seen` **最大日期**不是「昨天」——漏跑一天会把全部 issue 误判回归
 - ⚠️ 旧 `ios_ids`/`android_ids` 来自 MCP 且长期空数组——生命周期判定已不读
+- ⛔ **三份产物的 issue 条目一律带 8 位短 id，id 本身即控制台链接**——标题不是稳定标识（责任帧名 vs 人话名不可互推）。⚠️ 链接只进文档，聊天侧（群消息 / 卡片）用反引号纯短 id；⚠️ `CHANGES_MD` 有**三个**消费点，改前数清楚
+- ⚠️ **周报段一的三态判定复用台账的 `issue-seen.json`**，⛔ 不新建第三份基准；⛔ 读取必须在基准提升之前（提升后判定恒为「长期」）
+- ⚠️ **跨版本合计数必须给版本构成**（只在跨版本时出括注）；⚠️ `users` 跨版本不可相加，版本维度只给事件数
+- ⛔ **issue 开关状态不可得**——导出 schema 只有 `issue_id`/`issue_title`/`issue_subtitle`；台账图例的「消失」⛔ 不等于已修复、更不等于已关闭
 - ⛔ **首轮只建基线不标新增**
 - ⛔ 更新事实层记录**不碰 `.source` 字段**（区分 bigquery 聚合与模型完整事件）
 - ⛔ **灰度关联做不了**（`remote_config_feature_rollouts` 字段存在但恒空）——先查有没有值，别按「字段存在」推断可用

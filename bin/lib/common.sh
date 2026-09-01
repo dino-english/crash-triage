@@ -61,3 +61,41 @@ fail() {
   alert_once "$CURRENT_STEP" "$*" 1
   exit 1
 }
+
+# ── Crashlytics 控制台直达链接（change crash-report-issue-identity）────────────
+# 报告只给可定位对象与集中度，完整下钻交给控制台自己呈现——读者点过去看到的就是控制台口径，
+# 于是「⛔ 不可与控制台对照」那一类注解失去存在理由。
+# ⚠️ 链接必须用**完整 32 位 id**，⛔ 不能由展示用的 8 位短 id 拼回去（取数层拿到的本就是完整 id）。
+# ⚠️ 两个 app id 在 bin/fetch-snapshot.sh 顶部另有一份（该脚本不 source 本文件，函数与常量都不跨进程）。
+#    改动时两处都要动；这是已知的重复，登记在此而不是假装它不存在。
+FIREBASE_PROJECT="${FIREBASE_PROJECT:-dino-english-497507}"
+FIREBASE_APP_IOS="${FIREBASE_APP_IOS:-1:465344775452:ios:610bc2f8ea0750fff466d9}"
+FIREBASE_APP_AND="${FIREBASE_APP_AND:-1:465344775452:android:2c546b57b0176325f466d9}"
+
+issue_url() { # $1=平台键(ios/android) $2=完整 32 位 issue id → stdout: 控制台 URL（参数不全则空串）
+  local _app
+  case "$1" in
+    (ios)     _app="$FIREBASE_APP_IOS" ;;
+    (android) _app="$FIREBASE_APP_AND" ;;
+    (*)       printf ''; return 0 ;;
+  esac
+  case "$2" in
+    ([0-9a-f]*) : ;;
+    (*) printf ''; return 0 ;;
+  esac
+  printf 'https://console.firebase.google.com/v1/appid/project/%s/crashlytics/app/%s/issues/%s' \
+    "$FIREBASE_PROJECT" "$_app" "$2"
+}
+
+# jq 渲染的表格里没法调 shell 函数，故另给一个前缀版本：`<prefix><32位id>` 即完整 URL。
+# ⛔ 两者共用同一组常量，不得各写一份 URL 形状。
+issue_url_prefix() { # $1=平台键 → stdout: URL 前缀（平台无效则空串）
+  local _app
+  case "$1" in
+    (ios)     _app="$FIREBASE_APP_IOS" ;;
+    (android) _app="$FIREBASE_APP_AND" ;;
+    (*)       printf ''; return 0 ;;
+  esac
+  printf 'https://console.firebase.google.com/v1/appid/project/%s/crashlytics/app/%s/issues/' \
+    "$FIREBASE_PROJECT" "$_app"
+}
