@@ -74,10 +74,14 @@ FIREBASE_APP_AND="${FIREBASE_APP_AND:-1:465344775452:android:2c546b57b0176325f46
 
 issue_url() { # $1=平台键(ios/android) $2=完整 32 位 issue id → stdout: 控制台 URL（参数不全则空串）
   local _app
+  # ⚠️ **两条链路的平台键不同**：L2 用 snapshot 的 `ios`/`android`，L1 内部一路用 `ios`/`and`
+  #    （`AND_CRASH_TBL` / `mv_ and` / `xml_issues and` …）。只认 `android` 时 **Android 侧一条链接都不出**，
+  #    而 iOS 侧正常——2026-09-02 实测：daily.xml 里 iOS 段 7 个链接、Android 段 0 个，静态看不出来。
+  # ⛔ 仍保留 `(*)` 兜底返回空：拼错的键必须得到空串而不是猜一个平台。
   case "$1" in
-    (ios)     _app="$FIREBASE_APP_IOS" ;;
-    (android) _app="$FIREBASE_APP_AND" ;;
-    (*)       printf ''; return 0 ;;
+    (ios|iOS|IOS)                 _app="$FIREBASE_APP_IOS" ;;
+    (and|android|Android|ANDROID) _app="$FIREBASE_APP_AND" ;;
+    (*)                           printf ''; return 0 ;;
   esac
   case "$2" in
     ([0-9a-f]*) : ;;
@@ -91,10 +95,14 @@ issue_url() { # $1=平台键(ios/android) $2=完整 32 位 issue id → stdout: 
 # ⛔ 两者共用同一组常量，不得各写一份 URL 形状。
 issue_url_prefix() { # $1=平台键 → stdout: URL 前缀（平台无效则空串）
   local _app
+  # ⚠️ **两条链路的平台键不同**：L2 用 snapshot 的 `ios`/`android`，L1 内部一路用 `ios`/`and`
+  #    （`AND_CRASH_TBL` / `mv_ and` / `xml_issues and` …）。只认 `android` 时 **Android 侧一条链接都不出**，
+  #    而 iOS 侧正常——2026-09-02 实测：daily.xml 里 iOS 段 7 个链接、Android 段 0 个，静态看不出来。
+  # ⛔ 仍保留 `(*)` 兜底返回空：拼错的键必须得到空串而不是猜一个平台。
   case "$1" in
-    (ios)     _app="$FIREBASE_APP_IOS" ;;
-    (android) _app="$FIREBASE_APP_AND" ;;
-    (*)       printf ''; return 0 ;;
+    (ios|iOS|IOS)                 _app="$FIREBASE_APP_IOS" ;;
+    (and|android|Android|ANDROID) _app="$FIREBASE_APP_AND" ;;
+    (*)                           printf ''; return 0 ;;
   esac
   printf 'https://console.firebase.google.com/v1/appid/project/%s/crashlytics/app/%s/issues/' \
     "$FIREBASE_PROJECT" "$_app"

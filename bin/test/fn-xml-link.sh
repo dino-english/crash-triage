@@ -19,4 +19,18 @@ h_assert_eq "" "$(printf '%s' "$out" | grep -o '<a href=[^"]' || true)" "href �
 printf '"2a800b33","长期","T","1","1","1.0","2026-08-29",""\n' > "$C"
 out="$(h_run xml_csv_table "$C" 'Issue,状态,标题,事件,影响安装,集中度,最新' '1,2,3,4,5,6,7' "1:8:$(issue_url_prefix ios)")"
 h_assert_eq "" "$(printf '%s' "$out" | grep -o '<a href' || true)" "id 列为空 → 回落纯文本"
+
+
+# ── 平台键：两条链路用的不是同一套（2026-09-02 实测漏掉 Android）────────────
+# L2 用 snapshot 的 ios/android，L1 内部一路用 ios/and。此前只测了 ios，
+# 于是「Android 段一条链接都不出」静态看不出来、夹具也没抓到。
+for k in ios and android iOS Android; do
+  h_assert_contains "$(issue_url_prefix "$k")" "console.firebase.google.com" "平台键 \`$k\` 必须解析出前缀"
+done
+h_assert_eq "" "$(issue_url_prefix bogus)" "⛔ 拼错的键返回空串，不猜平台"
+h_assert_eq "" "$(issue_url_prefix '')"    "⛔ 空键返回空串"
+h_assert_contains "$(issue_url_prefix and)"     "android:2c546b57b0176325f466d9" "\`and\` 指向 Android app"
+h_assert_contains "$(issue_url_prefix android)" "android:2c546b57b0176325f466d9" "\`android\` 指向同一个 app"
+h_assert_contains "$(issue_url ios 2a800b339e12b94bc2d4555c63859df8)" "ios:610bc2f8ea0750fff466d9" "issue_url 同样认 ios"
+h_assert_contains "$(issue_url and 11e188d1688449e930a2f47db52df9bc)" "android:2c546b57b0176325f466d9" "issue_url 也必须认 \`and\`"
 h_summary
