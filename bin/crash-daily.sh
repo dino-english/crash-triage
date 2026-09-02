@@ -2493,6 +2493,18 @@ jq -n --arg day "$DAY" \
 # 重跑 deliver.sh 即可补投（--idempotency-key 保证不会重复发卡片）。
 # CRASH_REPORT_NO_DELIVER=1 可只生成不投递。
 if [ "${CRASH_REPORT_NO_DELIVER:-0}" != "1" ] && [ -x "$ROOT/bin/deliver.sh" ]; then
+
+# ── 产物自检（2026-09-02 立）───────────────────────────────────
+# ⛔ 单独一个脚本等于「靠人记得跑」——今天连漏三次都是这么漏的。挂在投递**之前**：
+#    产物已齐、还没发出去，此时发现问题代价最小。
+# ⚠️ **只告警不中止**：链接缺失是增强项失效，数字本身没错，为它拦下整条投递不划算；
+#    但必须在日志里显眼，⛔ 不能静默。
+# ⛔ 放在 `if` 条件位——它失败时返回非零，裸调会触发 ERR trap 发假告警卡。
+if [ -x "$ROOT/bin/test/assert-artifacts.sh" ]; then
+  if bash "$ROOT/bin/test/assert-artifacts.sh" "$PUBLISH_DIR" >&2; then :; else
+    echo "  ⚠️ 产物自检未通过（见上方 ❌ 行）——数据无误，但产物有增强项失效，投递照常" >&2
+  fi
+fi
   "$ROOT/bin/deliver.sh" "$PUBLISH_DIR/manifest.json" || echo "  ⚠️ 投递失败（数据已落盘，可重跑 deliver.sh 补投）"
 fi
 

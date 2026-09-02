@@ -1495,6 +1495,14 @@ echo "  ✅ 投递清单 $PUBLISH_DIR/manifest.json（发送=${SEND_FLAG}）"
 # 生成与投递分两个脚本、串行调用：投递失败不改变本脚本的退出码——数据已落盘，
 # 重跑 deliver.sh 即可补投（--idempotency-key 保证不会重复发卡片）。
 # CRASH_REPORT_NO_DELIVER=1 可只生成不投递。
+
+# ── 产物自检（2026-09-02 立）——同 crash-daily.sh，理由见那边注释 ──
+# ⛔ 放在 `if` 条件位；⚠️ 只告警不中止（数据无误，失效的是增强项）。
+if [ -x "$ROOT/bin/test/assert-artifacts.sh" ]; then
+  if bash "$ROOT/bin/test/assert-artifacts.sh" "$PUBLISH_DIR" >&2; then :; else
+    echo "  ⚠️ 产物自检未通过（见上方 ❌ 行）——数据无误，但产物有增强项失效，投递照常" >&2
+  fi
+fi
 if [ "${CRASH_REPORT_NO_DELIVER:-0}" != "1" ] && [ -x "$ROOT/bin/deliver.sh" ]; then
   "$ROOT/bin/deliver.sh" "$PUBLISH_DIR/manifest.json" || echo "  ⚠️ 投递失败（数据已落盘，可重跑 deliver.sh 补投）"
 fi
