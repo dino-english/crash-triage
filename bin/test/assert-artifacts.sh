@@ -17,7 +17,9 @@ PUB="${1:-$STATE/publish}"
 PASS=0; FAIL=0
 ok()   { PASS=$((PASS+1)); printf '  ✅ %s\n' "$1"; }
 bad()  { FAIL=$((FAIL+1)); printf '  ❌ %s\n' "$1"; [ -n "${2:-}" ] && printf '     %s\n' "$2"; }
-skip() { printf '  ⏭  %s（产物不存在，跳过）\n' "$1"; }
+# ⚠️ 跳过的原因不止一种（产物缺失 / 按设计不查），⛔ 别把原因硬拼进函数——
+#    2026-09-03 生产日志里出现过「（未投递产物本就带占位符）（产物不存在，跳过）」这种自相矛盾的话。
+skip() { printf '  ⏭  %s（跳过：%s）\n' "$1" "${2:-产物不存在}"; }
 
 IOS_APP="1:465344775452:ios:610bc2f8ea0750fff466d9"
 AND_APP="1:465344775452:android:2c546b57b0176325f466d9"
@@ -69,7 +71,7 @@ PY2
 #    deliver.sh 是在建完文档拿到真 URL 之后才回填的。默认跳过，传 CHECK_PLACEHOLDERS=1 才查。
 check_card_placeholders() { # $1=card.json
   local f="$1"; [ -s "$f" ] || { skip "卡片占位符"; return 0; }
-  [ "${CHECK_PLACEHOLDERS:-0}" = 1 ] || { skip "卡片占位符（未投递产物本就带占位符）"; return 0; }
+  [ "${CHECK_PLACEHOLDERS:-0}" = 1 ] || { skip "卡片占位符" "未投递产物本就带占位符，按设计不查；传 CHECK_PLACEHOLDERS=1 可开"; return 0; }
   local left; left="$(grep -oE '__[A-Z_]+__' "$f" | sort -u | tr '\n' ' ')"
   [ -z "$left" ] && ok "卡片无残留占位符" || bad "卡片仍有未回填的占位符" "$left"
 }
