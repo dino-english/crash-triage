@@ -286,6 +286,29 @@ else
   fi
 fi
 
+# ── 事实层缓存新鲜度断言 ──────────────────────────────────────────
+# 取舍与理由见 crash-daily.sh 同名段（只告警不失败 / 只能对落盘产物断言）。
+# L2 比 L1 更该说：台账由 L2 独占产出，事实层滞后直接体现在台账的**事件明细**上。
+# ⚠️ 判据是快照在不在，不是 ANALYSIS_OK：full 模式下 report.md 缺失但 snapshot.json 已写出
+#    是实测存在的组合（2026-08-23），那种情况事实层同样该被断言。
+# ⛔ 断言必须放 `if` 条件位（errtrace 会把 ERR trap 传进命令替换的子 shell，`||` 兜不住）——
+#    完整解释见 crash-daily.sh 同名段。
+FACT_CACHE_NOTE=""
+_fc_snap="$OUT_DIR/analysis/snapshot.json"
+_fc_log="$OUT_DIR/analysis/fact-cache-assert.log"
+if [ -s "$_fc_snap" ] && [ -x "$ROOT/bin/test/assert-fact-cache.sh" ] \
+   && ! "$ROOT/bin/test/assert-fact-cache.sh" "$_fc_snap" > "$_fc_log" 2>&1; then
+  # ⚠️ 数**去重后的 issue 个数**，不是 ❌ 行数：一个 issue 可同时踩多条断言（last_synced +
+  #    window_days），按行数会把 6 个 issue 报成 7 个——在一条讲数据准确性的告警里尤其不能错。
+  _fc_n="$(awk '/^❌/{print $2}' "$_fc_log" | sort -u | wc -l | tr -d ' ')"
+  _fc_day="$(grep -oE 'last_synced=[0-9]{4}-[0-9]{2}-[0-9]{2}' "$_fc_log" | sort | head -1 | cut -d= -f2 || true)"
+  _fc_since=""
+  [ -n "$_fc_day" ] && _fc_since="，最早停在 ${_fc_day}"
+  FACT_CACHE_NOTE="$(printf '\n🟡 **事实层缓存未刷新** — %s 个 issue 的 last_synced 不是本轮%s；台账的**事件明细**据此滞后（现状表的计数仍来自本轮 BigQuery，不受影响）。补齐：CRASH_REPORT_FORCE_REFETCH=1 重跑本周。' "$_fc_n" "$_fc_since")"
+  echo "  ⚠️ 事实层缓存断言未通过（${_fc_n} 个 issue），详情："
+  sed 's/^/    /' "$_fc_log"
+fi
+
 # ⚠️ 本块原在台账渲染段（第 5 组）内，2026-09-01 上移至此：变化检测要读同一份基准判「回归」，
 #    而顶层「先用后定」会被 check-scripts 第 7 项拦下。⛔ 只移动位置，内容与时序语义未变
 #    （SEEN_FILE 的提升仍在跑批收尾，见文件末尾）。
@@ -962,8 +985,8 @@ if [ -n "$IOS_PERF_STALE" ] || [ -n "$AND_PERF_STALE" ]; then
 fi
 NOTE_MD="$(printf '变化摘要口径：BigQuery 事件级（含已关闭 issue，全版本），近 %s 天窗，**纯脚本取数不经模型**。\n取数区间 %sd：%s\n主力版本 = 近 %s 天会话量 top2 **∪ 当日会话量 top1**（上限 3，每行标注入选理由）。⚠️ 「当日主力」那一版的窗口累计可能很小——它入选是因为**现在线上跑的是它**，与「盘子里的大头」是两个问题。日报看的是「版本号最新的 2 个版本」，三者互补，不可混比。\n崩溃率 = 事件数/会话数 · 对照分支：iOS %s · Android %s
 Crash-free 会话率 = 1 − 崩溃会话数/会话数，**会话口径**。⚠️ 与控制台首屏的**用户**口径不同、**不可直接对照**（用户率通常更低）；用户率不可得——两个数据源的用户标识不同源。本值为**下界估计**，真实值不低于所示数字。
-ANR 仅 Android（iOS 系统层无此概念）；ANR 率与崩溃率同分母，**与 Play 的用户感知 ANR 率口径不同，不可对照商店门槛**。非致命双端**不可比**（收口点覆盖不同）。\n%s%s' \
-  "$WEEK_DAYS" "$WEEK_DAYS" "$WIN_COMPACT" "$WEEK_DAYS" "$IOS_BR" "$AND_BR" "$ANALYSIS_NOTE" "$PERF_STALE_NOTE")"
+ANR 仅 Android（iOS 系统层无此概念）；ANR 率与崩溃率同分母，**与 Play 的用户感知 ANR 率口径不同，不可对照商店门槛**。非致命双端**不可比**（收口点覆盖不同）。\n%s%s%s' \
+  "$WEEK_DAYS" "$WEEK_DAYS" "$WIN_COMPACT" "$WEEK_DAYS" "$IOS_BR" "$AND_BR" "$ANALYSIS_NOTE" "$PERF_STALE_NOTE" "$FACT_CACHE_NOTE")"
 
 # 入选理由查找（bash 3.2 无关联数组，用行匹配）。⚠️ 取不到时回落「窗口主力」而不是空——
 # 空单元格会被读成「渲染坏了」，而绝大多数情形本来就是窗口主力。

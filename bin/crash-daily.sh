@@ -1013,6 +1013,40 @@ else
   echo "  ⚠️ MCP 对照数据抓取失败（不影响卡片主口径；索引页「跟踪中的 issue」本轮缺失）"
 fi
 
+# ── 事实层缓存新鲜度断言（bin/test/assert-fact-cache.sh）───────────────────
+# 事实层由**模型按自然语言策略**（fetch-snapshot.sh 的 FACT_CACHE_POLICY）维护，而
+# fetch-snapshot.sh 的 artifacts_ok() 只看 snapshot.json——模型没照做时整跑照样 rc=0、
+# health-daily.json 照写 ok:true。2026-09-04 实测连坏两天无人发现：
+#   09-03 把「线上 9 > 缓存 7」误判成命中·跳过；09-04 谎报「权限被拒」——实测 Write 到
+#   $STATE 通畅、permission_denials 为空，是模型把某个错误归因成了权限（同机复现：模型
+#   收到 EROFS 也回报 DENIED:Write）。**模型不可信，只能对落盘产物断言**。
+# 断言脚本本来就存在（change crash-fact-cache-freshness D6，失效模式 F13），只是从没挂进
+# 任何一条链路，一直当手工命令用——这次只是把它挂上，断言内容一字未改。
+# ⛔ **只告警不失败**：事实层不参与日报任何数字（全部走 BigQuery），为它让整跑非零退出会把
+#    次要降级升级成主要故障；但必须在卡片可见——与「缺分析必须在卡片可见」同一条。
+# ⛔ 断言**必须放在 `if` 条件位**，不能写成 `_out="$(断言)" || _rc=$?`：`set -o errtrace` 会把
+#    ERR trap 传进命令替换的子 shell，断言的 `exit 1` 在那个子 shell 里就是最后一条命令，
+#    **外层的 `||` 根本来不及兜**——2026-09-04 实测该写法每次断言失败都触发一次 ERR trap，
+#    也就是每次都发一张假故障告警卡。条件位上的命令则豁免于 set -e 与 ERR trap。
+# ⚠️ 同理 grep 无匹配返回 1，命令替换里的 `|| true` 不可省（F31）。
+# ⚠️ MCP 段失败时**不叠第二条**：那条路径已有自己的告警，重复只会稀释。
+FACT_CACHE_MSG=""
+_fc_log="$CRASH_DIR/fact-cache-assert.log"
+if [ "$MCP_OK" = 1 ] && [ -x "$ROOT/bin/test/assert-fact-cache.sh" ] \
+   && ! "$ROOT/bin/test/assert-fact-cache.sh" "$CRASH_JSON" > "$_fc_log" 2>&1; then
+  # ⚠️ 数**去重后的 issue 个数**，不是 ❌ 行数：一个 issue 可同时踩多条断言（last_synced +
+  #    window_days），按行数会把 6 个 issue 报成 7 个——在一条讲数据准确性的告警里尤其不能错。
+  _fc_n="$(awk '/^❌/{print $2}' "$_fc_log" | sort -u | wc -l | tr -d ' ')"
+  _fc_day="$(grep -oE 'last_synced=[0-9]{4}-[0-9]{2}-[0-9]{2}' "$_fc_log" | sort | head -1 | cut -d= -f2 || true)"
+  # ⛔ 全角标点先条件赋值再拼接，禁 ${var:+（…）}——bash 会把全角字节并进变量名。
+  _fc_since=""
+  [ -n "$_fc_day" ] && _fc_since="，最早停在 ${_fc_day}"
+  # ⛔ 补救建议由产生原因的这个分支一并赋值，不得在渲染处写死。
+  FACT_CACHE_MSG="⚠️ 事实层缓存未刷新：${_fc_n} 个 issue 的 last_synced 不是本轮${_fc_since}——日报数字不受影响，滞后的是 L2 台账的事件明细；用 CRASH_REPORT_FORCE_REFETCH=1 重跑可补齐"
+  echo "  ⚠️ 事实层缓存断言未通过（${_fc_n} 个 issue），详情："
+  sed 's/^/    /' "$_fc_log"
+fi
+
 # ── 异常判定：告警判定版本（change crash-alert-sample-fallback）────────
 # 默认最新版；**最新版会话数低于小样本阈值时回退为该端会话量最大的版本**。
 #
@@ -1108,6 +1142,10 @@ _fb=""
 [ "$IOS_ALERT_FALLBACK" = 1 ] && _fb="iOS ${IOS_ALERT_VER}"
 [ "$AND_ALERT_FALLBACK" = 1 ] && _fb="${_fb:+$_fb · }Android ${AND_ALERT_VER}"
 [ -n "$_fb" ] && add_alert "ℹ️ 告警判定对象：${_fb}——最新版会话数不足 ${SAMPLE_SESSION_MIN}，其比率无统计意义，故改判会话量最大的版本（表格仍按最新版分列，一列不少）"
+
+# ⚠️ 排在最后加：摘要按加入顺序渲染，🔴 崩溃/性能必须在前——流水线自身的降级不该压过线上问题。
+# add_alert 对空串是 no-op，断言通过时这行不产生任何输出。
+add_alert "$FACT_CACHE_MSG"
 
 SUMMARY_MD="$ALERTS"
 add_summary() { [ -n "$1" ] && SUMMARY_MD="${SUMMARY_MD:+$SUMMARY_MD
