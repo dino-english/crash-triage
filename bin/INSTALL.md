@@ -410,7 +410,7 @@ hermes -z: --toolsets did not contain any valid toolsets.
 
 ### 已知限制（非缺陷，不会自行消失）
 
-- **Android 无法自动判定修复状态**：Android 未采用「提交信息带 Crashlytics issue ID」的约定（2026-08-07 核实：全仓 0 处 32 位 hex 引用），`fix_commit` 恒为 null。自动表格显示 `—`，其修复情况以每周 triage 报告的**语义分析**为准。若要打通，需推动 Android 侧采用同样的提交约定（iOS 侧由 `crash-prevention` skill 定为硬规则）。
+- **Android 的 `—` 不等于「未修」**：⛔ 旧结论「Android 未采用该约定、`fix_commit` 恒 null」**已于 2026-09-01 订正**——那次核查（2026-08-07）只认 `[crash:<8位id>]` 一种写法，而实际在用的是 `Crashlytics: <32位id>`（Android 写在 subject、iOS 写在 body）。2026-09-05 在生产机业务仓复核：Android 近 90 天 **4 条**（`85c581ed` / `a34175e5` / `ce481263` / `fa48b2eb`），iOS 1 条。<br>现状是 **iOS 有硬规则**（`crash-prevention` skill），null ⇒ 判「🔴 未修」可信；**Android 采用但非强制**，null 只渲染为 `—`，意为「提交信息里没找到」——不等于未修。若要让 Android 也能判「未修」，需把该约定在 Android 侧定为硬规则。
 - **L2 完整 triage 无整体超时**：实测跑 12 分钟以上，且曾因长连接中断失败一次（重试后成功）。目前无 `timeout` 包裹，agent 卡死会一直挂着。若上线后出现挂起，需引入 `gtimeout`（`brew install coreutils`）。
 - **BigQuery 每日批量同步**：日报数据实际滞后约一天。卡片会打印真实的数据截止时间戳，**不要假设「截至昨天」**。
 

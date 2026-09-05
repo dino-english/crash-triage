@@ -1143,9 +1143,12 @@ if [ "$MCP_OK" = 1 ] && [ -f "$SNAP" ]; then
   [ "${NEW_AND:-0}" -gt 0 ] 2>/dev/null && add_alert "🔴 Android 新增 ${NEW_AND} 个 issue（全版本口径）"
 fi
 # 代码已修但未发版：最容易被遗忘的状态，必须顶到卡片上。
-# 只统计 iOS：Android 无 issue ID 约定，fix_commit 恒 null，计进来无意义。
+# ⛔ 原为「只统计 iOS：Android 无 issue ID 约定，fix_commit 恒 null」——**已订正的过期结论**
+#    （2026-09-05 在生产机业务仓复核：Android 近 90 天 4 条带 issue id 的修复提交）。
+# ⚠️ 双端都统计是安全的：**非 null 在两端都无歧义**（提交信息里确实引用了这个 issue），
+#    有歧义的是 null——而 null 本来就不进这个计数。渲染侧对 null 的两端差异另有处理。
 if [ "$MCP_OK" = 1 ]; then
-  FIXED_PENDING="$(jq -r '[(.ios // [])[] | select(.fix_commit != null)] | length' "$CRASH_JSON" 2>/dev/null || echo 0)"
+  FIXED_PENDING="$(jq -r '[((.ios // []) + (.android // []))[] | select(.fix_commit != null)] | length' "$CRASH_JSON" 2>/dev/null || echo 0)"
   [ "${FIXED_PENDING:-0}" -gt 0 ] 2>/dev/null && add_alert "🔴 ${FIXED_PENDING} 个 issue 代码已修但未发版（全版本口径）"
 fi
 add_alert "$(red_line "崩溃率" "$IOS_RATE_PCT" "$AND_RATE_PCT" "$CRASH_RATE_RED" "$CRASH_RATE_YELLOW" "%")"
@@ -2300,17 +2303,24 @@ build_index() {
     printf '\n## 🐞 跟踪中的 issue（**全版本口径**，来自 Firebase MCP OPEN 列表）\n\n'
     printf '> 本段与上方版本级数据口径不同：MCP `topIssues` 无版本过滤能力，且只返回 OPEN issue。\n'
     printf '> 它的用途是修复状态反查（`fix_commit`），不用于判断当前版本质量。\n\n'
-    # iOS 有「提交带 Crashlytics issue ID」硬规则（crash-prevention），fix_commit 可信；
-    # Android 无此约定（2026-08-07 核实：全仓 0 处 32 位 hex 引用），null 只代表「提交里没写 id」，
-    # 渲染成「🔴 未修」会得出错误结论——必须显示为不可判定。
+    # iOS 有「提交带 Crashlytics issue ID」硬规则（crash-prevention），null ⇒ 未修，可信。
+    # Android **也在用这个约定**——⛔ 旧注释「无此约定（2026-08-07 核实：全仓 0 处 32 位 hex
+    # 引用）」是**已订正的过期结论**：那次核查只认 `[crash:<8位>]` 一种写法，而实际在用的是
+    # `Crashlytics: <32位>`（写在 subject）。2026-09-05 在生产机业务仓复核：Android 近 90 天
+    # 4 条（85c581ed / a34175e5 / ce481263 / fa48b2eb），iOS 1 条（写在 body）。
+    # ⚠️ 但 Android 侧**没有强制规则**（iOS 由 crash-prevention skill 定为硬规则），采用是自发的，
+    #    所以 null 在两端含义不同：iOS null ⇒ 未修；Android null ⇒ **提交信息里没找到**，
+    #    既可能未修、也可能修了没写 id。⛔ 因此 Android 不渲染「🔴 未修」——那是过度断言；
+    #    但**找到时必须显示出来**，写死 — 会把真实的修复记录一并丢掉（本次修的就是这个）。
     jq -r --arg ipre "$(issue_url_prefix ios)" --arg apre "$(issue_url_prefix android)" \
        '"### iOS\n\n| Issue | 标题 | 事件 | 修复提交 |\n|---|---|---|---|\n" +
            ((.ios // []) | map("| [\(.id[0:8])](\($ipre)\(.id)) | \(.title) | \(.events) | \(.fix_commit // "🔴 未修") |") | join("\n")) +
-           "\n\n### Android\n\n| Issue | 标题 | 事件 | 修复状态 |\n|---|---|---|---|\n" +
-           ((.android // []) | map("| [\(.id[0:8])](\($apre)\(.id)) | \(.title) | \(.events) | — |") | join("\n"))' \
+           "\n\n### Android\n\n| Issue | 标题 | 事件 | 修复提交 |\n|---|---|---|---|\n" +
+           ((.android // []) | map("| [\(.id[0:8])](\($apre)\(.id)) | \(.title) | \(.events) | \(.fix_commit // "—") |") | join("\n"))' \
       "$CRASH_JSON" 2>/dev/null || printf '（本次崩溃数据抓取失败）'
-    printf '\n\n> Android 未采用「提交信息带 Crashlytics issue ID」的约定，**无法自动判定修复状态**（显示为 —）。\n'
-    printf '> 其修复情况以每周 triage 报告的语义分析为准（见下方报告归档）。\n'
+    printf '\n\n> **两端的「—」/「🔴 未修」含义不同**：iOS 有「提交必须带 Crashlytics issue ID」的硬规则，\n'
+    printf '> 找不到即判「未修」；Android 采用同一约定但**非强制**（近 90 天 4 条），故 null 只渲染为「—」，\n'
+    printf '> 意为**提交信息里没找到**——不等于未修，也可能是修了没写 id。其确切修复情况以每周 triage 的语义分析为准。\n'
     printf '\n\n## 🗂 报告归档\n\n'
     printf '> 日报与周报统一归档在本页。**今天这份的链接在最上方「文档入口」**——归档表记的是已投递过的历史，\n'
     printf '> 今日条目在本轮投递完成后写入，明天出现在这里。\n\n'
