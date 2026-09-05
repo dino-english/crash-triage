@@ -298,14 +298,23 @@ _fc_snap="$OUT_DIR/analysis/snapshot.json"
 _fc_log="$OUT_DIR/analysis/fact-cache-assert.log"
 if [ -s "$_fc_snap" ] && [ -x "$ROOT/bin/test/assert-fact-cache.sh" ] \
    && ! "$ROOT/bin/test/assert-fact-cache.sh" "$_fc_snap" > "$_fc_log" 2>&1; then
-  # ⚠️ 数**去重后的 issue 个数**，不是 ❌ 行数：一个 issue 可同时踩多条断言（last_synced +
-  #    window_days），按行数会把 6 个 issue 报成 7 个——在一条讲数据准确性的告警里尤其不能错。
-  _fc_n="$(awk '/^❌/{print $2}' "$_fc_log" | sort -u | wc -l | tr -d ' ')"
-  _fc_day="$(grep -oE 'last_synced=[0-9]{4}-[0-9]{2}-[0-9]{2}' "$_fc_log" | sort | head -1 | cut -d= -f2 || true)"
-  _fc_since=""
-  [ -n "$_fc_day" ] && _fc_since="，最早停在 ${_fc_day}"
-  FACT_CACHE_NOTE="$(printf '\n🟡 **事实层缓存未刷新** — %s 个 issue 的 last_synced 不是本轮%s；台账的**事件明细**据此滞后（现状表的计数仍来自本轮 BigQuery，不受影响）。补齐：CRASH_REPORT_FORCE_REFETCH=1 重跑本周。' "$_fc_n" "$_fc_since")"
-  echo "  ⚠️ 事实层缓存断言未通过（${_fc_n} 个 issue），详情："
+  # ⛔ 「无法判定」≠「判定为陈旧」——完整解释与 2026-09-05 的假告警实例见 crash-daily.sh 同名段。
+  # ⚠️ 数去重后的 issue 个数，不是 ❌ 行数；`grep -oE` 无匹配返回 1，先取串再判空避开 pipefail。
+  _fc_ids="$(grep -oE '^❌ [0-9a-f]{8} ' "$_fc_log" 2>/dev/null | sort -u || true)"
+  _fc_n=0
+  [ -n "$_fc_ids" ] && _fc_n="$(printf '%s\n' "$_fc_ids" | wc -l | tr -d ' ')"
+  if [ "$_fc_n" -gt 0 ]; then
+    _fc_day="$(grep -oE 'last_synced=[0-9]{4}-[0-9]{2}-[0-9]{2}' "$_fc_log" | sort | head -1 | cut -d= -f2 || true)"
+    _fc_since=""
+    [ -n "$_fc_day" ] && _fc_since="，最早停在 ${_fc_day}"
+    FACT_CACHE_NOTE="$(printf '\n🟡 **事实层缓存未刷新** — %s 个 issue 的 last_synced 不是本轮%s；台账的**事件明细**据此滞后（现状表的计数仍来自本轮 BigQuery，不受影响）。补齐：CRASH_REPORT_FORCE_REFETCH=1 重跑本周。' "$_fc_n" "$_fc_since")"
+    echo "  ⚠️ 事实层缓存断言未通过（${_fc_n} 个 issue），详情："
+  else
+    _fc_why="$(sed -n '1s/^❌ *//p' "$_fc_log")"
+    [ -n "$_fc_why" ] || _fc_why="断言未产出可识别的原因"
+    FACT_CACHE_NOTE="$(printf '\n🟡 **事实层本轮未校验** — %s。⛔ 这是「没查成」不是「已确认陈旧」，缓存新鲜度未知，台账的事件明细本轮无法保证是最新。' "$_fc_why")"
+    echo "  ⚠️ 事实层断言无法执行：${_fc_why}"
+  fi
   sed 's/^/    /' "$_fc_log"
 fi
 

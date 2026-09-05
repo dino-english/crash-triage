@@ -1034,16 +1034,35 @@ FACT_CACHE_MSG=""
 _fc_log="$CRASH_DIR/fact-cache-assert.log"
 if [ "$MCP_OK" = 1 ] && [ -x "$ROOT/bin/test/assert-fact-cache.sh" ] \
    && ! "$ROOT/bin/test/assert-fact-cache.sh" "$CRASH_JSON" > "$_fc_log" 2>&1; then
+  # ⛔ **「无法判定」不是「判定为陈旧」**。断言脚本有两种非零退出：
+  #    ① 逐 issue 的 `❌ <8位id> …`——真的判定失败；
+  #    ② 护栏 `❌ 找不到 snapshot.json` / `❌ 快照里没有 issue，无法断言`——**根本没得判**。
+  #    2026-09-05 实测：上游对照数据为空（快照 0 个 issue）时走的是 ②，而当时的代码把那行
+  #    当成一条失败记录去数，在生产群卡片上发出「事实层缓存未刷新：1 个 issue 的 last_synced
+  #    不是本轮」——那 1 个 issue 不存在，缓存也从没被判定过。**假告警比漏报更贵**。
+  # ⚠️ 判别依据是「有没有逐 issue 行」，不靠 stdout/stderr 分流（脚本两种都写 ❌，易变）。
   # ⚠️ 数**去重后的 issue 个数**，不是 ❌ 行数：一个 issue 可同时踩多条断言（last_synced +
   #    window_days），按行数会把 6 个 issue 报成 7 个——在一条讲数据准确性的告警里尤其不能错。
-  _fc_n="$(awk '/^❌/{print $2}' "$_fc_log" | sort -u | wc -l | tr -d ' ')"
-  _fc_day="$(grep -oE 'last_synced=[0-9]{4}-[0-9]{2}-[0-9]{2}' "$_fc_log" | sort | head -1 | cut -d= -f2 || true)"
-  # ⛔ 全角标点先条件赋值再拼接，禁 ${var:+（…）}——bash 会把全角字节并进变量名。
-  _fc_since=""
-  [ -n "$_fc_day" ] && _fc_since="，最早停在 ${_fc_day}"
-  # ⛔ 补救建议由产生原因的这个分支一并赋值，不得在渲染处写死。
-  FACT_CACHE_MSG="⚠️ 事实层缓存未刷新：${_fc_n} 个 issue 的 last_synced 不是本轮${_fc_since}——日报数字不受影响，滞后的是 L2 台账的事件明细；用 CRASH_REPORT_FORCE_REFETCH=1 重跑可补齐"
-  echo "  ⚠️ 事实层缓存断言未通过（${_fc_n} 个 issue），详情："
+  # ⚠️ `grep -oE` 无匹配返回 1，pipefail 下会让整条命令替换失败；先取串再判空，避开该路径。
+  _fc_ids="$(grep -oE '^❌ [0-9a-f]{8} ' "$_fc_log" 2>/dev/null | sort -u || true)"
+  _fc_n=0
+  [ -n "$_fc_ids" ] && _fc_n="$(printf '%s\n' "$_fc_ids" | wc -l | tr -d ' ')"
+  if [ "$_fc_n" -gt 0 ]; then
+    _fc_day="$(grep -oE 'last_synced=[0-9]{4}-[0-9]{2}-[0-9]{2}' "$_fc_log" | sort | head -1 | cut -d= -f2 || true)"
+    # ⛔ 全角标点先条件赋值再拼接，禁 ${var:+（…）}——bash 会把全角字节并进变量名。
+    _fc_since=""
+    [ -n "$_fc_day" ] && _fc_since="，最早停在 ${_fc_day}"
+    # ⛔ 补救建议由产生原因的这个分支一并赋值，不得在渲染处写死。
+    FACT_CACHE_MSG="⚠️ 事实层缓存未刷新：${_fc_n} 个 issue 的 last_synced 不是本轮${_fc_since}——日报数字不受影响，滞后的是 L2 台账的事件明细；用 CRASH_REPORT_FORCE_REFETCH=1 重跑可补齐"
+    echo "  ⚠️ 事实层缓存断言未通过（${_fc_n} 个 issue），详情："
+  else
+    # ⛔ 原因照抄断言脚本自己的说法，不猜——它已经写清楚是哪种护栏拦下的。
+    _fc_why="$(sed -n '1s/^❌ *//p' "$_fc_log")"
+    [ -n "$_fc_why" ] || _fc_why="断言未产出可识别的原因"
+    # ⛔ 不把绝对路径塞进卡片：看卡片的人访问不了生产机文件系统，只是噪音。路径在跑批日志里。
+    FACT_CACHE_MSG="⚠️ 事实层本轮未校验：${_fc_why}——⛔ 这是「没查成」不是「已确认陈旧」，缓存新鲜度未知；常见于上游对照数据为空"
+    echo "  ⚠️ 事实层断言无法执行：${_fc_why}"
+  fi
   sed 's/^/    /' "$_fc_log"
 fi
 
