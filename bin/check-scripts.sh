@@ -64,8 +64,20 @@ fi
 #   fail:crash-weekly.sh 同上
 #   say:install.sh       装机链路，与流水线运行时无关，本次未合并（不是「不该合并」）
 #   say:update.sh        同上
+#
+# ⛔ **本项只比对生产文件，排除 bin/test/**（2026-09-05）。理由是结构性的，不是图省事：
+#    本项的判据是「共享函数应收口到 bin/lib/」，而夹具里的函数**本来就不该被收口**——
+#    它们是桩与局部助手（`json_only(){ cat; }` 注释明写「夹具里退化为直通」、
+#    `note_new` 是副作用记录器、`mk`/`probe`/`ok`/`bad` 是各夹具自己的打印助手）。
+#    把 bin/test/ 一并比对的结果是**这一项长期常红 6 条**，而常红等于没有：
+#    2026-09-05 一天三次部署，每次都看见同一条 ❌，新旧无从分辨。
+#    ⚠️ 一个不会红的检查项危险，一个乱红的检查项更危险——它会训练人忽略告警（本文件开头原话）。
+# ⚠️ 代价要说清：夹具**照抄**生产函数（而非 h_load 抽取）这种情况本项不再报。
+#    但本项只比名字不比函数体，本来也分辨不了「桩」与「照抄」——那属于测试质量，
+#    另有 bin/test/harness.sh 的 h_load 约定负责，不该由重名检查兼职。
+# ⚠️ 递归扫描的其余各项（语法 / 多字节 lint / 先用后定 …）**仍然覆盖 bin/test/**，此处只改本项。
 dup="$(
-  { for f in $(find "$SELF_DIR" -name '*.sh' -type f | sort); do
+  { for f in $(find "$SELF_DIR" -name '*.sh' -type f -not -path '*/test/*' | sort); do
       grep -oE '^[a-zA-Z_][a-zA-Z0-9_]*\(\)' "$f" | tr -d '()' | sed "s|\$|	${f#"$SELF_DIR"/}|"
     done; } | grep -vE '^(fail	(deliver|crash-daily|crash-weekly)\.sh|say	(install|update)\.sh)$' \
   | awk -F'\t' '{n[$1]=n[$1]" "$2; c[$1]++} END{for(k in c) if(c[k]>1) print "   " k ": " n[k]}' | sort

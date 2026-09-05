@@ -149,7 +149,17 @@ START_P95_YELLOW=1500
 # 小样本会话数阈值：**版本级**会话数低于此值 → 单元格追加「⚠️」，
 # 且**告警判定回退到会话量最大的版本**（change crash-alert-sample-fallback）。
 # 改为可配是为了能验证「稳态等价性」——调低它即可模拟「最新版样本充足」的常态。
-SAMPLE_SESSION_MIN="${CRASH_REPORT_SAMPLE_SESSION_MIN:-30}"
+#
+# ⛔ **213 不是拍脑袋，是从最严的比率阈值推出来的**（2026-09-05，原值 30 是拍板的）：
+#    一个比率指标要能回答「有没有超过阈值 t」，样本量至少得让**单个事件**落在 t 附近，
+#    即 n ≥ 1/t。当前最严的是 ANR_RATE_RED = 0.47% → n ≥ 100/0.47 ≈ 213。
+#    2026-09-04 实测反例：Android 1.6.0 有 45 个会话，1 个 ANR 就是 2.22%——是阈值的 4.7 倍。
+#    **该样本量下这个指标只能读出 0% 或 ≥2.2%，无法表达「刚好在阈值上」**，
+#    于是它恒为 0.00% 而看起来「健康」，把真正超标的 1.5.6（0.77%）挤出了判定。
+# ⚠️ 对崩溃率（红线 1.0% → 只需 100）而言 213 偏严。**刻意用单一常量**：
+#    design D1 已否决「每个指标各用自己的判据」（会引入 6 套判据），而偏严的方向是安全的
+#    ——它只会让判定对象从「几乎没人用的新版」挪到「用户实际在跑的版本」。
+SAMPLE_SESSION_MIN="${CRASH_REPORT_SAMPLE_SESSION_MIN:-213}"
 # 维度级样本门槛：**只用于决定要不要显示率**，不用于过滤行（过滤掉就看不见影响面了）。
 # ⚠️ Android 机型碎片化到无法给率：实测某版本 7 天内最大机型桶只有 75 个会话，
 #    门槛设 50 只剩 1 行、设 100 一行不剩。故机型维度一律不显示率，只有系统版本维度显示。
@@ -1104,24 +1114,48 @@ fi
 # 而 6600 个会话的 1.5.3 真实超标的 ANR 0.71% 却沉默。**同一条规则，两个方向都错。**
 #
 # ⚠️ 只影响告警与摘要行的**判定对象**，不改表格呈现——各版本列一列不少。
-alert_ver() { # $1=plat键 → 判定版本；同时把是否回退写进 <PLAT>_ALERT_FALLBACK
-  local v1 s1 top
+# ⛔ **回退判据是「这一版能不能回答问题」，不只是「会话数够不够」**（2026-09-05 扩充）。
+#    2026-09-04 实测漏报：Android 最新版 1.6.0 有 45 个会话，**刚过旧门槛 30 故不回退**，
+#    但它在性能表里一行都没有（批量表滞后 ~2 天，新版常年零行）。结果承载 5347 会话的
+#    1.5.6 的慢帧 95.7%、ANR 0.77%（红线 0.47）**全部沉默**，摘要行只写「Android 1.6.0 无数据」。
+#    原 design D1 的理由是「新版会话少则性能样本也少，值为空则 red_line 本就不告警，方向正确」——
+#    ⛔ 那个假设在**性能表滞后**面前不成立：值为空不是因为样本小，是因为表还没同步，
+#    而「不告警」在这里等于**整个指标无人监控**，不是「保守」。
+#
+# 两个回退条件，任一成立即回退（都指向同一个替代对象：该端会话量最大的版本）：
+#   ① 样本量撑不起阈值 —— 见 SAMPLE_SESSION_MIN 的推导
+#   ② 该版本没有性能数据 —— 6 个告警指标里有 4 个（慢帧/冻结/启动 P95/接口错误率）直接无解
+alert_ver() { # $1=plat键 → "判定版本<TAB>回退原因"（未回退时原因为空）
+  local v1 s1 top pst
   if [ "$1" = ios ]; then v1="$IOS_V1"; top="$(printf '%s\n' "$IOS_TOPSESS" | sed -n 1p)"
   else v1="$AND_V1"; top="$(printf '%s\n' "$AND_TOPSESS" | sed -n 1p)"; fi
-  [ -n "$v1" ] || { printf ''; return 0; }
+  [ -n "$v1" ] || { printf '\t'; return 0; }
+  # 没有可替代对象时一律不回退
+  if [ -z "$top" ] || [ "$top" = "$v1" ]; then printf '%s\t' "$v1"; return 0; fi
   s1="$(mv_ "$1" "$v1" adopt.sessions)"
-  # 会话数取不到时不回退（宁可维持既有行为，也不因取数失败静默换判定对象）
-  if [ -n "$s1" ] && [ -n "$top" ] && [ "$top" != "$v1" ] \
-     && [ "$(awk -v a="$s1" -v b="$SAMPLE_SESSION_MIN" 'BEGIN{print (a<b)}')" = "1" ]; then
-    printf '%s' "$top"; return 0
+  # ⚠️ 会话数取不到时不按条件①回退（宁可维持既有行为，也不因取数失败静默换判定对象）
+  if [ -n "$s1" ] && [ "$(awk -v a="$s1" -v b="$SAMPLE_SESSION_MIN" 'BEGIN{print (a<b)}')" = "1" ]; then
+    printf '%s\t会话数 %s < %s，比率无法分辨阈值' "$top" "$s1" "$SAMPLE_SESSION_MIN"; return 0
   fi
-  printf '%s' "$v1"
+  pst="$(mv_ "$1" "$v1" perf.state)"
+  # ⚠️ 同理，perf.state 取不到（空）时不回退——只在**明确不是 ok** 时才判定为无性能数据。
+  if [ -n "$pst" ] && [ "$pst" != "ok" ]; then
+    printf '%s\t最新版 %s 无性能数据，4 个性能指标无解' "$top" "$v1"; return 0
+  fi
+  printf '%s\t' "$v1"
 }
-IOS_ALERT_VER="$(alert_ver ios)"; AND_ALERT_VER="$(alert_ver and)"
+# ⚠️ 命令替换是子 shell，函数里设的全局传不回来（与 crash-weekly.sh 的 ALERTED 同源），
+#    故用「版本<TAB>原因」一次带出，外层拆。
+_av_i="$(alert_ver ios)"; IOS_ALERT_VER="$(printf '%s' "$_av_i" | cut -f1)"; IOS_ALERT_WHY="$(printf '%s' "$_av_i" | cut -f2)"
+_av_a="$(alert_ver and)"; AND_ALERT_VER="$(printf '%s' "$_av_a" | cut -f1)"; AND_ALERT_WHY="$(printf '%s' "$_av_a" | cut -f2)"
 IOS_ALERT_FALLBACK=0; [ -n "$IOS_ALERT_VER" ] && [ "$IOS_ALERT_VER" != "$IOS_V1" ] && IOS_ALERT_FALLBACK=1
 AND_ALERT_FALLBACK=0; [ -n "$AND_ALERT_VER" ] && [ "$AND_ALERT_VER" != "$AND_V1" ] && AND_ALERT_FALLBACK=1
-{ [ "$IOS_ALERT_FALLBACK" = 1 ] || [ "$AND_ALERT_FALLBACK" = 1 ]; } && \
-  echo "  ℹ️ 告警判定回退：iOS→${IOS_ALERT_VER:-—} Android→${AND_ALERT_VER:-—}（最新版会话数 < ${SAMPLE_SESSION_MIN}）"
+# ⛔ 只列**真的回退了**的那一端，并带上各自的原因。旧写法两端都打印、原因一律写
+#    「最新版会话数 < N」——2026-09-04 实测：Android 并未回退（45 ≥ 30）却也被列进去，
+#    且回退原因未必是会话数。判据变了却沿用旧文案，比不打印更误导。
+[ "$IOS_ALERT_FALLBACK" = 1 ] && echo "  ℹ️ 告警判定回退：iOS→${IOS_ALERT_VER}（${IOS_ALERT_WHY}）"
+[ "$AND_ALERT_FALLBACK" = 1 ] && echo "  ℹ️ 告警判定回退：Android→${AND_ALERT_VER}（${AND_ALERT_WHY}）"
+: # ⚠️ 上面两条是 `[ ] && cmd` 形式，末尾必须有恒真语句兜住退出码，否则整段返回 1
 
 # ── 异常判定 ──────────────
 SNAP="$STATE/daily-snapshot.json"
@@ -1187,10 +1221,12 @@ add_alert "$(red_line_one "ANR 率" Android "${AND_ALERT_VER:-—}" "$AND_ANR_RA
 
 # ⛔ 回退必须可见：换了判定对象却不说，比漏报更难排查——数字对得上、版本对不上。
 # 读者看到的是「最新版是 1.5.4，为什么在报 1.5.3」，必须当场解释。
+# ⛔ 原因**逐端照抄各自的判定结果**，不再写死「会话数不足」——回退现在有两种触发条件
+#    （样本量撑不起阈值 / 该版本无性能数据），写死一种会把另一种说成假原因（2026-09-04 同源）。
 _fb=""
-[ "$IOS_ALERT_FALLBACK" = 1 ] && _fb="iOS ${IOS_ALERT_VER}"
-[ "$AND_ALERT_FALLBACK" = 1 ] && _fb="${_fb:+$_fb · }Android ${AND_ALERT_VER}"
-[ -n "$_fb" ] && add_alert "ℹ️ 告警判定对象：${_fb}——最新版会话数不足 ${SAMPLE_SESSION_MIN}，其比率无统计意义，故改判会话量最大的版本（表格仍按最新版分列，一列不少）"
+[ "$IOS_ALERT_FALLBACK" = 1 ] && _fb="iOS ${IOS_ALERT_VER}（${IOS_ALERT_WHY}）"
+[ "$AND_ALERT_FALLBACK" = 1 ] && _fb="${_fb:+$_fb · }Android ${AND_ALERT_VER}（${AND_ALERT_WHY}）"
+[ -n "$_fb" ] && add_alert "ℹ️ 告警判定对象：${_fb}——最新版答不了这个问题，故改判会话量最大的版本（表格仍按最新版分列，一列不少）"
 
 # ⚠️ 排在最后加：摘要按加入顺序渲染，🔴 崩溃/性能必须在前——流水线自身的降级不该压过线上问题。
 # add_alert 对空串是 no-op，断言通过时这行不产生任何输出。
