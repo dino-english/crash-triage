@@ -16,7 +16,7 @@ description: crash-triage 流水线的调试与验证流程（DRY_RUN / NO_DELIV
 ## 流程
 
 ```bash
-bash bin/check-scripts.sh                            # ① 改脚本后必跑（九项静态检查）
+bash bin/check-scripts.sh                            # ① 改脚本后必跑（十项静态检查）
 CRASH_REPORT_DRY_RUN=1 bash bin/crash-daily.sh       # ② 快速看卡片预览（跑不到索引页）
 CRASH_REPORT_NO_DELIVER=1 bash bin/crash-daily.sh    # ③ 完整链路：验索引页 / manifest / 产物
 ls "$STATE/runs/$(date +%F)/L1/"                     # ④ 产物落在 runs/<日期>/L1/<时刻>/

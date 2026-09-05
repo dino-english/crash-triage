@@ -921,9 +921,16 @@ sec() { # $1=平台名 $2=json key $3=1 带控制台链接（文档用），0/�
   _chg_rows "$k" regressed "🔁 回归" 1 "$want_link"
   _chg_rows "$k" spiked    "📈 暴涨" 1 "$want_link"
   _chg_rows "$k" resolved  "✅ 消失" 0 "$want_link"
-  # Android 无 issue ID 提交约定，fix_commit 恒 null，该行只对 iOS 有意义
-  [ "$k" = "ios" ] && { echo "$DIFF" | jq -r ".$k.fixed_pending[]? | \"- 🛠️ 代码已修待验 \`\(.id[0:8])\` \(.title) · \(.fix_commit)\"" || true; }
-  # 必须显式 return 0：末行的 [ ] && {...} 在 Android 分支上求值为假会让函数返回 1，
+  # ⛔ 原为 `[ "$k" = "ios" ] && …`，理由是「Android 无 issue ID 提交约定，fix_commit 恒 null」
+  #    ——**已订正的过期结论**（2026-09-01 改扫描器、2026-09-05 在生产机业务仓复核）。
+  #    ⚠️ L2 的情况比 L1 更严重：它**跑了** scan-fix-commits.sh、**拿到了** Android 命中
+  #    （实测 4 条：85c581ed / a34175e5 / ce481263 / fa48b2eb），然后在这里把它们扔掉。
+  #    而「代码已修待验」正是本段注释自己写的「最容易被遗忘的状态，必须顶到卡片上」。
+  # ⚠️ 双端渲染是安全的：fixed_pending 已经 `select(.fix_commit != null)`，
+  #    而**非 null 在两端都无歧义**（提交信息里确实引用了这个 issue）。
+  #    有歧义的是 null（Android 无强制规则时 null ≠ 未修），而 null 本就不进这个列表。
+  echo "$DIFF" | jq -r ".$k.fixed_pending[]? | \"- 🛠️ 代码已修待验 \`\(.id[0:8])\` \(.title) · \(.fix_commit)\"" || true
+  # 必须显式 return 0：本函数末尾若以可能求值为假的语句结尾会返回 1，
   # 而 CHANGES_MD="$(sec ...)" 在 set -e 下会因此整脚本退出（旧版嵌在 heredoc 里侥幸没暴露）。
   return 0
 }

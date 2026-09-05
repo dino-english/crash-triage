@@ -47,21 +47,30 @@ STATE="${CRASH_REPORT_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/crash-tri
 
 ⚠️ **只能有一个调度器在跑**：launchd 与 Hermes cron 同时触发会双跑。卡片有幂等键不会重复，但**并发写 `docs.json` / 归档 JSONL 会互相覆盖**（脚本假设单写者）。装 plist 前先 `hermes cron pause`。
 
-## 验收链与 check-scripts 九项
+## 验收链与 check-scripts 十项
 
 没有单元测试。验收链：`check-scripts.sh` → DRY RUN → 抽查 2–3 个数值与 Firebase 控制台对得上（[bin/INSTALL.md](bin/INSTALL.md) §6）。
 
-⛔ `check-scripts.sh` 是**九项**检查（2026-08-23 起，change `crash-perf-functional-core`）：
+⛔ `check-scripts.sh` 是**十项**检查（2026-08-23 起，change `crash-perf-functional-core`；
+第 10 项 2026-09-05 加）。⚠️ **以脚本头部的清单为准**——本节曾长期列 7 条却写「九项」，
+条目也与脚本不符（多了 `md2docx.py 语法`、少了第 6/7 项），2026-09-05 对齐：
 
-1. `bash -n` 语法
+1. `bash -n` 语法（递归扫 `bin/**/*.sh`）
 2. **`$VAR` 紧邻多字节字符** —— 反复踩的那个坑（`"${miss:+（$miss）}"` 在 `set -u` 下报
    `miss?: unbound variable`，bash 把全角括号的字节并进了变量名）
-3. `md2docx.py` 语法
-4. **依赖方向 lint** —— `bin/lib/core/` 出现 `bq` / `lark-cli` / `$STATE` / `$ROOT` 即失败
-5. **重复定义检测** —— 同名函数出现在两个及以上文件即失败（豁免清单以数据形式集中在脚本内）
-6. **bq 直连收口 lint** —— `bq query` 出现在 `bin/lib/bq.sh` 之外即失败（豁免 `install.sh` 探活）。
+3. **依赖方向 lint** —— 核心层不得出现取数 / 投递 / 模型 / 状态目录
+4. **重复定义检测** —— 同名函数出现在两个及以上**生产**文件即失败（⛔ 不比对 `bin/test/`，
+   夹具的桩本就不该收口；豁免清单以数据形式集中在脚本内）
+5. **bq 直连收口 lint** —— `bq query` 出现在 `bin/lib/bq.sh` 之外即失败（豁免 `install.sh` 探活）。
    findings F5 的护栏：没有它时每个照着旧写法新增的取数函数都在扩大等价性缓存的缺口
-7. **纯函数断言** —— `bin/test/run.sh`，51 条
+6. **printf 格式串里的字面 %**（F22：只在运行时炸，`bash -n` 查不出）
+7. **顶层「先用后定」**（F24 同源：常量/函数定义晚于使用，报错常被 EXIT trap 吞成 0）
+8. **纯函数断言**（`bin/test/run.sh`）+ **函数级回归**（`fn-regression.sh`，生产 shell 设置下）
+9. ShellCheck（可选）
+10. **过期论断 lint** —— 已登记的、已被订正的结论不得复活。⚠️ 能力边界：只认**登记在册**的，
+    认不出没登记的；它防的是「同一条已知错误结论再次复活」，不是「发现新的错误结论」。
+    起因：「Android 未采用提交约定」这条 2026-09-01 已订正的结论在仓库里留了三份拷贝，
+    09-05 修了两处漏了第三处，而漏掉那处最贵——L2 跑了扫描器、拿到 4 条 Android 命中后扔掉。
 
 外加可选的 ShellCheck（未安装则跳过，不影响退出码——生产机不该为开发期工具多一项装机步骤）。
 

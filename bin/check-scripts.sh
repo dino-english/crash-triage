@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 提交前自检。⚠️ **九项**（CLAUDE.md 若仍写「七项」以本文件为准）：
+# 提交前自检。⚠️ **十项**（本文件是唯一权威；文档若与此不符以本文件为准）：
 #  1. bash 语法（递归扫 bin/**/*.sh）
 #  2. $VAR 紧跟多字节字符 —— bash 3.2（macOS 自带）会把多字节的首字节并进变量名，
 #     报 "VAR?: unbound variable"。2026-08-18 一天内连踩五次，做成检查项。
@@ -11,6 +11,8 @@
 #  7. 顶层「先用后定」（F24 同源：常量/函数定义晚于使用，报错常被 EXIT trap 吞成 0）
 #  8. 纯函数断言（bin/test/run.sh）+ 函数级回归（fn-regression.sh，生产 shell 设置下）
 #  9. ShellCheck（可选依赖，未安装则跳过，不影响退出码）
+# 10. 过期论断 lint（已被订正的结论不得复活；文件里紧邻第 4 项——两者同源：
+#     一个查重复代码、一个查重复论断，而论断的重复没有任何别的工具抓得到）
 #
 # ⚠️ 每加一项都要**双向测试**：①塞违规样本确认真的变红 ②在**当前全量代码**上确认不误报。
 #    只做①不够——2026-08-24 加的「多传占位符」检查对正常设计也报，当轮就给使用方
@@ -85,6 +87,42 @@ dup="$(
 if [ -n "$dup" ]; then
   echo "❌ 同名函数在多个文件中重复定义（共享函数应收口到 bin/lib/）："
   printf '%s\n' "$dup"
+  rc=1
+fi
+
+# ── 10. 过期论断 lint（2026-09-05）─────────────────────────────
+# 起因：「Android 未采用提交约定、fix_commit 恒 null」这条结论 2026-09-01 已被订正
+# （改扫描器后反扫从 0 条变 6 条），但它在仓库里留了**三份拷贝**：crash-daily.sh 的渲染、
+# INSTALL.md 的已知限制、crash-weekly.sh 的变化摘要。09-05 修了前两处、**漏了第三处**，
+# 直到事后搜索才发现——而那一处最贵：L2 跑了扫描器、拿到了 4 条 Android 命中，然后扔掉。
+#
+# ⛔ 跨文件的重复**论断**（不是重复代码）没有任何工具抓得到：它们措辞各异、散在注释与文档里，
+#    订正一处不会让其余几处报错，只会让它们静默地继续指导代码。
+# ⚠️ 这条 lint 的能力边界要说清：它只认**登记在册的**过期论断，认不出没登记的。
+#    它防的是「同一条已知错误结论再次复活」，不是「发现新的错误结论」。
+# 清单以数据形式集中，每条带订正日期与订正依据——散落的 grep 会让清单悄悄长大而无人察觉。
+#   2026-09-01 订正｜Android 未采用 Crashlytics issue id 提交约定 / fix_commit 恒 null
+#     依据：改扫描器后两仓反扫 0 → 6 条；2026-09-05 在生产机业务仓复核 Android 近 90 天 4 条
+#     ⚠️ 允许出现的语境：**明确标注为已订正**的说明文字（含「已订正」「过期结论」字样的行）
+stale_claims="$(
+  find "$SELF_DIR" -name '*.sh' -type f | sort | while IFS= read -r f; do
+    rel="${f#"$SELF_DIR"/}"
+    case "$rel" in (check-scripts.sh) continue;; esac
+    # ⛔ `|| true` 不可省：grep 无匹配返回 1，而无匹配是正常路径（F31）。
+    grep -nE 'Android (未采用|无此约定|无 issue ID)|fix_commit 恒 (为 )?null' "$f" \
+      | grep -vE '已订正|过期结论|旧结论|原为' | sed "s|^|   ${rel}:|" || true
+  done
+  # 文档同样要扫：INSTALL.md 那份拷贝就在文档里
+  for d in "$SELF_DIR"/INSTALL.md; do
+    [ -f "$d" ] || continue
+    grep -nE 'Android (未采用|无此约定|无 issue ID)|fix_commit 恒 (为 )?null' "$d" \
+      | grep -vE '已订正|过期结论|旧结论|原为' | sed "s|^|   INSTALL.md:|" || true
+  done
+)"
+if [ -n "$stale_claims" ]; then
+  echo "❌ 出现已登记的过期论断（结论已被订正，此处仍在按旧结论行事）："
+  printf '%s\n' "$stale_claims"
+  echo "   订正依据见 bin/scan-fix-commits.sh 顶部注释；若确为「说明旧结论」的文字，请带上「已订正 / 过期结论」字样"
   rc=1
 fi
 

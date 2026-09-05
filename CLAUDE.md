@@ -15,7 +15,7 @@ CRASH_REPORT_DRY_RUN=1 bash bin/crash-daily.sh      # 卡片预览后即 exit 0
 CRASH_REPORT_NO_DELIVER=1 bash bin/crash-daily.sh   # 完整链路不投递（验索引页/manifest 用这个）
 bash bin/setup.sh                # 装机/换机重探工具路径（换过 node/brew 位置必须重跑）
 bash bin/install.sh              # 一键装机；更新用 bin/update.sh
-bash bin/check-scripts.sh        # 改脚本后必跑（九项检查）
+bash bin/check-scripts.sh        # 改脚本后必跑（十项检查）
 FACT_CACHE_BASELINE=<跑批前快照目录> bash bin/test/assert-fact-cache.sh
 hermes cron list                 # 调度运维；改时间 edit / 停 pause
 cat "$STATE/health-daily.json"   # L1 健康（L2 是 health.json）；日志在 $STATE/logs
@@ -32,7 +32,7 @@ cat "$STATE/health-daily.json"   # L1 健康（L2 是 health.json）；日志在
 - ⚠️ `hermes cron run` 手工触发**总打印 `Ran now: failed`**，与成败无关——以 executions.db 与脚本日志为准
 - ⚠️ 活数据上 diff 永远不为空——等价性验收用 `CRASH_REPORT_BQ_CACHE` 冻结数据，**生产禁用**
 - ⚠️ L2 基线提升在 NO_DELIVER 闸门**之前**——「跑两次对比产物」在 L2 不成立，测试前先备份 `last-snapshot.json`
-- ⛔ `check-scripts.sh` 是**九项**检查；⚠️ 必须**递归**扫 `bin/**/*.sh`（只扫顶层时 lib/test 完全不受检）
+- ⛔ `check-scripts.sh` 是**十项**检查；⚠️ 必须**递归**扫 `bin/**/*.sh`（只扫顶层时 lib/test 完全不受检）
 - ⛔ **顶层「先用后定」会被第 7 项拦下**——常量/函数定义晚于使用，报错常被 EXIT trap 吞成 0。⚠️ 函数级测试抽函数出来跑，**原理上看不见顺序**，只能靠静态检查
 - ⚠️ **函数级测试必须跑在生产 shell 设置下**（`bin/test/harness.sh`）——夹具少了 `set -e` + ERR trap，「过程中踩了 ERR trap」这类问题测不出来（见 docs/CLAUDE-测试盲区.md）
 - ⛔ 全角括号 / `·` 一律先条件赋值再拼接，**禁 `${var:+（...）}`**——bash 把全角字节并进变量名
@@ -119,7 +119,7 @@ OpenSpec 驱动（`openspec/`，schema `spec-driven`）。**动手改脚本前�
 | 脚本分层 / 消重 / 该不该拆 | docs/CLAUDE-分层与复用.md |
 | 改动前扫一眼「哪些错会静默重犯」 | docs/CLAUDE-失效模式登记.md |
 | 「我明明测过了为什么还炸」 | docs/CLAUDE-测试盲区.md |
-| 部署、调度、装机换机、STATE 布局、check-scripts 九项 | docs/CLAUDE-部署与运维.md |
+| 部署、调度、装机换机、STATE 布局、check-scripts 十项 | docs/CLAUDE-部署与运维.md |
 | 调 lark-cli / 排查同步失败 | docs/CLAUDE-lark-cli勘误.md |
 | 部署生产机 / 跑批后核验 | .claude/skills/deploy-prod/ 与 morning-verify/ |
 | 飞书固定资源（租户 / 文件夹 token / 固定 URL） | bin/INSTALL.md §12 |
