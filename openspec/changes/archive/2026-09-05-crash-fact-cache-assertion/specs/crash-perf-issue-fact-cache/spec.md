@@ -39,3 +39,12 @@ MUST NOT 以执行者的自陈（模型回复、日志文本）作为该要求�
 - **WHEN** 改动断言的接入方式
 - **THEN** MUST 在生产 shell 设置（`set -euo pipefail` + `errtrace` + ERR trap）下红绿两侧都验证
 - **AND** MUST 验证告警路径本身不触发 ERR trap
+
+#### Scenario: 断言无法执行时不得报成判定失败
+
+- **WHEN** 断言因自身前置条件不满足而无法执行（快照缺失、快照中没有 issue）
+- **THEN** MUST 与「判定为未刷新」区分呈现，说明这是**没查成**而非已确认陈旧
+- **AND** MUST 照抄断言自身给出的原因，⛔ MUST NOT 猜测
+- **AND** ⛔ MUST NOT 从「无法执行」的输出里推算出任何 issue 计数——
+  2026-09-05 实测：把护栏输出当成一条 issue 失败记录去数，会在卡片上发出
+  「N 个 issue 的观测字段不是本轮」这样的假告警，而那 N 个 issue 并不存在
