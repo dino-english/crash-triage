@@ -994,6 +994,11 @@ spark_rate() { jq -r --arg p "$1" --arg v "$2" --argjson n "$SPARK_DAYS" \
   '.[-$n:][] | [.[$p][$v].crash_events_1d // "", .[$p][$v].sessions_1d // ""] | @tsv' <<<"$HIST_ARR" 2>/dev/null \
   | awk -F'\t' '{ if($1!="" && $2!="" && $2!=0) printf "%.2f\n", $1/$2*100 }' || true; }
 
+# 本轮出现的全部 issue id（跨版本并集，来自 BigQuery）。
+# ⚠️ 2026-09-05 由生命周期段上移至此：MCP 空快照判定要拿它做交叉印证，而那段在本行之前。
+# ⛔ 只移动位置，表达式与时序语义未变——输入 $TMP/issues-*.json 在逐版本取数时就已落盘。
+CUR_IDS="$(cat "$TMP"/issues-*.json 2>/dev/null | jq -rs '[.[][]?.issue_id] | unique | .[]' 2>/dev/null || true)"
+
 # ── MCP 对照/回退（全版本口径，与卡片不可比）─────────
 # fetch-snapshot.sh light 模式抓 MCP topIssues（OPEN FATAL）+ git 反查，产出 snapshot.json。
 # 它不驱动卡片任何数字（已由 BigQuery 版本级接管），只用于：
@@ -1011,6 +1016,31 @@ if [ -x "$ROOT/bin/fetch-snapshot.sh" ] \
   echo "  MCP 对照（OPEN FATAL · 全版本）：iOS $(jq -r '(.ios//[])|length' "$CRASH_JSON") 类 $(jq -r '[(.ios//[])[].events]|add//0' "$CRASH_JSON") 次 · Android $(jq -r '(.android//[])|length' "$CRASH_JSON") 类 $(jq -r '[(.android//[])[].events]|add//0' "$CRASH_JSON") 次"
 else
   echo "  ⚠️ MCP 对照数据抓取失败（不影响卡片主口径；索引页「跟踪中的 issue」本轮缺失）"
+fi
+
+# ── 空快照判定：⛔「返回 0 个 issue」不等于「成功」──────────────────────
+# MCP_OK 只判文件非空，而 {"ios":[],"android":[]} 是 23 字节的合法 JSON，照样算成功。
+# 2026-09-05 实测：模型自称 `OK` 却同时报「失败 2 个」，产出空快照——索引页
+# 「跟踪中的 issue」两张表当天全空、前一天的「新增 N 个 issue」告警全部消失，**无人知晓**。
+# ⛔ 但**空本身是合法的**（真的没有 OPEN issue 时就该是空），不能一空就告警——
+#    假阳性会训练人忽略整个检查。故用 BigQuery 侧交叉印证来分辨：
+#    BigQuery 是纯脚本取数、不经模型，它说有就是有。
+# ⚠️ 不airtight：BigQuery 含已关闭 issue，而 MCP 只返回 OPEN，理论上「全被关掉」也会
+#    造成这个组合。故文案说「大概率」并给出两种可能，⛔ 不断言是故障。
+MCP_EMPTY_MSG=""
+if [ "$MCP_OK" = 1 ]; then
+  _mcp_n="$(jq -r '((.ios // []) | length) + ((.android // []) | length)' "$CRASH_JSON" 2>/dev/null || echo 0)"
+  if [ "${_mcp_n:-0}" = 0 ]; then
+    # ⛔ grep -c 无匹配返回 1，`|| true` 不可省（F31）。空串经 printf 后是一个空行，故用 `grep -c .`
+    _bq_n="$(printf '%s\n' "$CUR_IDS" | grep -c . || true)"
+    if [ "${_bq_n:-0}" -gt 0 ] 2>/dev/null; then
+      MCP_EMPTY_MSG="⚠️ MCP 对照本轮返回 0 个 issue，而 BigQuery 同窗口查到 ${_bq_n} 个——大概率是抓取失败（也可能这些 issue 已全部关闭）；索引页「跟踪中的 issue」本轮为空，修复状态反查与新增判定失效，卡片数字不受影响"
+      echo "  ⚠️ MCP 对照返回空，但 BigQuery 同窗口有 ${_bq_n} 个 issue——大概率抓取失败"
+    else
+      # 两侧都是 0 ⇒ 互相印证，是真的安静，⛔ 不告警。
+      echo "  ℹ️ MCP 对照与 BigQuery 双侧均为 0 个 issue，互相印证（真无 OPEN issue，非故障）"
+    fi
+  fi
 fi
 
 # ── 事实层缓存新鲜度断言（bin/test/assert-fact-cache.sh）───────────────────
@@ -1110,9 +1140,6 @@ if [ -s "$SNAP" ]; then
 fi
 [ "$LIFECYCLE_OK" = 1 ] || echo "  ℹ️ issue 生命周期：基准为空，本轮只建基线不标新增（首轮刷一屏「新增」与该词要传达的信息相反）"
 
-# 本轮出现的全部 issue id（跨版本并集，来自 BigQuery）
-CUR_IDS="$(cat "$TMP"/issues-*.json 2>/dev/null | jq -rs '[.[][]?.issue_id] | unique | .[]' 2>/dev/null || true)"
-
 # ⛔ 链接版不加反引号：md2docx.py 的链接正则不处理嵌套行内代码。
 # ⚠️ 展示 8 位、href 用完整 32 位；取不到 URL 时回落纯短 id，不出半个链接。
 _id_link() { # $1=平台键(ios/android) $2=完整 issue id → markdown 链接或纯文本
@@ -1167,6 +1194,7 @@ _fb=""
 
 # ⚠️ 排在最后加：摘要按加入顺序渲染，🔴 崩溃/性能必须在前——流水线自身的降级不该压过线上问题。
 # add_alert 对空串是 no-op，断言通过时这行不产生任何输出。
+add_alert "$MCP_EMPTY_MSG"
 add_alert "$FACT_CACHE_MSG"
 
 SUMMARY_MD="$ALERTS"
