@@ -9,7 +9,7 @@
 #  5. bq query 直连收口（只允许 bin/lib/bq.sh）
 #  6. printf 格式串里的字面 %（F22：只在运行时炸，bash -n 查不出）
 #  7. 顶层「先用后定」（F24 同源：常量/函数定义晚于使用，报错常被 EXIT trap 吞成 0）
-#  8. 纯函数断言（bin/test/run.sh）+ 函数级回归（fn-regression.sh，生产 shell 设置下）
+#  8. 纯函数断言（bin/test/run.sh）+ **全部**函数级夹具（bin/test/fn-*.sh，生产 shell 设置下）
 #  9. ShellCheck（可选依赖，未安装则跳过，不影响退出码）
 # 10. 过期论断 lint（已被订正的结论不得复活；文件里紧邻第 4 项——两者同源：
 #     一个查重复代码、一个查重复论断，而论断的重复没有任何别的工具抓得到）
@@ -186,9 +186,16 @@ fi
 #    2026-08-24 实测：`grep -o` 无匹配返回 1，普通夹具测出 rc=0 一切正常，
 #    生产里每次成功渲染都触发一次 ERR trap → 发告警卡（失效模式 F31）。
 #    详见 docs/CLAUDE-测试盲区.md。
-if [ -x "$SELF_DIR/test/fn-regression.sh" ]; then
-  bash "$SELF_DIR/test/fn-regression.sh" || rc=1
-fi
+#
+# ⛔ **扫全部 `fn-*.sh`，不写死文件名**（2026-09-05）。原先只挂 `fn-regression.sh` 一个，
+#    而 `bin/test/` 下另有 8 个夹具、共 77 条断言**从来没被验收链执行过**——
+#    写完即失效，与「一个不会红的检查项」等价。⚠️ 它们全部离线、秒级、当时全绿，
+#    没被跑纯粹是因为这行写死了一个文件名，新增夹具要靠人记得回来改。
+# ⚠️ 逐个跑而不是 `for f in …; do bash "$f"; done || rc=1`：后者只保留最后一个的退出码。
+for _fx in "$SELF_DIR"/test/fn-*.sh; do
+  [ -f "$_fx" ] || continue
+  bash "$_fx" || rc=1
+done
 
 # ── 9. ShellCheck（可选依赖）─────────────────────────────────────
 # 生产机是无人值守的 Mac mini，不该为开发期工具多一项装机步骤。
