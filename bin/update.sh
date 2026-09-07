@@ -20,7 +20,19 @@ if [ -n "$(git -C "$ROOT" status --porcelain 2>/dev/null)" ]; then
   exit 1
 fi
 
-git -C "$ROOT" pull --ff-only 2>&1 | tail -3
+# ⛔ 退出码**不能**从管道尾部取（`git pull … | tail -3` 拿到的是 tail 的码）。
+#    2026-09-07 实测：生产机瞬时连不上 github（TLS 75s 超时），pull 报 fatal，
+#    而本脚本继续往下跑自检、打印「✅ 全部通过」「更新完成」，**一行代码都没更新**——
+#    靠人另外核对 `git rev-parse HEAD` 才发现，否则下一轮跑批用的还是旧代码。
+# ⚠️ 拉不到代码时**必须非零退出**：后面的自检跑的是旧代码，全绿毫无意义，
+#    继续打印反而给出「已部署」的假信号（假信号比漏报贵）。
+PULL_OUT="$(git -C "$ROOT" pull --ff-only 2>&1)"; PULL_RC=$?
+printf '%s\n' "$PULL_OUT" | tail -3
+if [ "$PULL_RC" -ne 0 ]; then
+  echo "  ❌ 拉取失败（git pull 退出码 ${PULL_RC}），本次更新中止——代码仍是 ${BEFORE}"
+  echo "     ⚠️ 常见原因是网络瞬断，稍后重跑本脚本即可；⛔ 不要以为「自检全绿」等于已部署"
+  exit 1
+fi
 AFTER="$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo '?')"
 
 if [ "$BEFORE" = "$AFTER" ]; then
