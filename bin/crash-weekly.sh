@@ -350,6 +350,9 @@ fi
 #    都已在 spec 里定死并踩过坑，复制一份等于把三个坑重开一次。
 # ⛔ 读取必须在基准提升**之前**（提升在跑批收尾）——提升后每条的 last 都是今天，判定恒为「长期」。
 # ⚠️ 基准为空（首次建立）时 $sn 恒为 null，自动退回两态，与 render-ledger.sh 的回落一致。
+# ⛔ **这里不再算 fixed_pending**（2026-09-07 移除）：它曾是 `[$n[] | select(.fix_commit != null)]`，
+#    但 $n 是当周快照——修好且不再崩的 issue 根本不在里面，而那正是「已修待验」的定义。
+#    该状态改由 _fix_rows() 直接读 fixmap 渲染，与台账时间线同源。⛔ 不要再往这里加回来。
 DIFF="$(jq -n --slurpfile new "$SNAP_NEW" --slurpfile old "$SNAP_LAST" --slurpfile seen "$SEEN_FILE" '
   ($seen[0] // {}) as $sn
   | def bykey: map({key:.id, value:.}) | from_entries;
@@ -362,8 +365,7 @@ DIFF="$(jq -n --slurpfile new "$SNAP_NEW" --slurpfile old "$SNAP_LAST" --slurpfi
           new:       [ $n[] | select($om[.id] == null and $sn[.id] == null) ],
           regressed: [ $n[] | select($om[.id] == null and $sn[.id] != null) ],
           resolved: [ $o[] | select($nm[.id] == null) ],
-          spiked:   [ $n[] | select($om[.id] != null and .events >= ($om[.id].events * 2) and .events >= 5) ],
-          fixed_pending: [ $n[] | select(.fix_commit != null) ]
+          spiked:   [ $n[] | select($om[.id] != null and .events >= ($om[.id].events * 2) and .events >= 5) ]
         };
     {ios: plat("ios"), android: plat("android")}
 ')"
@@ -401,6 +403,9 @@ LEDGER_RENDER_OK=0
 # 之后再判永远是「已建立」。复发率的分母同理——见下方 RECUR_MD。
 SEEN_WAS_ESTABLISHED=0
 [ "$(jq 'length' "$SEEN_FILE" 2>/dev/null || echo 0)" -gt 0 ] && SEEN_WAS_ESTABLISHED=1
+# ⛔ 脚注里的基准规模必须现算：原为写死的「实测 14 项」，2026-08-31 与 09-07 两周一字不差，
+#    而真实规模是 10 / 16。⚠️ 有记录的口径标注不能是字面量——它会随时间静默变成假话。
+SEEN_SIZE="$(jq 'length' "$SEEN_FILE" 2>/dev/null || echo 0)"
 if [ -x "$ROOT/bin/render-ledger.sh" ]; then
   # 周报文档 URL 此刻还不存在（由 deliver.sh 建文档后才知道），时间线先写占位符
   # __REPORT_URL__，deliver.sh 拿到 URL_REPORT 后统一回填（与卡片 __REPORT_URL__ 占位符同机制）。
@@ -906,6 +911,38 @@ _chg_rows() { # $1=平台key $2=桶名 $3=图标与词 $4=是否带事件数(1/0
   return 0
 }
 
+# ⛔ **数据源是 fixmap，不是当周快照**（2026-09-07 生产核验）。
+#    旧写法读 `DIFF.$k.fixed_pending`（= 快照里 fix_commit != null），当轮实测输出 **0 条**，
+#    而同一轮台账时间线有 **2 条**——两者本就不同源，台账走 render-ledger.sh 的 fixmap.mapped。
+#    根因不是平台过滤（那条 e15bbcd 已经拆掉了），是**快照当不了源**：issue 一旦修好、
+#    7 天窗内不再崩就掉出快照，而那**正是「已修待验」的定义**。以快照为源，只有
+#    「修了但还在崩」的才有机会被渲染出来，恰好把该顶到卡片上的那一类全过滤掉。
+# ⚠️ 状态取 fixmap 自己的 `status`，⛔ 不得写死「已修待验」——scan-fix-commits.sh 比较过
+#    提交时间与最大事件时间，已经判好了「已修待验」与「修了仍在」两态（spec
+#    crash-perf-fix-status-reconcile），写死会把后者说成前者，方向正好相反。
+# ⚠️ 标题用提交 subject 而非 issue title：这些 issue 通常**不在**当周快照里，拿不到 title。
+_fix_rows() { # $1=平台key $2=是否带链接(1/0)
+  local k="$1" want_link="${2:-0}"
+  local id plat status commit subject mark idtok u
+  [ -s "$FIXMAP_FILE" ] || return 0
+  while IFS=$'\t' read -r id plat status commit subject; do
+    [ -n "$id" ] || continue
+    if [ "$status" = "已修待验" ]; then mark="🛠️ 代码已修待验"; else mark="⚠️ 修了仍在"; fi
+    # ⛔ 与 _chg_rows 同一条约定：链接版不加反引号（md2docx.py 的链接正则不处理嵌套行内代码）。
+    idtok="\`${id:0:8}\`"
+    if [ "$want_link" = "1" ]; then
+      u="$(issue_url "$k" "$id")"
+      [ -n "$u" ] && idtok="[${id:0:8}]($u)"
+    fi
+    printf -- '- %s %s %s · %s\n' "$mark" "$idtok" "$subject" "$commit"
+  done < <(jq -r --arg k "$k" '.mapped // {} | to_entries[]
+             | select(.value.platform == $k)
+             | [.key, .value.platform, .value.status, .value.commit, .value.subject] | @tsv' \
+           "$FIXMAP_FILE" 2>/dev/null || true)
+  # ⛔ 同 _chg_rows：必须显式 return 0。
+  return 0
+}
+
 sec() { # $1=平台名 $2=json key $3=1 带控制台链接（文档用），0/缺省不带（卡片用）
   local name="$1" k="$2" want_link="${3:-0}"
   local total events
@@ -921,15 +958,10 @@ sec() { # $1=平台名 $2=json key $3=1 带控制台链接（文档用），0/�
   _chg_rows "$k" regressed "🔁 回归" 1 "$want_link"
   _chg_rows "$k" spiked    "📈 暴涨" 1 "$want_link"
   _chg_rows "$k" resolved  "✅ 消失" 0 "$want_link"
-  # ⛔ 原为 `[ "$k" = "ios" ] && …`，理由是「Android 无 issue ID 提交约定，fix_commit 恒 null」
-  #    ——**已订正的过期结论**（2026-09-01 改扫描器、2026-09-05 在生产机业务仓复核）。
-  #    ⚠️ L2 的情况比 L1 更严重：它**跑了** scan-fix-commits.sh、**拿到了** Android 命中
-  #    （实测 4 条：85c581ed / a34175e5 / ce481263 / fa48b2eb），然后在这里把它们扔掉。
-  #    而「代码已修待验」正是本段注释自己写的「最容易被遗忘的状态，必须顶到卡片上」。
-  # ⚠️ 双端渲染是安全的：fixed_pending 已经 `select(.fix_commit != null)`，
-  #    而**非 null 在两端都无歧义**（提交信息里确实引用了这个 issue）。
-  #    有歧义的是 null（Android 无强制规则时 null ≠ 未修），而 null 本就不进这个列表。
-  echo "$DIFF" | jq -r ".$k.fixed_pending[]? | \"- 🛠️ 代码已修待验 \`\(.id[0:8])\` \(.title) · \(.fix_commit)\"" || true
+  # ⚠️ 双端都渲染（e15bbcd 拆掉的 ios-only 过滤，⛔ 不得复活）：fixmap 里的条目**非 null 即无歧义**
+  #    ——提交信息里确实引用了这个 issue。有歧义的是 null（Android 无强制规则时 null ≠ 未修），
+  #    而 null 本就进不了 fixmap。数据源为何不能是快照，见 _fix_rows 上方。
+  _fix_rows "$k" "$want_link"
   # 必须显式 return 0：本函数末尾若以可能求值为假的语句结尾会返回 1，
   # 而 CHANGES_MD="$(sec ...)" 在 set -e 下会因此整脚本退出（旧版嵌在 heredoc 里侥幸没暴露）。
   return 0
@@ -1340,7 +1372,7 @@ REPORT="$STATE/reports/$DAY-weekly.md"
   printf '> 窗口起点 = 本次跑批时刻 − %s 天（SQL 下界）；终点 = sessions 活表实际取到的最新数据。\n' "$WEEK_DAYS"
   printf '## 一、本周变化\n\n%s\n\n' "$CHANGES_MD"
   [ -n "$RECUR_MD" ] && printf '%s\n\n' "$RECUR_MD"
-  [ -n "$RECUR_MD" ] && printf '> ⚠️ 「回归」指该 issue 在**上一轮基准日**（取基准里 `last` 的最大值，**不是「上周」**）无记录、本轮重新出现。判定窗口是崩溃段的滚动窗口——「消失」是**窗口内无事件**，⛔ 不等于「已修复」。⛔ 只给分数不给百分比：基准规模小（实测 14 项），百分比是伪精度。\n\n'
+  [ -n "$RECUR_MD" ] && printf '> ⚠️ 「回归」指该 issue 在**上一轮基准日**（取基准里 `last` 的最大值，**不是「上周」**）无记录、本轮重新出现。判定窗口是崩溃段的滚动窗口——「消失」是**窗口内无事件**，⛔ 不等于「已修复」。⛔ 只给分数不给百分比：基准规模小（本轮 '"$SEEN_SIZE"' 项），百分比是伪精度。\n\n'
   printf '## 二、主力版本（近 %s 天会话量 top2 ∪ 当日 top1）\n\n' "$WEEK_DAYS"
   adopt_md
   printf '\n> 日报盯的是「版本号最新的 2 个版本」（新版发得怎么样），本段盯的是「承载用户最多的版本」（盘子里的大头）。\n'

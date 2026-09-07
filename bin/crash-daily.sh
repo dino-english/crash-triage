@@ -1162,8 +1162,11 @@ SNAP="$STATE/daily-snapshot.json"
 
 # ── issue 生命周期（change crash-actionable-signals）──────────────────
 # 基准结构 issue_seen: {"<32位id>": "<末次出现日期>"}，保留 90 天。
-# ⚠️ 判定基准用 **BigQuery issue id**，不再依赖 MCP——现有 ios_ids/android_ids 来自 MCP
-#    且长期为空数组，L1 的新增判定实际已经死了。
+# ⚠️ 本基准用 **BigQuery issue id**（最新 2 版口径），驱动正文表的三态。
+# ⛔ **已订正的过期结论**（2026-09-07）：原注释称 ios_ids/android_ids 长期为空数组、L1 的新增判定实际已经死了。
+#    生产 daily-snapshot.json 实测 android_ids **8 条**，摘要行当天就报出了「新增 1 个」——它一直活着。
+#    真实缺陷不是它死了，而是它**只有两态**：把回归当成新增报。见下方 mcp_seen。
+#    真实问题不是它死了，是它**只有两态**：把回归当成新增报。见下方 mcp_seen。
 SEEN_JSON='{}'; SEEN_PREV_DAY=""; LIFECYCLE_OK=0
 if [ -s "$SNAP" ]; then
   SEEN_JSON="$(jq -c '.issue_seen // {}' "$SNAP" 2>/dev/null || echo '{}')"
@@ -1173,6 +1176,31 @@ if [ -s "$SNAP" ]; then
   [ "$(printf '%s' "$SEEN_JSON" | jq 'length' 2>/dev/null || echo 0)" -gt 0 ] && LIFECYCLE_OK=1
 fi
 [ "$LIFECYCLE_OK" = 1 ] || echo "  ℹ️ issue 生命周期：基准为空，本轮只建基线不标新增（首轮刷一屏「新增」与该词要传达的信息相反）"
+
+# ── 摘要行的 MCP 空间基准（2026-09-07）────────────────────────────
+# ⛔ **不借用上面的 issue_seen**：它是 BigQuery 最新 2 版口径，而摘要行走 MCP OPEN 全版本，
+#    两个 id 空间不同——借来就是跨口径给数（本仓库的红线），判出来的「回归」谁也解释不了。
+# ⛔ 也**不新建第三个文件**：daily-snapshot.json 里本来就存着 MCP 空间的 ios_ids/android_ids，
+#    基准作为同一份文件的第三个字段落进去，保留期与清理**复用它现成的那一套**，
+#    不重开「保留期 / 清理 / 上一轮基准日」这三个已经踩过的坑。
+# ⚠️ 「上一轮」不假设为昨天：判据是上一份快照里的 *_ids（不论它是哪天写的），
+#    而 mcp_seen 是日期映射、不需要推断基准日，故第三个坑在结构上就不存在。
+MCP_SEEN_JSON='{}'; MCP_LIFECYCLE_OK=0
+if [ -s "$SNAP" ]; then
+  MCP_SEEN_JSON="$(jq -c '.mcp_seen // {}' "$SNAP" 2>/dev/null || echo '{}')"
+  [ "$(printf '%s' "$MCP_SEEN_JSON" | jq 'length' 2>/dev/null || echo 0)" -gt 0 ] && MCP_LIFECYCLE_OK=1
+fi
+
+# 摘要行三态拆分：「不在上一轮 OPEN 列表里」有两种情形，⛔ 不得挤进同一个「新增」——
+# 回归意味着修复失效或场景重现，与全新问题的处置方式不同（spec crash-perf-issue-lifecycle）。
+# 全部走参数、不读全局，便于夹具直接抽出来跑。
+_mcp_split() { # $1=平台键(ios|android) $2=本轮 MCP json $3=上一轮快照 $4=基准 json → "新增数<TAB>回归数"
+  jq -rn --slurpfile c "$2" --slurpfile s "$3" --argjson seen "$4" --arg k "$1" '
+    ($s[0][($k + "_ids")] // []) as $prev
+    | [ ($c[0][$k] // [])[] | select(.id as $i | $prev | index($i) | not) ] as $gone
+    | "\(([$gone[] | select($seen[.id] == null)] | length))\t\(([$gone[] | select($seen[.id] != null)] | length))"
+  ' 2>/dev/null || printf '0\t0'
+}
 
 # ⛔ 链接版不加反引号：md2docx.py 的链接正则不处理嵌套行内代码。
 # ⚠️ 展示 8 位、href 用完整 32 位；取不到 URL 时回落纯短 id，不出半个链接。
@@ -1198,10 +1226,24 @@ IOS_NETERR_V1="$(mv_ ios "$IOS_ALERT_VER" perf.net_err)";  AND_NETERR_V1="$(mv_ 
 AND_ANR_RATE="$(mv_ and "$AND_ALERT_VER" errtype.anr_rate_pct)"   # iOS 无 ANR，故无对应变量
 
 if [ "$MCP_OK" = 1 ] && [ -f "$SNAP" ]; then
-  NEW_IOS="$(jq -r --slurpfile s "$SNAP" '[(.ios // [])[] | select(.id as $i | ($s[0].ios_ids // []) | index($i) | not)] | length' "$CRASH_JSON" 2>/dev/null || echo 0)"
-  NEW_AND="$(jq -r --slurpfile s "$SNAP" '[(.android // [])[] | select(.id as $i | ($s[0].android_ids // []) | index($i) | not)] | length' "$CRASH_JSON" 2>/dev/null || echo 0)"
-  [ "${NEW_IOS:-0}" -gt 0 ] 2>/dev/null && add_alert "🔴 iOS 新增 ${NEW_IOS} 个 issue（全版本口径）"
-  [ "${NEW_AND:-0}" -gt 0 ] 2>/dev/null && add_alert "🔴 Android 新增 ${NEW_AND} 个 issue（全版本口径）"
+  IFS=$'\t' read -r NEW_IOS REGR_IOS <<< "$(_mcp_split ios     "$CRASH_JSON" "$SNAP" "$MCP_SEEN_JSON")"
+  IFS=$'\t' read -r NEW_AND REGR_AND <<< "$(_mcp_split android "$CRASH_JSON" "$SNAP" "$MCP_SEEN_JSON")"
+  if [ "$MCP_LIFECYCLE_OK" != 1 ]; then
+    # ⛔ 基准未建立时**不得分列**：此时「不在基准里」对所有 issue 都成立，分列出来的
+    #    「新增」是伪判定。按 L2 同一套做法，本轮只报合计并说明分不了（1789add 那条原则：
+    #    判定对象要看「答不答得了」）。下一轮起基准就有了。
+    # ⛔ 不用 `set -- $_p` 这类循环：那会覆盖脚本自身的位置参数。两行写清楚更便宜。
+    _TOT_IOS=$(( ${NEW_IOS:-0} + ${REGR_IOS:-0} )); _TOT_AND=$(( ${NEW_AND:-0} + ${REGR_AND:-0} ))
+    [ "$_TOT_IOS" -gt 0 ] 2>/dev/null \
+      && add_alert "🔴 iOS 新出现 ${_TOT_IOS} 个 issue（全版本口径 · ⚠️ 本轮建立基准，未区分新增与回归）"
+    [ "$_TOT_AND" -gt 0 ] 2>/dev/null \
+      && add_alert "🔴 Android 新出现 ${_TOT_AND} 个 issue（全版本口径 · ⚠️ 本轮建立基准，未区分新增与回归）"
+  else
+    [ "${NEW_IOS:-0}"  -gt 0 ] 2>/dev/null && add_alert "🔴 iOS 新增 ${NEW_IOS} 个 issue（全版本口径）"
+    [ "${REGR_IOS:-0}" -gt 0 ] 2>/dev/null && add_alert "🔁 iOS 回归 ${REGR_IOS} 个 issue（全版本口径 · 曾消失又重现，修复可能失效）"
+    [ "${NEW_AND:-0}"  -gt 0 ] 2>/dev/null && add_alert "🔴 Android 新增 ${NEW_AND} 个 issue（全版本口径）"
+    [ "${REGR_AND:-0}" -gt 0 ] 2>/dev/null && add_alert "🔁 Android 回归 ${REGR_AND} 个 issue（全版本口径 · 曾消失又重现，修复可能失效）"
+  fi
 fi
 # 代码已修但未发版：最容易被遗忘的状态，必须顶到卡片上。
 # ⛔ 原为「只统计 iOS：Android 无 issue ID 约定，fix_commit 恒 null」——**已订正的过期结论**
@@ -2609,6 +2651,7 @@ jq -n --arg day "$DAY" \
                            --argjson a "$(printf '%s' "$AND_COLS" | jq -Rsc 'split("\n")|map(select(length>0))')" '{ios:$i,android:$a}')" \
   --slurpfile c "$CRASH_JSON" \
   --argjson prev "$SEEN_JSON" \
+  --argjson mcpprev "$MCP_SEEN_JSON" \
   --argjson cur "$(printf '%s' "$CUR_IDS" | jq -Rsc 'split("\n")|map(select(length>0))')" \
   --arg cut "$(day_ago "$HISTORY_KEEP")" \
   '{day:$day, versions:$vers,
@@ -2616,6 +2659,13 @@ jq -n --arg day "$DAY" \
     issue_seen: (
       ($prev | with_entries(select(.value >= $cut)))     # 超期清理：末次出现早于保留期起点即丢弃
       + ($cur | map({key:., value:$day}) | from_entries) # 本轮出现的刷成今天
+    ),
+    # MCP OPEN 全版本空间的基准，供**摘要行**分列新增/回归。⛔ 与 issue_seen 是两个 id 空间，
+    # 结构相同但**不得互相借用**。⚠️ MCP 抓取失败时本轮没有 id 可刷，靠保留期原样留住旧条目——
+    # ⛔ 不得因为本轮为空就清空（那会让明天所有 issue 都变成「新增」）。
+    mcp_seen: (
+      ($mcpprev | with_entries(select(.value >= $cut)))
+      + ([($c[0].ios // [])[].id] + [($c[0].android // [])[].id] | map({key:., value:$day}) | from_entries)
     )}' \
   > "$SNAP" 2>/dev/null || echo "  ⚠️ 快照写入失败，明日无「新增 issue」基准"
 
