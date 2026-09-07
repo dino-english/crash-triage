@@ -328,11 +328,34 @@ publish_doc() { # $1=本地文件 $2=标题 $3=doc_id(可空) $4=文件夹 token
   printf '%s' "$u"
 }
 
+# 未回填的链接占位符降级为纯文本（2026-09-07）。
+# ⛔ 这不是 DRY RUN 专属问题：weekly 分支的回填带 `[ -n "$URL_REPORT" ]` 条件、daily 的
+#    doc_get 也可能返回空，**文档发布失败时卡片照发**，`[完整报告](__REPORT_URL__)`
+#    就以 `http://__report_url__` 的死链进了生产群。台账那侧早有同款兜底
+#    （crash-weekly.sh 的 LEDGER_TL_DEDUP 段），卡片这侧一直漏着。
+# ⚠️ 放在 send_card 里而不是各回填点：占位符有四个（REPORT/DETAIL/INDEX/FOLDER）、
+#    回填散在三条分支上，逐点兜底必然漏；这里是所有卡片出门的唯一隘口。
+# ⚠️ 也在 DRY RUN 下执行：publish/card.json 会被人手工单发去验列宽（这是有记录的做法），
+#    带着占位符的产物一样会渲染出死链。
+strip_unfilled_links() { # $1=card.json（就地改写）；stdout 无输出，降级时在 stderr 提示
+  [ -s "$1" ] || return 0
+  python3 - "$1" <<'STRIPPY' || true
+import re, sys, pathlib
+p = pathlib.Path(sys.argv[1]); t = p.read_text()
+n = re.sub(r'\[([^\]]*)\]\(__[A-Z_]+_URL__\)', r'\1（链接未生成）', t)
+if n != t:
+    p.write_text(n)
+    sys.stderr.write("  ⚠️ 卡片有未回填的链接占位符，已降级为纯文本（文档可能发布失败）\n")
+STRIPPY
+  return 0
+}
+
 # 发交互卡片。--idempotency-key 用 run_id：同一次运行重跑不会发出第二张卡片。
 send_card() { # $1=card.json
   local card="$1"
   [ -s "$card" ] || fail "卡片文件为空：$card"
   jq empty "$card" || fail "卡片 JSON 不合法：$card"
+  strip_unfilled_links "$card"
   if [ "$DRY_RUN" = "1" ]; then
     echo "  [dry-run] "${LK[@]}" im +messages-send → ${CHAT_ID}（interactive, as=$LARK_AS, idempotency-key=${RUN_ID}）"
     return 0

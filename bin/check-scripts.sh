@@ -104,6 +104,10 @@ fi
 #   2026-09-01 订正｜Android 未采用 Crashlytics issue id 提交约定 / fix_commit 恒 null
 #     依据：改扫描器后两仓反扫 0 → 6 条；2026-09-05 在生产机业务仓复核 Android 近 90 天 4 条
 #     ⚠️ 允许出现的语境：**明确标注为已订正**的说明文字（含「已订正」「过期结论」字样的行）
+#   2026-09-07 订正｜未回填的 __*_URL__ 占位符不会被当成真链接展示 / 不会挂空链接
+#     依据：实测飞书把 [完整报告](__REPORT_URL__) 渲染成 http://__report_url__ 死链；
+#           同文件 LEDGER_TL_DEDUP 段早已写着「会作为死链永久留在台账里（实测已污染 18 行）」
+#     ⚠️ 兜底在 deliver.sh 的 strip_unfilled_links()（卡片出门唯一隘口），⛔ 不得因此结论撤掉
 #   2026-09-07 订正｜ios_ids/android_ids 长期为空数组 / L1 的新增判定已经死了
 #     依据：生产 daily-snapshot.json 实测 android_ids 8 条，当日摘要行报出「新增 1 个」
 #     ⚠️ 真实缺陷不是「死了」而是「只有两态」——按旧结论行事会去删告警，而正解是补回归分列
@@ -115,6 +119,8 @@ stale_claims="$(
     grep -nE 'Android (未采用|无此约定|无 issue ID)|fix_commit 恒 (为 )?null' "$f" \
       | grep -vE '已订正|过期结论|旧结论|原为' | sed "s|^|   ${rel}:|" || true
     grep -nE 'ios_ids/android_ids .*长期为空|新增判定 ?实际(已经)?死了' "$f" \
+      | grep -vE '已订正|过期结论|旧结论|原为' | sed "s|^|   ${rel}:|" || true
+    grep -nE '占位符不会被当成真链接|不会挂空链接' "$f" \
       | grep -vE '已订正|过期结论|旧结论|原为' | sed "s|^|   ${rel}:|" || true
   done
   # 文档同样要扫：INSTALL.md 那份拷贝就在文档里

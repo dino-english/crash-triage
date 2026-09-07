@@ -409,8 +409,11 @@ SEEN_SIZE="$(jq 'length' "$SEEN_FILE" 2>/dev/null || echo 0)"
 if [ -x "$ROOT/bin/render-ledger.sh" ]; then
   # 周报文档 URL 此刻还不存在（由 deliver.sh 建文档后才知道），时间线先写占位符
   # __REPORT_URL__，deliver.sh 拿到 URL_REPORT 后统一回填（与卡片 __REPORT_URL__ 占位符同机制）。
-  # 8.8：周报投递失败则占位符永远不会被回填——deliver.sh 只在投递成功分支才 fill，
-  # 未回填的占位符不会被当成真链接展示（lark 侧就是一段普通文本），不会挂空链接。
+  # 8.8：周报投递失败则占位符永远不会被回填——deliver.sh 只在投递成功分支才 fill。
+  # ⛔ **已订正的过期结论**：原注释称「未回填的占位符不会被当成真链接展示、不会挂空链接」。
+  #    2026-09-07 实测：飞书把它渲染成 `http://__report_url__` 的死链。
+  #    本文件 LEDGER_TL_DEDUP 段其实早就写着「会作为死链永久留在台账里（实测已污染 18 行）」，
+  #    同一个文件里两句话互相打架。卡片侧的兜底已补在 deliver.sh 的 strip_unfilled_links()。
   RENDER_OUT="$("$ROOT/bin/render-ledger.sh" "$SNAP_NEW" "$FIXMAP_FILE" "$PREV_TABLE_FILE" \
     <(echo "$DIFF") "$DAY" "__REPORT_URL__" "$SEEN_FILE" "$(day_ago "$SEEN_KEEP_DAYS")" \
     2>"$OUT_DIR/render-ledger.log")" \
@@ -885,8 +888,14 @@ echo "  取数区间 ${WEEK_DAYS}d：$WIN_COMPACT"
 #    定义点，改一处就让预览与实发不一致）。改为**一个定义点、两次调用**，靠参数区分。
 _chg_rows() { # $1=平台key $2=桶名 $3=图标与词 $4=是否带事件数(1/0) $5=是否带链接(1/0)
   local k="$1" bucket="$2" mark="$3" with_events="$4" want_link="$5"
-  local id title events vers vtxt suffix idtok u
-  while IFS=$'\t' read -r id title events vers; do
+  local id title events vers vtxt suffix idtok u fixstatus fixcommit fixtxt
+  # ⚠️ 与 fixmap 左连接：命中的行把修复状态**并进本行**，而不是让 _fix_rows 再单独出一行。
+  #    2026-09-07 实测：`470ed3ef` 同时满足「消失」（本周窗口无事件）与「已修待验」
+  #    （有修复提交、且提交后无更晚事件）——两者不矛盾，是同一件事的观察与解释，
+  #    但分成两行、各带一个不同的描述（issue 标题 vs commit subject）会被读成两条打架的记录。
+  # ⛔ 括注只放短 hash，不放 commit subject：卡片列宽装不下，subject 留给周报文档。
+  local fmap="${FIXMAP_FILE:-}"; [ -s "$fmap" ] || fmap=/dev/null
+  while IFS=$'\t' read -r id title events vers fixstatus fixcommit; do
     [ -n "$id" ] || continue
     # 版本构成：⚠️ **只在跨版本时出括注**——单版本时它与主数字重复，只增噪音。
     # ⛔ 全角括号先条件赋值再拼接，禁 ${var:+（...）}：bash 会把全角字节并进变量名。
@@ -905,8 +914,19 @@ _chg_rows() { # $1=平台key $2=桶名 $3=图标与词 $4=是否带事件数(1/0
       u="$(issue_url "$k" "$id")"
       [ -n "$u" ] && idtok="[${id:0:8}]($u)"
     fi
-    printf -- '- %s %s %s%s%s\n' "$mark" "$idtok" "$title" "$suffix" "$vtxt"
-  done < <(echo "$DIFF" | jq -r ".$k.${bucket}[]? | [.id, .title, (.events // \"\"), (if .versions == null then \"null\" else (.versions|tojson) end)] | @tsv" 2>/dev/null || true)
+    # ⛔ 全角括号先条件赋值再拼接，禁 ${var:+（...）}
+    fixtxt=""
+    if [ -n "$fixcommit" ]; then
+      if [ "$fixstatus" = "已修待验" ]; then fixtxt="（🛠️ 代码已修待验 · ${fixcommit}）"
+      else fixtxt="（⚠️ 修了仍在 · ${fixcommit}）"; fi
+    fi
+    printf -- '- %s %s %s%s%s%s\n' "$mark" "$idtok" "$title" "$suffix" "$vtxt" "$fixtxt"
+  done < <(echo "$DIFF" | jq -r --slurpfile fm "$fmap" --arg k "$k" --arg b "$bucket" '
+      ($fm[0].mapped // {}) as $m
+      | .[$k][$b][]?
+      | [ .id, .title, (.events // ""),
+          (if .versions == null then "null" else (.versions|tojson) end),
+          (($m[.id] // {}).status // ""), (($m[.id] // {}).commit // "") ] | @tsv' 2>/dev/null || true)
   # ⛔ 必须显式 return 0：末尾的条件判断为假会让函数返回 1，而调用方在 set -e 下会整脚本退出。
   return 0
 }
@@ -935,10 +955,15 @@ _fix_rows() { # $1=平台key $2=是否带链接(1/0)
       [ -n "$u" ] && idtok="[${id:0:8}]($u)"
     fi
     printf -- '- %s %s %s · %s\n' "$mark" "$idtok" "$subject" "$commit"
-  done < <(jq -r --arg k "$k" '.mapped // {} | to_entries[]
+  done < <(jq -rn --slurpfile fm "$FIXMAP_FILE" --argjson diff "$DIFF" --arg k "$k" '
+             # 变化行已经渲染过的 id 不再单独成行——保证 fixmap 每条在卡片上**恰好出现一次**
+             ([ $diff[$k].new[]?, $diff[$k].regressed[]?, $diff[$k].spiked[]?,
+                $diff[$k].resolved[]? ] | map(.id)) as $shown
+             | ($fm[0].mapped // {}) | to_entries[]
              | select(.value.platform == $k)
+             | select(.key as $i | $shown | index($i) | not)
              | [.key, .value.platform, .value.status, .value.commit, .value.subject] | @tsv' \
-           "$FIXMAP_FILE" 2>/dev/null || true)
+           2>/dev/null || true)
   # ⛔ 同 _chg_rows：必须显式 return 0。
   return 0
 }
