@@ -19,6 +19,7 @@ ROOT="$CRASH_REPORT_ROOT"
 # （抓取判定退化 → 事实层停更；保留谓词退化 → 误删固定文档键、重建整套飞书文档）。
 # shellcheck disable=SC1091
 . "$ROOT/bin/lib/core/cache.sh" || { echo "❌ 核心层缺失：bin/lib/core/cache.sh" >&2; exit 1; }
+. "$ROOT/bin/lib/card.sh"       || { echo "❌ 缺失：bin/lib/card.sh" >&2; exit 1; }
 STATE="${CRASH_REPORT_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/crash-triage}"
 # PATH 来源，见 crash-daily.sh 同处注释。
 # else 兜底是随改名一起补的：本脚本原本只有 if、没有 else，文件缺失时就直接吃 cron 的最小 env，
@@ -326,28 +327,6 @@ publish_doc() { # $1=本地文件 $2=标题 $3=doc_id(可空) $4=文件夹 token
   # ⚠️ 用 if 而不是 `f "$key" && note_new …`：条件位上的命令豁免于 set -e 与 ERR trap。
   if is_fixed_resource_key "$key"; then note_new "$2" "$u"; fi
   printf '%s' "$u"
-}
-
-# 未回填的链接占位符降级为纯文本（2026-09-07）。
-# ⛔ 这不是 DRY RUN 专属问题：weekly 分支的回填带 `[ -n "$URL_REPORT" ]` 条件、daily 的
-#    doc_get 也可能返回空，**文档发布失败时卡片照发**，`[完整报告](__REPORT_URL__)`
-#    就以 `http://__report_url__` 的死链进了生产群。台账那侧早有同款兜底
-#    （crash-weekly.sh 的 LEDGER_TL_DEDUP 段），卡片这侧一直漏着。
-# ⚠️ 放在 send_card 里而不是各回填点：占位符有四个（REPORT/DETAIL/INDEX/FOLDER）、
-#    回填散在三条分支上，逐点兜底必然漏；这里是所有卡片出门的唯一隘口。
-# ⚠️ 也在 DRY RUN 下执行：publish/card.json 会被人手工单发去验列宽（这是有记录的做法），
-#    带着占位符的产物一样会渲染出死链。
-strip_unfilled_links() { # $1=card.json（就地改写）；stdout 无输出，降级时在 stderr 提示
-  [ -s "$1" ] || return 0
-  python3 - "$1" <<'STRIPPY' || true
-import re, sys, pathlib
-p = pathlib.Path(sys.argv[1]); t = p.read_text()
-n = re.sub(r'\[([^\]]*)\]\(__[A-Z_]+_URL__\)', r'\1（链接未生成）', t)
-if n != t:
-    p.write_text(n)
-    sys.stderr.write("  ⚠️ 卡片有未回填的链接占位符，已降级为纯文本（文档可能发布失败）\n")
-STRIPPY
-  return 0
 }
 
 # 发交互卡片。--idempotency-key 用 run_id：同一次运行重跑不会发出第二张卡片。

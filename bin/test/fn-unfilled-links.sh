@@ -7,7 +7,7 @@
 ROOT="${CRASH_REPORT_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}"
 . "$ROOT/bin/test/harness.sh"
 
-h_load "$ROOT/bin/deliver.sh" strip_unfilled_links
+h_load "$ROOT/bin/lib/card.sh" strip_unfilled_links write_card_preview
 T="$(mktemp -d)"
 
 mk() { printf '%s' "$1" > "$T/c.json"; h_run strip_unfilled_links "$T/c.json" >/dev/null 2>&1; cat "$T/c.json"; }
@@ -45,4 +45,21 @@ h_assert_rc 0 strip_unfilled_links /nonexistent.json
 : > "$T/empty.json"; h_assert_rc 0 strip_unfilled_links "$T/empty.json"
 h_assert_silent strip_unfilled_links "$T/empty.json"
 
-h_summary "strip_unfilled_links"
+# ── write_card_preview：⛔ 原件不动、副本才净化 ──────────────────
+# ⛔ 这条是补投的命脉：占位符抹掉了，「重跑 deliver.sh 补投」就永远填不上真实 URL。
+P="$T/pub"; mkdir -p "$P"
+printf '%s' '{"c":"📄 [完整报告](__REPORT_URL__)"}' > "$P/card.json"
+h_run write_card_preview "$P/card.json" >/dev/null 2>&1
+
+h_assert_eq '{"c":"📄 [完整报告](__REPORT_URL__)"}' "$(cat "$P/card.json")" \
+  "⑦ ⛔ **原件必须原样保留占位符**（补投靠它回填）"
+h_assert_eq '{"c":"📄 完整报告（链接未生成）"}' "$(cat "$P/card-preview.json")" \
+  "⑧ 副本已净化，可安全手工外发"
+jq empty "$P/card-preview.json" 2>/dev/null \
+  && h_assert_eq 0 0 "⑨ 副本仍是合法 JSON" || h_assert_eq 0 1 "⑨ 副本仍是合法 JSON"
+
+# 原件不存在时安静返回 0，⛔ 不得触发 ERR trap，也不得留下半个副本
+h_assert_rc 0 write_card_preview "$P/nope.json"
+h_assert_absent "$(ls "$P")" "nope" "⑩ ⛔ 原件不存在时不产出任何副本"
+
+h_summary "strip_unfilled_links / write_card_preview"

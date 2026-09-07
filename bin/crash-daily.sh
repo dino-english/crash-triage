@@ -185,6 +185,7 @@ rm -f "$ALERT_FLAG"
 if [ -f "$ROOT/bin/lib/common.sh" ]; then
   # shellcheck disable=SC1091
   . "$ROOT/bin/lib/common.sh"
+  . "$ROOT/bin/lib/card.sh"
 else
   # 与 lib.sh 同样的回落：文件缺失不阻塞主流程，退化成最小实现
   ALERTED=0; CURRENT_STEP="启动"
@@ -2573,6 +2574,9 @@ PUBLISH_DIR="$STATE/publish"
 rm -rf "$PUBLISH_DIR"; mkdir -p "$PUBLISH_DIR/docs"
 printf '%s\n' "$CARD" > "$PUBLISH_DIR/message.md"
 printf '%s\n' "$CARD_JSON" > "$PUBLISH_DIR/card.json"
+# 预览件：占位符降级后的副本，供人手工单发去验版面/列宽。⛔ 原件保持带占位符——
+# 「重跑 deliver.sh 补投」要靠它回填真实文档 URL（write_card_preview 只动副本）。
+write_card_preview "$PUBLISH_DIR/card.json"
 [ -s "$REPORT" ] && cp "$REPORT" "$PUBLISH_DIR/docs/daily.md" || true
 
 build_report_xml
