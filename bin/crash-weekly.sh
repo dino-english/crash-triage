@@ -1005,6 +1005,11 @@ sec() { # $1=平台名 $2=json key $3=1 带控制台链接（文档用），0/�
 #    ⛔ 原先禁掉是把「裸 URL」与「markdown 链接」混为一谈了。卡片是多数人唯一会看的产物，
 #    最该能下钻的地方不能只给灰色文本。⛔ 表格单元格另说：实测不渲染链接，那边保持无链接。
 CHANGES_MD="$(sec "iOS" ios 1; printf '\n'; sec "Android" android 1)"
+
+# 版本注记（change crash-version-notes）：函数在 bin/lib/card.sh，L1/L2 共用。
+# ⚠️ 传的是**主力版本**（会话量 top2），与日报的「最新 N 版」常常不同——
+#    同一条注记只出现在命中的那一份报告里，这是设计如此不是缺陷（design D3）。
+VERSION_NOTES_MD="$(version_notes_md "$IOS_TOP2_VERS" "$AND_TOP2_VERS")"
 # ⚠️ **消费点有三个，别只数两个**（2026-09-01 实施本 change 时就因此改错了地方）：
 #   群消息 message.md（MSG heredoc）· 卡片（--arg ch）· 周报文档（printf '## 一、本周变化'）。
 #   三者现在**用同一份带链接的内容**（change crash-card-issue-links 实测：卡片的 markdown 块
@@ -1294,6 +1299,7 @@ perf_md() {
 MSG="$(cat <<MSG_END
 **📊 崩溃周报 · ${DAY} ${TS_HM}${WEEK_TAG:+ $WEEK_TAG}**
 
+$VERSION_NOTES_MD
 $CHANGES_MD
 
 **🚀 主力版本（近 ${WEEK_DAYS} 天会话量 top2 ∪ 当日 top1）**
@@ -1351,13 +1357,15 @@ fi
 
 CARD_JSON="$(jq -n \
   --arg hc "$HEADER_COLOR" --arg ht "📊 崩溃周报 · ${DAY} ${TS_HM}${WEEK_TAG:+ $WEEK_TAG}" \
-  --arg ch "$CHANGES_MD" --arg nm "$NOTE_MD" \
+  --arg ch "$CHANGES_MD" --arg vn "$VERSION_NOTES_MD" --arg nm "$NOTE_MD" \
   --argjson rows "${ADOPT_JSON:-[]}" \
   --argjson chev "${CHART_EVENTS:-[]}" --argjson chsc "${CHART_SCREEN:-[]}" --argjson chp95 "${CHART_P95:-[]}" \
   '{schema:"2.0",
     config:{width_mode:"fill"},
     header:{template:$hc,title:{tag:"plain_text",content:$ht}},
-    body:{elements:([
+    body:{elements:(
+      (if $vn != "" then [{tag:"markdown",content:$vn}] else [] end)
+      + [
       {tag:"markdown",content:"<font color=\u0027red\u0027>**🔁 本周变化**</font>"},{tag:"hr"},
       {tag:"markdown",content:$ch},
       {tag:"markdown",content:"<font color=\u0027green\u0027>**🚀 主力版本**</font>"},{tag:"hr"}]
@@ -1403,6 +1411,7 @@ REPORT="$STATE/reports/$DAY-weekly.md"
   printf '# 崩溃周报 · %s %s\n\n' "$DAY" "$WEEK_TAG"
   printf '> 取数区间 %sd：**%s**\n' "$WEEK_DAYS" "$WIN_FULL"
   printf '> 窗口起点 = 本次跑批时刻 − %s 天（SQL 下界）；终点 = sessions 活表实际取到的最新数据。\n' "$WEEK_DAYS"
+  [ -n "$VERSION_NOTES_MD" ] && printf '%s\n' "$VERSION_NOTES_MD"
   printf '## 一、本周变化\n\n%s\n\n' "$CHANGES_MD"
   [ -n "$RECUR_MD" ] && printf '%s\n\n' "$RECUR_MD"
   [ -n "$RECUR_MD" ] && printf '> ⚠️ 「回归」指该 issue 在**上一轮基准日**（取基准里 `last` 的最大值，**不是「上周」**）无记录、本轮重新出现。判定窗口是崩溃段的滚动窗口——「消失」是**窗口内无事件**，⛔ 不等于「已修复」。⛔ 只给分数不给百分比：基准规模小（本轮 '"$SEEN_SIZE"' 项），百分比是伪精度。\n\n'

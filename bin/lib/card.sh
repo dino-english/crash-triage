@@ -32,3 +32,40 @@ write_card_preview() { # $1=card.json 路径 → 同目录下 card-preview.json
   strip_unfilled_links "$pv" 2>/dev/null
   return 0
 }
+
+# ── 版本注记（change crash-version-notes）────────────────────────────
+# 回答「这个数字为什么跳变」——当原因不在数据里而在代码/口径变更里时。
+# 人手维护 `notes/version-notes.tsv`（`平台<TAB>版本<TAB>一句话`），脚本**只读永不覆写**。
+#
+# ⚠️ **版本集由调用方传入，函数不读全局**：L1 用最新 N 版、L2 用会话量 top2 主力版本，
+#    两者常常不同，同一条注记只出现在命中的那一份里——**这是设计如此不是缺陷**（design D3）。
+#    参数化是为了让「用哪个版本集」这个决定留在调用点、看得见。
+# ⛔ 只出摘要区，不进表格单元格（design D2）：进表格会同时踩中「列宽只有真发一张才验得出」
+#    与「卡片列集合有 build_card_table / md_table 两个定义点」（F35）。
+# ⚠️ 放 lib/card.sh 而不是写在某个入口脚本里：**函数不跨进程**，L1/L2 是两个独立进程，
+#    写在 crash-daily.sh 里 L2 永远看不见（本 change 一度就是这么漏的）。
+version_notes_md() { # $1=iOS 版本集（空白分隔） $2=Android 版本集 → markdown 列表，无命中输出空串
+    local file="${CRASH_REPORT_NOTES_FILE:-$ROOT/notes/version-notes.tsv}"
+    local max="${CRASH_REPORT_NOTES_MAX:-3}"
+    [ -f "$file" ] || return 0
+    local plat ver text pname hits=0 total=0 out=""
+    # ⚠️ 先数总命中再截断：截断了不说条数，读者不知道还有没被显示的
+    while IFS=$'\t' read -r plat ver text; do
+        case "$plat" in ''|'#'*) continue;; esac
+        [ -n "$ver" ] && [ -n "$text" ] || continue
+        case "$plat" in
+            ios) printf '%s\n' $1 | grep -qxF "$ver" || continue; pname="iOS";;
+            and) printf '%s\n' $2 | grep -qxF "$ver" || continue; pname="Android";;
+            *) continue;;
+        esac
+        total=$((total + 1))
+        [ "$hits" -ge "$max" ] && continue
+        hits=$((hits + 1))
+        out="${out}- ⚠️ **${pname} ${ver}**：${text}\n"
+    done < "$file"
+    [ "$total" -gt 0 ] || return 0
+    # 全角括号不参与变量拼接（⛔ 禁 ${var:+（...）}：bash 把全角字节并进变量名）
+    local more=""
+    [ "$total" -gt "$hits" ] && more="- 另有 $((total - hits)) 条注记未显示\n"
+    printf '%b%b' "$out" "$more"
+}

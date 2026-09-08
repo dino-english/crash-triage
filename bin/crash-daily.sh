@@ -1306,6 +1306,10 @@ perf_stale_line() {
 add_summary "$(perf_stale_line)"
 STATUS_MD="$SUMMARY_MD"; [ -z "$STATUS_MD" ] && STATUS_MD="✅ 无异常"
 
+# 版本注记：函数在 bin/lib/card.sh（L1/L2 共用；⚠️ 函数不跨进程，写在本文件里 L2 看不见）。
+# ⚠️ 日报传的是**本报告呈现的版本集**；L2 传主力版本，两者不同是设计如此（design D3）。
+VERSION_NOTES_MD="$(version_notes_md "$IOS_COLS" "$AND_COLS")"
+
 # ── 单元格渲染 ────────────────────────────────────────
 # 版本列头角标：最新 N 版标「最新」，会话量 top2 标「主力」，两者兼具标「最新·主力」
 # 角标只在「最新 N 版」与「会话量 top2」不重合时才有意义——重合时每列都标「最新」纯属噪音。
@@ -1745,14 +1749,16 @@ NOTE_MD="$(printf '本报告只统计最新 %s 个版本（会话量 top2 不在
 
 CARD_JSON="$(jq -n \
   --arg hc "$HEADER_COLOR" --arg ht "$HEADER_TITLE" --arg sm "$STATUS_MD" \
+  --arg vn "$VERSION_NOTES_MD" \
   --arg nm "$NOTE_MD" \
   --argjson ct "$CARD_TABLE" --arg fo "$CARD_FOCUS" \
   '{schema:"2.0",
     config:{width_mode:"fill"},
     header:{template:$hc,title:{tag:"plain_text",content:$ht}},
     body:{elements:([
-      {tag:"markdown",content:$sm},
-      $ct]
+      {tag:"markdown",content:$sm}]
+      + (if $vn != "" then [{tag:"markdown",content:$vn}] else [] end)
+      + [$ct]
       + (if $fo != "" then [{tag:"markdown",content:$fo}] else [] end)
       + [
       {tag:"div",text:{tag:"plain_text",content:$nm,text_size:"notation",text_color:"grey"}},
@@ -1812,6 +1818,7 @@ md_table() { # 无参数：直接用全局的卡片版本列
 
 CARD="**📊 ${DAY:5} 崩溃 & 性能**
 $STATUS_MD
+$VERSION_NOTES_MD
 
 $(md_table)
 $(card_focus_line)
@@ -2219,6 +2226,7 @@ REPORT="$STATE/reports/$DAY-daily.md"
 
   printf '## 一、汇总\n\n'
   printf '%s\n\n' "$STATUS_MD"
+  [ -n "$VERSION_NOTES_MD" ] && printf '%s\n' "$VERSION_NOTES_MD"
   verdict_line ios "iOS" "$IOS_V1" "$IOS_V2"
   verdict_line and "Android" "$AND_V1" "$AND_V2"
   printf '\n'
@@ -2489,6 +2497,13 @@ build_report_xml() {
     printf '</callout>\n'
 
     printf '<h1>一、汇总</h1>\n'
+    # 版本注记（change crash-version-notes）：与卡片、markdown 同位置——摘要最前
+    if [ -n "$VERSION_NOTES_MD" ]; then
+      printf '%b' "$VERSION_NOTES_MD" | sed 's/^- //' | while IFS= read -r _n; do
+        [ -n "$_n" ] || continue
+        printf '<p>%s</p>\n' "$(printf '%s' "$_n" | xesc)"
+      done
+    fi
     printf '%s' "$(verdict_line ios "iOS" "$IOS_V1" "$IOS_V2"; verdict_line and "Android" "$AND_V1" "$AND_V2")" \
       | sed 's/^- //' | while IFS= read -r line; do
         [ -n "$line" ] || continue
