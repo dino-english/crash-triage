@@ -12,9 +12,17 @@
       → 验：`grep -n '\$STATE\|\$ROOT' bin/lib/factcache.sh` 无输出
 - [x] 2.2 `latest_event` 取 max 的语义原样搬入（⛔ 不得在搬运中改行为）
       → 验：`bin/test/fn-factcache.sh` 中「旧值更新时不倒退」用例通过
-- [ ] 2.3 `bin/fetch-snapshot-bq.sh` 改为 source 该函数，删除本地实现
+- [x] 2.3 `bin/fetch-snapshot-bq.sh` 改为 source 该函数，删除本地实现
       → 验：`CRASH_REPORT_BQ_CACHE` 冻结数据下跑 L2，`issues/*.json` 与改前逐字节 diff 为空
       （⚠️ 排除 `last_synced` 一行——它必然变）
+      **2026-09-08 实测（eqv-check 协议）**：旧代码 `7ed66ef` 单独 worktree + 新代码各跑一轮
+      `CRASH_REPORT_SKIP_ANALYSIS=1`（跳过分析层，正好绕开「冻结缓存冻不住模型」那个坑），
+      共享 45 条冻结缓存；`diff -r OLD NEW --exclude=run.log` **严格为空**——
+      比对面 70 个文件（中间 15 · 投递 9 · 基准 46，其中事实层 31）。
+      ⚠️ `last_synced` 由 `normalize.sh` 归一成 `<ISO8601>`，无需手工排除。
+      ⚠️ 首轮旧代码失败是 worktree 里 `REPOS_ROOT` 自动探测落空（环境非代码），
+      显式 export 后重跑通过——该失败还真发了一张 ERR trap 告警卡到开发机私聊，
+      侧证告警链路是通的。
 - [x] 2.4 新增 `bin/test/fn-factcache.sh` 并挂进 `check-scripts.sh` 第 8 项
       → 验：`bash bin/check-scripts.sh` 输出里出现该夹具名且通过
 
