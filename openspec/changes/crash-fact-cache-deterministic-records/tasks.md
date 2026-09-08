@@ -24,8 +24,12 @@
       → 验：`CRASH_REPORT_SKIP_ANALYSIS=` 不设、跑一次 L1，全部 issue 的 `last_synced` 差值 < 1 分钟
 - [x] 3.2 `FACT_CACHE_POLICY` 删去「判定二」整段，改为「观测字段由调用方回写，不要写」
       → 验：`grep -c 'last_synced' bin/fetch-snapshot.sh` 只剩回写代码里的引用，prompt 段为 0
-- [ ] 3.3 回写失败（`jq` 非零）必须计入现有隔离/告警路径
+- [x] 3.3 回写失败（`jq` 非零）必须计入现有隔离/告警路径
       → 验：故意放一个非法 JSON 进 `issues/`，跑一轮，日志出现隔离提示且计数 +1
+      **2026-09-08 以密封夹具验**（`bin/test/fn-fetch-snapshot-shell.sh`，用脚本自带的
+      `AGENT_CMD` 钩子把模型换成桩，零模型调用）：坏文件 → 回写「写入失败 1 条」+ 隔离到
+      `backup/corrupt-issues-*` + 从 `issues/` 移除；⛔ 双向测试通过——把回写打回 stderr、
+      或让缺文件补建，夹具各自变红 3 条。
 - [x] 3.4 `bash bin/check-scripts.sh` 通过（⚠️ 第 7 项：新函数的 source 必须早于首次调用）
 
 ## 4. 断言（`bin/test/assert-fact-cache.sh`）
