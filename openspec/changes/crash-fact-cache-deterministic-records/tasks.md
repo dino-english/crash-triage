@@ -20,13 +20,13 @@
 
 ## 3. 模型路径改为被回写（`bin/fetch-snapshot.sh`）
 
-- [ ] 3.1 重试循环之后、落盘校验之前，按 `snapshot.json` 逐 issue 调用共享函数回写观测字段
+- [x] 3.1 重试循环之后、落盘校验之前，按 `snapshot.json` 逐 issue 调用共享函数回写观测字段
       → 验：`CRASH_REPORT_SKIP_ANALYSIS=` 不设、跑一次 L1，全部 issue 的 `last_synced` 差值 < 1 分钟
 - [x] 3.2 `FACT_CACHE_POLICY` 删去「判定二」整段，改为「观测字段由调用方回写，不要写」
       → 验：`grep -c 'last_synced' bin/fetch-snapshot.sh` 只剩回写代码里的引用，prompt 段为 0
 - [ ] 3.3 回写失败（`jq` 非零）必须计入现有隔离/告警路径
       → 验：故意放一个非法 JSON 进 `issues/`，跑一轮，日志出现隔离提示且计数 +1
-- [ ] 3.4 `bash bin/check-scripts.sh` 通过（⚠️ 第 7 项：新函数的 source 必须早于首次调用）
+- [x] 3.4 `bash bin/check-scripts.sh` 通过（⚠️ 第 7 项：新函数的 source 必须早于首次调用）
 
 ## 4. 断言（`bin/test/assert-fact-cache.sh`）
 
@@ -40,7 +40,9 @@
 
 ## 5. 跑批验证
 
-- [ ] 5.1 `CRASH_REPORT_NO_DELIVER=1 bash bin/crash-daily.sh` 整跑（⚠️ 5 分钟以上，别设短超时）
+- [x] 5.1 `CRASH_REPORT_NO_DELIVER=1 bash bin/crash-daily.sh` 整跑（⚠️ 5 分钟以上，别设短超时）
+      **2026-09-08 开发机实测**：rc=0 · 8 个 issue 的 last_synced 全为同一真 UTC 时刻 06:09:21Z ·
+      未来时刻 0 条 · 模型日志自述「五个观测字段原样未动」· 增量抓取仍生效（3e827b74 80→83 条）
       → 验：全部 issue 的 `last_synced` 是真 UTC 且属本轮；卡片无「事实层缓存未刷新」告警
 - [ ] 5.2 ⚠️ L2 需在**周一之外**验：`CRASH_REPORT_NO_DELIVER=1` 且**先备份 `last-snapshot.json`**
       （L2 的基线提升在 NO_DELIVER 闸门之前）

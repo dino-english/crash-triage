@@ -72,7 +72,7 @@ h_assert_rc 1 _assert_run                            # 本地时间标 Z（快 8
 # ⑥ 覆盖率行必须出现，且不改变退出码
 _mk "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 COV="$(_assert_run 2>&1)"
-h_assert_contains "$COV" "内容覆盖率" "覆盖率行可见"
+h_assert_contains "$COV" "事件数对照" "事件数对照行可见"
 h_assert_rc 0 _assert_run
 rm -rf "$A_DIR"
 

@@ -296,7 +296,9 @@ if [ -s "$OUT_DIR/snapshot.json" ]; then
   _fc_extra=""
   if [ "$FC_MISSING" -gt 0 ]; then _fc_extra="${_fc_extra} · 缺文件 ${FC_MISSING} 条（下轮全量重抓）"; fi
   if [ "$FC_FAILED"  -gt 0 ]; then _fc_extra="${_fc_extra} · ⚠️ 写入失败 ${FC_FAILED} 条"; fi
-  echo "  事实层观测字段回写：${FC_WROTE} 条${_fc_extra}" >&2
+  # ⛔ 必须走 stdout：crash-daily.sh 调本脚本时带 `2>/dev/null`（见其 fetch 段），
+  #    写 stderr 等于把「写入失败 N 条」这个信号丢进黑洞。2026-09-08 整跑实测发现。
+  echo "  事实层观测字段回写：${FC_WROTE} 条${_fc_extra}"
 fi
 
 # ── 事实层落盘校验（2026-08-23）─────────────────────────
