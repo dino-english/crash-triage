@@ -31,7 +31,7 @@
 - [x] 3b.2 NON_FATAL 表**按受影响安装数取 top 10**，表下标注「共 M 条，按影响面取前 10」。⚠️ **不截断则 iOS 的 1020 条会淹没 FATAL 的十几条，台账直接不可用**——截断不是打折执行，是让决策可用
 - [x] 3b.3 `sync_ledger()` 增一次标题定位（「NON_FATAL 现状表」），走 `block_replace`。⚠️ 标题定位取**最后一个**匹配——正文可能有同名文字的引用块（2026-08-20 因此把四段结构重复 append 两遍）
 - [x] 3b.4 `render-ledger.sh` 产出该表；本地源 `LEDGER.md` 同步新增该段
-- [ ] 3b.5 台账同步验证：确认 FATAL 表未被扰动、NON_FATAL 表正确替换、时间线历史未丢失（全程不得 overwrite）。
+- [x] 3b.5 台账同步验证：确认 FATAL 表未被扰动、NON_FATAL 表正确替换、时间线历史未丢失（全程不得 overwrite）。
   **闸门已收窄，现在开发机可验**（findings F4 后续）——原闸门「非群一律不同步」改为「非群**且**目标是
   `docs.json` 里那份生产台账才不同步」，四种情形已逐一验证。执行方式：
   ```bash
@@ -61,7 +61,29 @@
 - [x] 6.3 `CLAUDE.md` 的阈值段增 ANR 红黄线及其口径警告
 - [x] 6.4 记录 Open Question 的处置：**NON_FATAL 已拍板进台账**（见 3b）；**ANR 是否进台账仍未定**，本 change 不做
 
-## 3b.5 执行记录（2026-09-01）—— ⛔ 未通过，本 change 暂不归档
+## 3b.5 执行记录（2026-09-08）—— ✅ 通过（生产路径）
+
+2026-09-01 那次卡在「开发机验不了 `deliver.sh` 驱动的路径」。**证据由 09-07 的生产周报补齐**——
+那一轮就是 `deliver.sh` 真跑的台账同步，跑批日志：
+
+```
+✅ 台账「Issue 现状表」已同步（block_replace，block-id=doxjpTRq5wDLuDdkHzQMaK4IfWb）
+✅ 台账「NON_FATAL 现状表」已同步（block_replace，block-id=doxjpX57GkS7Tk0F9zRTdJqW13e）
+✅ 台账变更时间线已追加（17 行）
+```
+
+2026-09-08 读线上台账正文逐条核对（`lark-cli docs +fetch --scope outline / section`）：
+
+| 断言 | 证据 |
+|---|---|
+| FATAL 表未被扰动 | 「Issue 现状表」自成一个 block（id 与 NON_FATAL 的不同），表内**只有 `FATAL` 行**，哨兵 `LEDGER:ISSUES:BEGIN` 完好 |
+| NON_FATAL 表正确替换 | 「NON_FATAL 现状表」为非致命专属表头（位置/异常/事件/影响安装/最新），数据是 09-06 口径，即上一轮 L2 产物 |
+| 时间线历史未丢失 | 四批日期俱在：08-20（6 条）· 08-24（17）· 08-31（17）· 09-07（16），`LEDGER:TIMELINE:BEGIN/END` 哨兵完好 |
+| 全程不得 overwrite | 日志两处均为 `block_replace`，时间线为 append；⛔ 无任何 `overwrite` |
+
+⚠️ 大纲里三个 h2 各出现**恰好一次**——2026-08-20 那次「四段结构重复 append 两遍」的形态没有复现。
+
+## 3b.5 历史记录（2026-09-01）—— 当时未通过
 
 按任务给的方式在自建测试文档上跑了 `CRASH_REPORT_LEDGER_DOC_ID=… bash bin/deliver.sh`。
 闸门本身**验到了**：日志打「🧪 自测台账同步：目标是显式指定的另一份文档（非 docs.json 里那份），放行」。
