@@ -44,9 +44,12 @@
       **2026-09-08 开发机实测**：rc=0 · 8 个 issue 的 last_synced 全为同一真 UTC 时刻 06:09:21Z ·
       未来时刻 0 条 · 模型日志自述「五个观测字段原样未动」· 增量抓取仍生效（3e827b74 80→83 条）
       → 验：全部 issue 的 `last_synced` 是真 UTC 且属本轮；卡片无「事实层缓存未刷新」告警
-- [ ] 5.2 ⚠️ L2 需在**周一之外**验：`CRASH_REPORT_NO_DELIVER=1` 且**先备份 `last-snapshot.json`**
+- [x] 5.2 ⚠️ L2 需在**周一之外**验：`CRASH_REPORT_NO_DELIVER=1` 且**先备份 `last-snapshot.json`**
       （L2 的基线提升在 NO_DELIVER 闸门之前）
       → 验：shell 写 → 模型跑 → 断言 三步后 `last_synced` 仍是 shell 写的那一个时刻
+      **2026-09-08 开发机实测**：rc=0 · bq 路径「记录: 更新 8 条」· 回写行「8 条」可见 ·
+      8 个 issue 同一真 UTC 时刻 `06:27:53Z` · 断言通过（周报无 🟡 事实层提示）·
+      台账渲染正常 · 四个基线文件已 diff 后还原
 - [ ] 5.3 生产首个跑批日按 `.claude/skills/morning-verify/` 四项核验
       → 验：调度层 / 健康层 / 审计层三项通过，且事实层告警消失
 - [ ] 5.4 记录本 change 落地后的首个覆盖率数字，写进 `findings.md`
