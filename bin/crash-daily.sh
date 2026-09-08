@@ -1107,6 +1107,13 @@ if [ "$MCP_OK" = 1 ] && [ -x "$ROOT/bin/test/assert-fact-cache.sh" ] \
   sed 's/^/    /' "$_fc_log"
 fi
 
+# 覆盖率是**非判定项**，断言通过时也必须看得见——否则它只在失败日志里露面，
+# 而「观测字段新鲜但内容为空」恰恰是断言通过的那种状态。
+if [ -s "$_fc_log" ]; then
+  _fc_cov="$(grep -m1 '内容覆盖率' "$_fc_log" 2>/dev/null || true)"
+  if [ -n "$_fc_cov" ]; then echo "  ${_fc_cov}"; fi
+fi
+
 # ── 异常判定：告警判定版本（change crash-alert-sample-fallback）────────
 # 默认最新版；**最新版会话数低于小样本阈值时回退为该端会话量最大的版本**。
 #

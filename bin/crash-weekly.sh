@@ -319,6 +319,13 @@ if [ -s "$_fc_snap" ] && [ -x "$ROOT/bin/test/assert-fact-cache.sh" ] \
   sed 's/^/    /' "$_fc_log"
 fi
 
+# 覆盖率是**非判定项**，断言通过时也必须看得见——否则它只在失败日志里露面，
+# 而「观测字段新鲜但内容为空」恰恰是断言通过的那种状态。
+if [ -s "$_fc_log" ]; then
+  _fc_cov="$(grep -m1 '内容覆盖率' "$_fc_log" 2>/dev/null || true)"
+  if [ -n "$_fc_cov" ]; then echo "  ${_fc_cov}"; fi
+fi
+
 # ⚠️ 本块原在台账渲染段（第 5 组）内，2026-09-01 上移至此：变化检测要读同一份基准判「回归」，
 #    而顶层「先用后定」会被 check-scripts 第 7 项拦下。⛔ 只移动位置，内容与时序语义未变
 #    （SEEN_FILE 的提升仍在跑批收尾，见文件末尾）。

@@ -14,8 +14,22 @@ SNAP="${1:-$(ls -t "$STATE"/runs/*/L2/*/snapshot.json 2>/dev/null | head -1)}"
 BASE="${FACT_CACHE_BASELINE:-}"          # 可选：跑批前的 issues/ 快照目录，用于验 latest_event 未倒退
 [ -s "$SNAP" ] || { echo "❌ 找不到 snapshot.json（传参或先跑一次 L2）" >&2; exit 1; }
 
-TODAY="$(date -u +%Y-%m-%d)"
+# ⛔ 判定的是**时刻**不是日期（change crash-fact-cache-deterministic-records D4）。
+# 原实现比 `date -u +%Y-%m-%d` 的日期前缀，粒度是天且基准是 UTC 日期。2026-09-08 夹具实测
+# 三种情形，它把「本地时间标 Z」（快 8 小时）的记录**在 L1 场景判成通过**、在 L2 场景
+# （本地 05:30 = UTC 前一天）把**已正确刷新**的记录判成陈旧——同一个缺陷两种相反表现。
+NOW_EP="$(date -u +%s)"
+TOL="${FACT_CACHE_TOLERANCE_SEC:-1800}"   # 容差取一轮跑批的最长时长（L1/L2 实测均 ~8 分钟）
+
+# ⚠️ macOS 与 Linux 的 date 解析参数不同，两种都试；都失败则输出空串由调用处报错。
+_fc_epoch() { # $1=ISO8601 Z → epoch 秒
+  date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$1" +%s 2>/dev/null && return 0
+  date -u -d "$1" +%s 2>/dev/null && return 0
+  printf ''
+}
+
 rc=0; n=0
+CLAIMED=0; STORED=0
 while IFS= read -r id; do
   [ -n "$id" ] || continue
   f="$STATE/issues/$id.json"
@@ -28,8 +42,23 @@ while IFS= read -r id; do
     rc=1; continue
   fi
 
+  # 内容覆盖率的两个累加项（非判定，只输出——理由见 D5：当前基线下任何阈值都会全红）
+  CLAIMED=$((CLAIMED + $(jq -r '(.events_count_last_seen // 0) | tonumber? // 0' "$f")))
+  STORED=$((STORED + $(jq -r '(.events // []) | length' "$f")))
+
   ls_="$(jq -r '.last_synced // ""' "$f")"
-  case "$ls_" in "$TODAY"*) ;; *) echo "❌ ${id:0:8} last_synced=$ls_ 不是本轮（观测字段应无条件刷新）"; rc=1;; esac
+  ep="$(_fc_epoch "$ls_")"
+  if [ -z "$ep" ]; then
+    echo "❌ ${id:0:8} last_synced=$ls_ 解析不出时刻（应为 UTC ISO8601，形如 2026-09-08T00:30:12Z）"; rc=1
+  else
+    age=$((NOW_EP - ep))
+    # ⚠️ 取绝对值：**未来时刻同样是错的**。「本地时间标 Z」正是快 8 小时的未来时刻，
+    #    只判「太旧」会把它放过去——那恰恰是 2026-09-08 之前 L1 一直在发生的事。
+    if [ "$age" -lt 0 ]; then age=$((0 - age)); fi
+    if [ "$age" -gt "$TOL" ]; then
+      echo "❌ ${id:0:8} last_synced=$ls_ 不是本轮（相差 ${age}s，容差 ${TOL}s；观测字段应无条件刷新）"; rc=1
+    fi
+  fi
 
   wd="$(jq -r '.window_days // ""' "$f")"
   [ -n "$wd" ] || { echo "❌ ${id:0:8} 缺 window_days（计数无窗口口径则无法解释）"; rc=1; }
@@ -43,5 +72,10 @@ while IFS= read -r id; do
 done < <(jq -r '(.ios // [])[].id, (.android // [])[].id' "$SNAP" 2>/dev/null)
 
 [ "$n" -gt 0 ] || { echo "❌ 快照里没有 issue，无法断言" >&2; exit 1; }
+# ⛔ 非判定项：不改 rc。观测字段刷新与事件明细落盘是两件事，前者正常**不蕴含**后者正常——
+# 2026-09-08 实测存在「声称 55 条、实存 6 条」而断言全绿的状态。先让它可见，攒够几轮再定阈值
+# （现在设阈值会一次性全红，把要长期看的指标变成噪音，F30 那一类）。
+echo "ℹ️ 内容覆盖率：声称 ${CLAIMED} 事件 · 实存 ${STORED} 条 · ${n} 个 issue"
+
 [ $rc -eq 0 ] && echo "✅ 事实层产物断言通过（$n 个 issue）"
 exit $rc

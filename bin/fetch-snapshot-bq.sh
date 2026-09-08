@@ -36,6 +36,8 @@ SQL_DIR="${SQL_DIR:-$ROOT/bin/sql}"
 # （抓取判定退化 → 事实层停更；保留谓词退化 → 误删固定文档键、重建整套飞书文档）。
 # shellcheck disable=SC1091
 . "$ROOT/bin/lib/core/cache.sh" || { echo "❌ 核心层缺失：bin/lib/core/cache.sh" >&2; exit 1; }
+# shellcheck disable=SC1091
+. "$ROOT/bin/lib/factcache.sh" || { echo "❌ 缺失：bin/lib/factcache.sh" >&2; exit 1; }
 STATE="${CRASH_REPORT_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/crash-triage}"
 ISSUES_DIR="$STATE/issues"
 mkdir -p "$ISSUES_DIR"
@@ -167,7 +169,7 @@ jq -e '.ios and .android' "$SNAP" >/dev/null || { echo "  ❌ snapshot.json 结�
 #
 # ⚠️ bq 路径的「跳过」本来就省不了任何东西——那一行数据已经在 $SNAP 里（就是 bq 查询的结果），
 #    跳过只避免了一次 jq + mv。是模型路径（fetch-snapshot.sh）才真省一次昂贵的 MCP 调用。
-FETCH_NEW=0; FETCH_APPEND=0; FETCH_SKIP=0; REC_UPDATED=0
+FETCH_NEW=0; FETCH_APPEND=0; FETCH_SKIP=0; REC_UPDATED=0; REC_FAILED=0
 while IFS=$'\t' read -r iid plat title events users latest; do
   [ -n "$iid" ] || continue
   f="$ISSUES_DIR/$iid.json"
@@ -193,21 +195,17 @@ while IFS=$'\t' read -r iid plat title events users latest; do
   # latest_event 取 max(已存, 本次)：窗口内的 MAX(event_timestamp) **同样非单调**——
   # 最新那条事件出窗后，剩余事件的 MAX 会比上一轮更早。直接覆盖会把「冻结」换成更糟的「倒退」
   # （倒退会让台账显示一个比真实「最近一次发生」更早的时刻，读者据此判断「很久没出现了」，正好相反）。
-  if [ "$verdict" = new ]; then
-    jq -n --arg id "$iid" --arg p "$plat" --arg t "$title" --arg l "$latest" \
-          --argjson e "$events" --argjson u "$users" --argjson w "$DAYS" --arg ts "$now" \
-      '{id:$id, platform:$p, title:$t, events_count_last_seen:$e, users_last_seen:$u,
-        latest_event:$l, window_days:$w, source:"bigquery", last_synced:$ts}' > "$f"
-  else
-    tmp="$(mktemp)"
-    jq --argjson e "$events" --argjson u "$users" --arg l "$latest" \
-       --argjson w "$DAYS" --arg ts "$now" \
-      '.events_count_last_seen=$e | .users_last_seen=$u
-       | .latest_event=(if ((.latest_event // "") < $l) then $l else .latest_event end)
-       | .window_days=$w | .last_synced=$ts' \
-      "$f" > "$tmp" && mv "$tmp" "$f"
-  fi
-  REC_UPDATED=$((REC_UPDATED+1))
+  # ⚠️ verdict=new 时**先删再建**，保持本脚本原有语义（整份文档重写）不变：
+  #    FORCE_REFETCH=1 且文件已存在时，旧实现走的就是 jq -n 全量覆盖这条路。
+  #    ⛔ 不要图省事直接改成「一律就地更新」——那会顺手改掉强制重抓的行为，
+  #    属于本 change 之外的改动（该行为是否合理另议，见 findings.md）。
+  # ⛔ 必须写成 if：`[ … ] && rm` 在 verdict != new 时整条返回 1，
+  #    在 set -e 下会当场终止脚本（F31 同类）。
+  if [ "$verdict" = new ]; then rm -f "$f"; fi
+  _rc=0
+  fc_record "$ISSUES_DIR" "$iid" "$plat" "$title" "$events" "$users" "$latest" \
+            "$DAYS" "$now" "bigquery" || _rc=$?
+  if [ "$_rc" = 0 ]; then REC_UPDATED=$((REC_UPDATED+1)); else REC_FAILED=$((REC_FAILED+1)); fi
 done < <(jq -r '
   (.ios     | map([.id,"ios",     .title, (.events|tostring), (.users|tostring), (.latest // "")] | @tsv) | .[]),
   (.android | map([.id,"android", .title, (.events|tostring), (.users|tostring), (.latest // "")] | @tsv) | .[])
@@ -219,6 +217,8 @@ done < <(jq -r '
 # 措辞区分两件事：「抓取」的三态是判定结果，「记录」是无条件的。
 # 旧文案「命中跳过 N」在 bq 路径上会造成歧义——每条记录其实都写了，跳过的只是抓取。
 echo "  事实层缓存 · 抓取: 新建 $FETCH_NEW / 增量 $FETCH_APPEND / 跳过 $FETCH_SKIP (FORCE_REFETCH=$FORCE_REFETCH)"
-echo "  事实层缓存 · 记录: 更新 $REC_UPDATED 条 (观测字段每轮无条件刷新，window_days=$DAYS)"
+_rec_fail_note=""
+if [ "$REC_FAILED" -gt 0 ]; then _rec_fail_note=" · ⚠️ 失败 ${REC_FAILED} 条"; fi
+echo "  事实层缓存 · 记录: 更新 $REC_UPDATED 条${_rec_fail_note} (观测字段每轮无条件刷新，window_days=$DAYS)"
 echo "  → $SNAP"
 RUN_COMPLETED=1

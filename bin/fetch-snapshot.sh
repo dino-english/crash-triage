@@ -32,6 +32,13 @@ ISSUES_DIR="$STATE/issues"
 mkdir -p "$ISSUES_DIR"
 FORCE_REFETCH="${CRASH_REPORT_FORCE_REFETCH:-0}"
 
+# 观测字段的落盘由本脚本负责，不再交给模型（change crash-fact-cache-deterministic-records）。
+# shellcheck disable=SC1091
+. "$ROOT/bin/lib/factcache.sh" || { echo "❌ 缺失：bin/lib/factcache.sh" >&2; exit 1; }
+# ⚠️ 模型路径走 Firebase topIssues 的**默认 7 天窗**（prompt 里写死「用 Firebase 默认 7 天窗，
+#    不要自行扩大窗口」）。这个常量必须与那句 prompt 同步，改一处要改两处。
+FACT_WINDOW_DAYS=7
+
 # 业务仓库：优先运行根的同级目录（与 crash-daily/weekly 同一套探测逻辑）。
 # 独立调用本脚本时也要能自己解析，不能只依赖调用方传——调用方漏 export 就会 cd 到不存在的路径
 # （2026-08-18 实测：周报整跑失败、日报 MCP 对照段被误判成超时）。
@@ -69,15 +76,10 @@ FACT_CACHE_POLICY="事实层缓存（${ISSUES_DIR}/<32位id>.json，一 issue �
       ⚠️ 小于是正常的：线上计数是**滚动窗口内**的取值，老事件出窗即下降，**它不是单调量**。
       计数下降只意味着没有新事件，不意味着这个 issue 该被忽略。
 
-【判定二：要不要更新观测字段】——**无条件执行**，与判定一的结果无关
-  无论上面是否抓取，都必须把这些字段刷新为本轮观测值：
-    events_count_last_seen（本次计数）· users_last_seen · window_days（本次窗口天数）
-    · last_synced（本轮 ISO8601 时刻）
-  latest_event 特殊：取 **max(已存值, 本次观测值)**，只进不退。
-    ⚠️ 窗口内的最新事件时刻**同样非单调**——最新那条出窗后，剩余事件的最大时刻会比上一轮更早。
-    直接覆盖会让台账的「最近一次发生」倒退，读者据此判断「很久没出现了」，正好相反。
-  ⚠️ 跳过观测字段更新**省不下任何东西**，却会让「最近同步」停在历史某一刻——
-  一个正在衰减（= 正在被修好）的 issue 会看起来像「数据停更」，好消息被读成故障。
+【判定二：观测字段】——**你不要写**
+  events_count_last_seen · users_last_seen · window_days · last_synced · latest_event
+  这五个字段由调用方在你退出后按快照内容统一回写，**你不要修改它们**。
+  你只需保证 events 数组的合并语义（已有记录原样保留、只 append 新增）。
 
 抓取失败（MCP 调用报错/超时）：不中止整体流程，跳过该 issue 的事实层更新，
 在报告里标明该 issue 的事实层「抓取失败/不完整」（区分「已查证为空」与「未查」）。"
@@ -266,6 +268,36 @@ for _try in $(seq 1 "$ATTEMPTS"); do
   echo "     产物 snapshot.json $(_bytes "$OUT_DIR/snapshot.json") 字节 · report.md $(_bytes "$OUT_DIR/report.md") 字节（完整输出见 ${AGENT_LOG_BASE}-$_try.log）" >&2
   if [ "$AGENT_RC" = 0 ]; then AGENT_RC=1; fi   # rc=0 但产物不全，同样判失败
 done
+
+# ── 观测字段回写（change crash-fact-cache-deterministic-records D1）──────
+# 模型只负责「要不要抓事件明细」与 events 数组；观测字段由这里确定性写入。
+# ⛔ 位置必须在**落盘校验之前**：反过来会对刚被隔离（mv 走）的文件写出一份只有观测字段的
+#    残缺记录。先回写再隔离，坏文件照常被隔离，下一轮全量重抓补回，与原语义一致。
+# ⚠️ 缺文件的**不补建**（factcache.sh 的 rc=3）：补一条带真实计数的记录会让下一轮的抓取
+#    判定把它当成已缓存而跳过，事件明细就永远补不回来了。宁可留空让下轮全量重抓。
+FC_WROTE=0; FC_MISSING=0; FC_FAILED=0
+if [ -s "$OUT_DIR/snapshot.json" ]; then
+  FC_NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  while IFS=$'\t' read -r _fid _fplat _ftitle _fev _fus; do
+    [ -n "$_fid" ] || continue
+    _frc=0
+    fc_record "$ISSUES_DIR" "$_fid" "$_fplat" "$_ftitle" "$_fev" "$_fus" "" \
+              "$FACT_WINDOW_DAYS" "$FC_NOW" "" || _frc=$?
+    case "$_frc" in
+      0) FC_WROTE=$((FC_WROTE + 1));;
+      3) FC_MISSING=$((FC_MISSING + 1));;
+      *) FC_FAILED=$((FC_FAILED + 1));;
+    esac
+  done < <(jq -r '
+    (.ios     // [] | map([.id,"ios",     (.title // ""), ((.events // 0)|tostring), ((.users // 0)|tostring)] | @tsv) | .[]),
+    (.android // [] | map([.id,"android", (.title // ""), ((.events // 0)|tostring), ((.users // 0)|tostring)] | @tsv) | .[])
+  ' "$OUT_DIR/snapshot.json" 2>/dev/null || true)
+  # ⛔ 全角括号先条件赋值再拼接，禁 ${var:+（…）}——bash 会把全角字节并进变量名。
+  _fc_extra=""
+  if [ "$FC_MISSING" -gt 0 ]; then _fc_extra="${_fc_extra} · 缺文件 ${FC_MISSING} 条（下轮全量重抓）"; fi
+  if [ "$FC_FAILED"  -gt 0 ]; then _fc_extra="${_fc_extra} · ⚠️ 写入失败 ${FC_FAILED} 条"; fi
+  echo "  事实层观测字段回写：${FC_WROTE} 条${_fc_extra}" >&2
+fi
 
 # ── 事实层落盘校验（2026-08-23）─────────────────────────
 # 这些文件由模型用 Write 工具**直接写盘**，shell 侧没有写入点可以校验，唯一能挂的位置是这里。
