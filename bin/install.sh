@@ -51,11 +51,14 @@ bq query --use_legacy_sql=false --format=csv 'SELECT 1' >/dev/null 2>&1 \
   && ok "bq 可查询" || { bad "bq 不可用"; todo "gcloud auth login && gcloud config set project dino-english-497507"; }
 npx -y firebase-tools@latest login:list 2>/dev/null | grep -q '@' \
   && ok "firebase" || { bad "firebase 未登录"; todo "npx firebase-tools login"; }
-if lark-cli --profile "$PROFILE" whoami >/dev/null 2>&1; then
+if [ -s "$HOME/.lark-cli/hermes/config.json" ]; then
+  HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}" lark-cli whoami >/dev/null 2>&1 \
+    && ok "lark-cli Hermes 工作区" || { bad "lark-cli Hermes 工作区不可用"; todo "lark-cli config bind --source hermes --app-id <cli_xxx> --identity bot-only"; }
+elif lark-cli --profile "$PROFILE" whoami >/dev/null 2>&1; then
   ok "lark-cli profile $PROFILE"
 else
   bad "lark-cli profile '$PROFILE' 未配置"
-  todo "lark-cli config bind --source hermes --app-id <cli_xxx>   # Agent 环境用 bind，不是 init"
+  todo "lark-cli config bind --source hermes --app-id <cli_xxx> --identity bot-only"
   todo "lark-cli auth login --profile $PROFILE --domain drive,docs,im"
 fi
 # 钥匙串落地：无 TTY 的定时任务读不到 macOS Keychain
@@ -100,6 +103,9 @@ for job in daily weekly; do
 # 由 crash-triage 的 install.sh 生成，勿手改；改配置请重跑 install.sh / update.sh。
 # stdout 保持为空：hermes --no-agent 会把 stdout 原样投递，而我们自己用 lark-cli 投卡片。
 # 失败告警由 bin/alert.sh 负责（它不依赖 agent，agent 挂了也发得出）。
+# Hermes cron 的子进程未必带 HERMES_HOME；显式导出后 lark-cli 才会读取
+# ~/.lark-cli/hermes/config.json，而不是误找命名 profile。
+export HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
 export CRASH_REPORT_ROOT="$ROOT"
 export CRASH_REPORT_STATE_DIR="$STATE"
 export CRASH_REPORT_CHAT_ID="$CHAT_ID"
