@@ -179,10 +179,14 @@ while IFS=$'\t' read -r iid plat title events users latest; do
   # 判定本身已上移核心层（bin/lib/core/cache.sh），这里只负责把文件状态读成入参。
   if [ -f "$f" ]; then
     exists=1; prev="$(jq -r '.events_count_last_seen // 0' "$f" 2>/dev/null || echo 0)"
+    # 已存事件条数（change crash-fact-cache-events-backfill）：欠账记录必须判 append 而非 skip。
+    # ⚠️ bq 路径的 append 是空操作（它本来就拿不到事件明细），但计数会进跑批日志——
+    #    继续把欠账报成「跳过」等于日志在说谎。真正的补抓在模型路径。
+    stored="$(jq -r '(.events // []) | length' "$f" 2>/dev/null || echo -1)"
   else
-    exists=0; prev=0
+    exists=0; prev=0; stored=-1
   fi
-  verdict="$(cache_verdict "$FORCE_REFETCH" "$exists" "$prev" "$events")"
+  verdict="$(cache_verdict "$FORCE_REFETCH" "$exists" "$prev" "$events" "$stored")"
   case "$verdict" in
     new)    FETCH_NEW=$((FETCH_NEW+1));;
     append) FETCH_APPEND=$((FETCH_APPEND+1));;

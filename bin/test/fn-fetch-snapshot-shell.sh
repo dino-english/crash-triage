@@ -26,6 +26,7 @@ _setup() { # 每个用例一套干净环境
   cat > "$TMP/stub" <<'STUB'
 #!/usr/bin/env bash
 # 假 agent：忽略全部参数（真 claude 收一长串 --allowedTools），只按 STUB_MODE 产出。
+printf '%s\n' "$@" > "$STUB_OUT/prompt.txt"
 if [ "${STUB_MODE:-ok}" = ok ]; then
   cat > "$STUB_OUT/snapshot.json" <<JSON
 {"ios":[],"android":[
@@ -100,6 +101,35 @@ if ls "$TMP/state/backup"/corrupt-issues-* >/dev/null 2>&1; then
 else
   echo "  ✅ 无坏文件时不建隔离目录（正常路径安静）"; H_PASS=$((H_PASS+1))
 fi
+_teardown
+
+echo "── 壳层：欠账补抓清单（design D1/D4）──"
+_setup
+# 造 5 个欠账记录（计数 > 0、events 为空），id 刻意乱序建，断言取的是排序后的前 3 个
+for suffix in ee dd aa cc bb; do
+  printf '{"events_count_last_seen":7,"events":[],"window_days":7,"last_synced":"2026-09-01T00:00:00Z"}\n' \
+    > "$TMP/state/issues/00000000000000000000000000000${suffix}.json"
+done
+# 一个**有事件**的记录：⛔ 不得进清单
+printf '{"events_count_last_seen":9,"events":[{"e":1}],"window_days":7,"last_synced":"2026-09-01T00:00:00Z"}\n' \
+  > "$TMP/state/issues/00000000000000000000000000000ff.json"
+OUT="$(_run)"; RC=$?
+PROMPT="$(cat "$TMP/out/prompt.txt" 2>/dev/null || echo)"
+h_assert_contains "$PROMPT" "【本轮欠账补抓】" "prompt 里出现欠账补抓段"
+h_assert_contains "$PROMPT" "以下 3 个 issue" "⛔ 节流生效：只放 3 个（造了 5 个欠账）"
+h_assert_contains "$PROMPT" "00000000000000000000000000000aa" "取排序后的第 1 个"
+h_assert_contains "$PROMPT" "00000000000000000000000000000cc" "取排序后的第 3 个"
+h_assert_absent  "$PROMPT" "00000000000000000000000000000ee" "⛔ 排序在后的不进本轮清单"
+h_assert_absent  "$PROMPT" "00000000000000000000000000000ff" "⛔ 有事件的记录不算欠账"
+_teardown
+
+echo "── 壳层：无欠账时不加子句 ──"
+_setup
+printf '{"events_count_last_seen":3,"events":[{"e":1}],"window_days":7,"last_synced":"2026-09-01T00:00:00Z"}\n' \
+  > "$TMP/state/issues/$ID1.json"
+OUT="$(_run)"; RC=$?
+PROMPT="$(cat "$TMP/out/prompt.txt" 2>/dev/null || echo)"
+h_assert_absent "$PROMPT" "【本轮欠账补抓】" "⛔ 无欠账时 prompt 不带该段（正常路径安静）"
 _teardown
 
 h_summary

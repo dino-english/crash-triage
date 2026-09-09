@@ -61,6 +61,37 @@ FACT_FIELDS='threads, blameFrame, device, operatingSystem, memory, processState,
 # ⛔ 不要把这段复制成两份——prompt 是自然语言，没有语法检查、没有 lint，
 #    改漏一份不会报错，只会让模型在某个模式下按旧策略执行（change crash-fact-cache-freshness D5）。
 #    「消除重复」而不是「检测重复」：用一个同样会被忘记的版本号去防止遗忘，等于没防。
+# ── 欠账补抓清单（change crash-fact-cache-events-backfill，design D1）────────
+# ⛔ **不让模型自己判断「数组是不是空的」**：它已被证明会跳过读文件那一步——
+#    2026-09-08/09 连续两轮自陈「权限阻断」却仍报「命中 N 个（跳过）」。
+#    能确定性算出来的不交给模型，模型只干抓取。
+# ⚠️ 清单按 id 排序后取前 N，**不随机、不按计数排序**：每轮取同一批直到它们被补上，
+#    「欠账数逐轮下降」才能成为可观测的收敛信号。
+BACKFILL_LIMIT="${CRASH_REPORT_BACKFILL_LIMIT:-3}"
+BACKFILL_IDS=""
+BACKFILL_N=0
+for _bf in "$ISSUES_DIR"/*.json; do
+  [ -e "$_bf" ] || continue
+  [ "$BACKFILL_N" -lt "$BACKFILL_LIMIT" ] || break
+  _bc="$(jq -r '(.events_count_last_seen // 0) | tonumber? // 0' "$_bf" 2>/dev/null || echo 0)"
+  _bs="$(jq -r '(.events // []) | length' "$_bf" 2>/dev/null || echo -1)"
+  if [ "$_bc" -gt 0 ] 2>/dev/null && [ "$_bs" -eq 0 ] 2>/dev/null; then
+    _bid="$(basename "$_bf" .json)"
+    BACKFILL_IDS="${BACKFILL_IDS}${BACKFILL_IDS:+ }${_bid}"
+    BACKFILL_N=$((BACKFILL_N + 1))
+  fi
+done
+# ⛔ 全角括号先条件赋值再拼接，禁 ${var:+（…）}——bash 会把全角字节并进变量名。
+BACKFILL_CLAUSE=""
+if [ -n "$BACKFILL_IDS" ]; then
+  BACKFILL_CLAUSE="
+
+【本轮欠账补抓】以下 ${BACKFILL_N} 个 issue 的事实层**有计数但一条事件都没存下来**，
+本轮对它们**全量抓取**事件明细并写入缓存，忽略判定一的计数比较：
+${BACKFILL_IDS}
+⚠️ 只抓这几个，不要扩大范围——其余 issue 仍按判定一处理。"
+fi
+
 FACT_CACHE_POLICY="事实层缓存（${ISSUES_DIR}/<32位id>.json，一 issue 一文件，永久保留不清理）——
 对每一个 issue 执行**两个独立判定**，不要把它们挤在一起：
 
@@ -112,7 +143,7 @@ fix_commit 用 git -C 仓库 log --oneline --all --grep="完整id" 反查，找�
 ② ${OUT_DIR}/report.md —— 按 skill 报告模板写，含根因、版本流转、风险分级与修复方案。
 开头必须加一行：> 本报告由每周自动化流程生成，修复方案未经人工复核，落地前须验证。
 
-③ ${FACT_CACHE_POLICY}
+③ ${FACT_CACHE_POLICY}${BACKFILL_CLAUSE}
 
 若某个仓库的 git 命令无法执行，必须在 report.md 顶部显式声明该平台反查未完成。
 不得让 null 冒充「查过没有」。
@@ -141,7 +172,7 @@ filter.issueErrorTypes=["FATAL"]，pageSize=20：
 把结果写到 ${OUT_DIR}/snapshot.json，结构严格如下，数字必须是 JSON 数字：
 {"ios":[{"id":"32位hex","title":"...","events":N,"users":N,"fix_commit":null,"fix_branches":[]}],"android":[同上结构]}
 
-${FACT_CACHE_POLICY}
+${FACT_CACHE_POLICY}${BACKFILL_CLAUSE}
 
 写完只回复 OK，附一行统计：
 "事实层：命中 N 个（跳过）· 部分命中 M 个（增量抓取）· 未命中 K 个（全量抓取）· 失败 F 个"。

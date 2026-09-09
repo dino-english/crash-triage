@@ -29,7 +29,7 @@ _fc_epoch() { # $1=ISO8601 Z → epoch 秒
 }
 
 rc=0; n=0
-CLAIMED=0; STORED=0
+CLAIMED=0; STORED=0; OWED=0
 while IFS= read -r id; do
   [ -n "$id" ] || continue
   f="$STATE/issues/$id.json"
@@ -44,7 +44,13 @@ while IFS= read -r id; do
 
   # 内容覆盖率的两个累加项（非判定，只输出——理由见 D5：当前基线下任何阈值都会全红）
   CLAIMED=$((CLAIMED + $(jq -r '(.events_count_last_seen // 0) | tonumber? // 0' "$f")))
-  STORED=$((STORED + $(jq -r '(.events // []) | length' "$f")))
+  _st="$(jq -r '(.events // []) | length' "$f")"
+  STORED=$((STORED + _st))
+  # 欠账 = 计数为正而一条事件都没有（change crash-fact-cache-events-backfill）。
+  # 逐轮看这个数在不在降，是「补抓有没有真在收敛」的唯一判据。
+  if [ "$_st" -eq 0 ] && [ "$(jq -r '(.events_count_last_seen // 0) | tonumber? // 0' "$f")" -gt 0 ]; then
+    OWED=$((OWED + 1))
+  fi
 
   ls_="$(jq -r '.last_synced // ""' "$f")"
   ep="$(_fc_epoch "$ls_")"
@@ -79,7 +85,7 @@ done < <(jq -r '(.ios // [])[].id, (.android // [])[].id' "$SNAP" 2>/dev/null)
 #    events 是累积数组（只 append）。攒久了 M > N 是**正常**的（2026-09-08 开发机实测
 #    110 vs 29）；有意义的信号只有一个方向——M 远小于 N 说明有事件从没被抓下来
 #    （同日生产机实测 6 vs 55）。⛔ 别把它读成百分比。
-echo "ℹ️ 事件数对照：本轮窗口计数合计 ${CLAIMED} · 已存累积事件 ${STORED} 条 · ${n} 个 issue"
+echo "ℹ️ 事件数对照：本轮窗口计数合计 ${CLAIMED} · 已存累积事件 ${STORED} 条 · 欠账 ${OWED} 个 · ${n} 个 issue"
 
 [ $rc -eq 0 ] && echo "✅ 事实层产物断言通过（$n 个 issue）"
 exit $rc

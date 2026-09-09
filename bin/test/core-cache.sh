@@ -49,3 +49,19 @@ assert_eq "0" \
 assert_eq "daily-2026-08-01" \
   "$(printf '%s' '{"daily-2026-08-01":"x"}' | doc_keep_predicate 2026-08-01 | jq -r 'keys|join(" ")')" \
   "日期恰等于 cutoff → 保留（谓词是 >= 不是 >）"
+
+# ── 欠账补抓（change crash-fact-cache-events-backfill）────────────────
+assert_eq "append" "$(cache_verdict 0 1 14 14 0)" \
+  "计数为正而一条事件都没有 → 补抓（⛔ 不得判 skip：计数不涨就永远补不回来）"
+assert_eq "skip"   "$(cache_verdict 0 1 29 29 5)" \
+  "已存 5 · 计数 29 → 仍 skip（⛔ 不得加短缺比例判据：累积数组与滚动窗口不可比）"
+assert_eq "skip"   "$(cache_verdict 0 1 10 10 10)" \
+  "已存与计数相等 → skip（原语义不得回归）"
+assert_eq "append" "$(cache_verdict 0 1 10 17 3)" \
+  "计数上涨 → 仍 append（原语义不得回归）"
+assert_eq "skip"   "$(cache_verdict 0 1 47 36 8)" \
+  "计数下降且有事件 → skip（原语义不得回归）"
+assert_eq "skip"   "$(cache_verdict 0 1 10 0 0)" \
+  "线上计数为 0 → 无事可抓，skip（⛔ 欠账判据要求计数 > 0）"
+assert_eq "skip"   "$(cache_verdict 0 1 10 10)" \
+  "⛔ 省略第 5 参 → 退回旧行为，不得当成欠账（漏改的调用点不能变成每轮重抓）"
