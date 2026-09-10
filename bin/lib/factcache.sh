@@ -51,3 +51,28 @@ fc_record() { # $1=issues目录 $2=32位id $3=平台 $4=标题 $5=事件数 $6=�
   fi
   return 0
 }
+
+# ── 「抓得到 / 抓不到」的判定（change crash-fact-cache-events-backfill，findings F-1）──
+# 事实层的欠账记录分两类：**还没抓**（事件仍在窗口内）与**抓不到**（事件已滑出窗口，
+# `list_events` 查不到任何东西）。⛔ 混在一个数里会让收敛判据永远不达标，
+# 更糟的是按 id 排序的节流会被「抓不到」的记录**永久占位**——
+# 2026-09-10 生产实测：15 条欠账里 13 条已出窗，而按 id 排序的前三名全是它们。
+
+# 窗口起点（UTC 日期）。⚠️ macOS 与 Linux 的 date 参数不同，两种都试。
+fc_cutoff_date() { # $1=窗口天数 → YYYY-MM-DD
+  date -u -v-"$1"d +%Y-%m-%d 2>/dev/null && return 0
+  date -u -d "$1 days ago" +%Y-%m-%d 2>/dev/null && return 0
+  printf ''
+}
+
+# 某条记录的事件是否已全部滑出窗口（= 抓不到）。
+# ⚠️ `latest_event` 缺失时判为**可补**：没有证据说明它陈旧，宁可花一个名额去试，
+#    也不要把一条可能补得上的记录永久排除在候选之外。
+fc_unfetchable() { # $1=事实层文件 $2=窗口起点(YYYY-MM-DD) → rc 0=抓不到
+  local le
+  le="$(jq -r '(.latest_event // "") | .[0:10]' "$1" 2>/dev/null || printf '')"
+  [ -n "$le" ] || return 1
+  [ -n "$2" ] || return 1
+  if [[ "$le" < "$2" ]]; then return 0; fi
+  return 1
+}

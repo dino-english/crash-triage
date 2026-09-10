@@ -68,6 +68,7 @@ FACT_FIELDS='threads, blameFrame, device, operatingSystem, memory, processState,
 # ⚠️ 清单按 id 排序后取前 N，**不随机、不按计数排序**：每轮取同一批直到它们被补上，
 #    「欠账数逐轮下降」才能成为可观测的收敛信号。
 BACKFILL_LIMIT="${CRASH_REPORT_BACKFILL_LIMIT:-3}"
+BACKFILL_CUTOFF="$(fc_cutoff_date "$FACT_WINDOW_DAYS")"
 BACKFILL_IDS=""
 BACKFILL_N=0
 for _bf in "$ISSUES_DIR"/*.json; do
@@ -75,6 +76,10 @@ for _bf in "$ISSUES_DIR"/*.json; do
   [ "$BACKFILL_N" -lt "$BACKFILL_LIMIT" ] || break
   _bc="$(jq -r '(.events_count_last_seen // 0) | tonumber? // 0' "$_bf" 2>/dev/null || echo 0)"
   _bs="$(jq -r '(.events // []) | length' "$_bf" 2>/dev/null || echo -1)"
+  # ⛔ 事件已滑出窗口的记录**不进候选**（findings F-1）：它们抓不到，
+  #    而按 id 排序的节流会让它们每轮占住一个名额，把真正可补的永远挤在后面。
+  #    2026-09-10 实测：15 条欠账里 13 条已出窗，按 id 排序前三名全是它们。
+  if fc_unfetchable "$_bf" "$BACKFILL_CUTOFF"; then continue; fi
   if [ "$_bc" -gt 0 ] 2>/dev/null && [ "$_bs" -eq 0 ] 2>/dev/null; then
     _bid="$(basename "$_bf" .json)"
     BACKFILL_IDS="${BACKFILL_IDS}${BACKFILL_IDS:+ }${_bid}"

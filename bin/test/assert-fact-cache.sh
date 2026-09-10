@@ -9,6 +9,9 @@
 #   对快照里出现的每个 issue 断言：文件是合法 JSON · last_synced 是本轮时刻 · window_days 已写入 · latest_event 未倒退。
 # 退出码：0 全通过 / 1 有断言失败
 set -uo pipefail
+_FC_SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck disable=SC1091
+. "$_FC_SELF/../lib/factcache.sh" || { echo "❌ 缺失：bin/lib/factcache.sh" >&2; exit 1; }
 STATE="${CRASH_REPORT_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/crash-triage}"
 SNAP="${1:-$(ls -t "$STATE"/runs/*/L2/*/snapshot.json 2>/dev/null | head -1)}"
 BASE="${FACT_CACHE_BASELINE:-}"          # 可选：跑批前的 issues/ 快照目录，用于验 latest_event 未倒退
@@ -29,7 +32,9 @@ _fc_epoch() { # $1=ISO8601 Z → epoch 秒
 }
 
 rc=0; n=0
-CLAIMED=0; STORED=0; OWED=0
+CLAIMED=0; STORED=0; OWED=0; UNFETCHABLE=0
+# 窗口起点：区分「还没抓」与「抓不到」（findings F-1/F-2）。⚠️ 7 天与 prompt 里的窗口一致。
+FC_CUT="$(fc_cutoff_date "${FACT_CACHE_WINDOW_DAYS:-7}")"
 while IFS= read -r id; do
   [ -n "$id" ] || continue
   f="$STATE/issues/$id.json"
@@ -49,7 +54,9 @@ while IFS= read -r id; do
   # 欠账 = 计数为正而一条事件都没有（change crash-fact-cache-events-backfill）。
   # 逐轮看这个数在不在降，是「补抓有没有真在收敛」的唯一判据。
   if [ "$_st" -eq 0 ] && [ "$(jq -r '(.events_count_last_seen // 0) | tonumber? // 0' "$f")" -gt 0 ]; then
-    OWED=$((OWED + 1))
+    # ⛔ 两类必须分开报：「还没抓」会收敛，「抓不到」（事件已出窗）不会。
+    #    混成一个数当收敛判据永远不达标，而看数的人会以为补抓坏了（findings F-2）。
+    if fc_unfetchable "$f" "$FC_CUT"; then UNFETCHABLE=$((UNFETCHABLE + 1)); else OWED=$((OWED + 1)); fi
   fi
 
   ls_="$(jq -r '.last_synced // ""' "$f")"
@@ -85,7 +92,7 @@ done < <(jq -r '(.ios // [])[].id, (.android // [])[].id' "$SNAP" 2>/dev/null)
 #    events 是累积数组（只 append）。攒久了 M > N 是**正常**的（2026-09-08 开发机实测
 #    110 vs 29）；有意义的信号只有一个方向——M 远小于 N 说明有事件从没被抓下来
 #    （同日生产机实测 6 vs 55）。⛔ 别把它读成百分比。
-echo "ℹ️ 事件数对照：本轮窗口计数合计 ${CLAIMED} · 已存累积事件 ${STORED} 条 · 欠账 ${OWED} 个 · ${n} 个 issue"
+echo "ℹ️ 事件数对照：本轮窗口计数合计 ${CLAIMED} · 已存累积事件 ${STORED} 条 · 待补 ${OWED} 个 · 不可补 ${UNFETCHABLE} 个（事件已出窗）· ${n} 个 issue"
 
 [ $rc -eq 0 ] && echo "✅ 事实层产物断言通过（$n 个 issue）"
 exit $rc

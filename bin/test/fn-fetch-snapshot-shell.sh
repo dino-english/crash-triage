@@ -123,6 +123,26 @@ h_assert_absent  "$PROMPT" "00000000000000000000000000000ee" "⛔ 排序在后�
 h_assert_absent  "$PROMPT" "00000000000000000000000000000ff" "⛔ 有事件的记录不算欠账"
 _teardown
 
+echo "── 壳层：事件已出窗的记录不进候选（findings F-1）──"
+_setup
+# aa/bb 在窗口内、cc/dd/ee 已出窗且 id 排序靠前——⛔ 旧实现会让 cc/dd/ee 占满 3 个名额
+_recent="$(date -u -v-1d +'%Y-%m-%d 00:00 UTC' 2>/dev/null || date -u -d '1 day ago' +'%Y-%m-%d 00:00 UTC')"
+for suffix in cc dd ee; do
+  printf '{"events_count_last_seen":7,"events":[],"window_days":7,"latest_event":"2026-01-01 00:00 UTC","last_synced":"2026-09-01T00:00:00Z"}\n' \
+    > "$TMP/state/issues/00000000000000000000000000000${suffix}.json"
+done
+for suffix in ff gg; do
+  printf '{"events_count_last_seen":7,"events":[],"window_days":7,"latest_event":"%s","last_synced":"2026-09-01T00:00:00Z"}\n' \
+    "$_recent" > "$TMP/state/issues/00000000000000000000000000000${suffix}.json"
+done
+OUT="$(_run)"; RC=$?
+PROMPT="$(cat "$TMP/out/prompt.txt" 2>/dev/null || echo)"
+h_assert_absent  "$PROMPT" "00000000000000000000000000000cc" "⛔ 出窗记录不进候选（否则每轮占位到天荒地老）"
+h_assert_contains "$PROMPT" "00000000000000000000000000000ff" "窗口内的记录进候选"
+h_assert_contains "$PROMPT" "00000000000000000000000000000gg" "窗口内的另一条也进"
+h_assert_contains "$PROMPT" "以下 2 个 issue" "候选数 = 窗口内的条数，不被出窗记录挤掉"
+_teardown
+
 echo "── 壳层：无欠账时不加子句 ──"
 _setup
 printf '{"events_count_last_seen":3,"events":[{"e":1}],"window_days":7,"last_synced":"2026-09-01T00:00:00Z"}\n' \
