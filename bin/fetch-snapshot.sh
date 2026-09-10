@@ -96,7 +96,7 @@ if [ -n "$BACKFILL_IDS" ]; then
 【本轮欠账补抓】以下 ${BACKFILL_N} 个 issue 的事实层**有计数但一条事件都没存下来**，
 本轮对它们**全量抓取**事件明细并写入缓存，忽略判定一的计数比较：
 ${BACKFILL_IDS}
-⛔ 抓这几个时**必须显式传时间区间** \`filter.intervalStartTime=\"${BACKFILL_FROM}\"\` 与
+⛔ 抓这几个时**必须显式传 \`pageSize\`（取 50）与时间区间** \`filter.intervalStartTime=\"${BACKFILL_FROM}\"\` 与
 \`filter.intervalEndTime\`=当前时刻——\`crashlytics_list_events\` **默认只查最近 7 天**，
 而欠账记录的事件多半在 7 天之外（实测 08-17 的事件放宽窗口后能完整取回）。
 不传区间就会空手而归，看起来像「抓不到」，其实是没去要。
@@ -110,6 +110,10 @@ FACT_CACHE_POLICY="事实层缓存（${ISSUES_DIR}/<32位id>.json，一 issue �
   - 强制重抓：若环境要求 CRASH_REPORT_FORCE_REFETCH=${FORCE_REFETCH} 为 1，直接全量抓取。
   - 先用 Read 工具读 ${ISSUES_DIR}/<该 issue 完整 32 位 id>.json。
     - 文件不存在 → 全量抓取，事件按 ${FACT_FIELDS} 等原始字段保存
+      ⛔ 调 crashlytics_list_events **必须显式传 pageSize**（取 50）——
+      它的**默认值是 1**，不传就只回一条，事实层永远攒不出样本量，
+      台账/周报的「✅钻取确认（采样 n=…）」也就永远是 n=1。2026-09-10 实测：
+      同一批 issue 不传 pageSize 共抓到 24 条，传 pageSize=50 抓到 185 条。
       （尤其 threads 按原样存文本块，不要假设能拆成帧数组）。
     - 线上计数 **大于** 文件里的 events_count_last_seen → 只抓这次返回的事件，
       按唯一标识（无唯一 id 时用时间戳+blameFrame 组合）与已有 events 数组合并去重，
