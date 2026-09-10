@@ -71,3 +71,29 @@
 `欠账 = 计数 > 0 且 events 为空` 同时包含「还没抓」与「抓不到」。
 前者会收敛，后者不会。⛔ 用一个混合数当收敛判据（tasks 4.3）**永远不会达标**，
 而看数的人会以为补抓坏了。断言的输出要把两者分开报。
+
+## F-3 · 真正的根因有两个，都在 `--allowedTools` 与 prompt 里，且都是一次裸 MCP 调用就能测出来的
+
+2026-09-10 当天用裸 MCP（`tools/list` / `resources/list` / 工具描述）测出来的：
+
+1. **模型不是在撒谎**。`crashlytics_get_report` 的描述原文要求
+   「must read the Reports Guide **using the `firebase_read_resources` tool** before calling」，
+   而 `--allowedTools` 里没有这个工具——它回报的「读取 Guide 的权限未获授权」**字面属实**。
+   ⚠️ 记忆 `model-misreports-io-error-as-denied` 因此已订正：那半个月的「模型爱撒谎」是误判。
+2. **`list_events` 的 `pageSize` 默认是 1**。prompt 从没传过它，所以事实层每个 issue
+   永远只存 1 条事件。同一批 24 个 issue：不传共抓 24 条，传 `pageSize=50` 抓 **185 条**。
+
+**存量修复（一次性，非流水线）**：裸 MCP + 88 天窗 + `pageSize=50`，只 append 不改写已有记录，
+写回前备份到 `$STATE/backup/pre-backfill-20260910`。结果：事件 **6 → 185**、
+待补 **15 → 0**、不可补 0、非法 JSON 0、断言通过。
+
+**下游兑现（这才是这批数据存在的理由）**：
+
+| 周报 | ✅ 钻取确认 | ⚠️ 聚合推断 |
+|---|---|---|
+| 2026-09-07（补齐前） | **0 处** | **12 处** |
+| 2026-09-10（补齐后） | **4 处** | **0 处** |
+
+⚠️ 遗留：`62f88f39` 有 8 条早期退化格式条目（只有 `eventId` + `raw_mcp_output`，无 `eventTime`），
+API 已取不回对应事件，⛔ 保留不删——它们仍是「该事件存在过」的证据。
+`scan-fix-commits.sh` 读 `.events[].eventTime` 时会少算这 8 条，影响面仅限该 issue 的时间线。
