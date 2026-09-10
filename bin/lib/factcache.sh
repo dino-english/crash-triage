@@ -52,13 +52,20 @@ fc_record() { # $1=issues目录 $2=32位id $3=平台 $4=标题 $5=事件数 $6=�
   return 0
 }
 
-# ── 「抓得到 / 抓不到」的判定（change crash-fact-cache-events-backfill，findings F-1）──
-# 事实层的欠账记录分两类：**还没抓**（事件仍在窗口内）与**抓不到**（事件已滑出窗口，
-# `list_events` 查不到任何东西）。⛔ 混在一个数里会让收敛判据永远不达标，
-# 更糟的是按 id 排序的节流会被「抓不到」的记录**永久占位**——
-# 2026-09-10 生产实测：15 条欠账里 13 条已出窗，而按 id 排序的前三名全是它们。
+# ── 「抓得到 / 抓不到」的判定（change crash-fact-cache-events-backfill）──
+# ⛔ **判据是 API 保留期 90 天，不是取数用的 7 天窗**（2026-09-10 订正）。
+#    `crashlytics_list_events` 的 `intervalStartTime` 文档原文：
+#    「Must be within the last 90 days. **Defaults to 7 days ago**」——
+#    7 天只是**默认值**，显式传区间就能查到 90 天内的任何事件。
+# ⛔ **已订正的过期结论**：本函数初版按 7 天窗判「抓不到」，把 13 条**本可补**的记录
+#    永久排除了。裸调 MCP 实测（`87073ca8`，latest_event 08-17，窗口放宽到 60 天）
+#    完整返回事件——它们一直抓得到，只是没人把窗口放开。
+# ⚠️ 真正抓不到的只有一种：事件已超出 90 天保留期。
 
 # 窗口起点（UTC 日期）。⚠️ macOS 与 Linux 的 date 参数不同，两种都试。
+# ⚠️ 取 89 不取 90：边界值可能被 API 判为「不在 90 天内」，留一天余量。
+FC_RETENTION_DAYS="${CRASH_REPORT_FACT_RETENTION_DAYS:-89}"
+
 fc_cutoff_date() { # $1=窗口天数 → YYYY-MM-DD
   date -u -v-"$1"d +%Y-%m-%d 2>/dev/null && return 0
   date -u -d "$1 days ago" +%Y-%m-%d 2>/dev/null && return 0

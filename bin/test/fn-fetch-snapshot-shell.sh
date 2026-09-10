@@ -123,12 +123,13 @@ h_assert_absent  "$PROMPT" "00000000000000000000000000000ee" "⛔ 排序在后�
 h_assert_absent  "$PROMPT" "00000000000000000000000000000ff" "⛔ 有事件的记录不算欠账"
 _teardown
 
-echo "── 壳层：事件已出窗的记录不进候选（findings F-1）──"
+echo "── 壳层：超出保留期的记录不进候选，其余必须带显式区间 ──"
 _setup
 # aa/bb 在窗口内、cc/dd/ee 已出窗且 id 排序靠前——⛔ 旧实现会让 cc/dd/ee 占满 3 个名额
-_recent="$(date -u -v-1d +'%Y-%m-%d 00:00 UTC' 2>/dev/null || date -u -d '1 day ago' +'%Y-%m-%d 00:00 UTC')"
+# ⚠️ 取 30 天前：它在 7 天取数窗之外、却在 89 天保留期之内——正是 2026-09-10 判错的那一类
+_recent="$(date -u -v-30d +'%Y-%m-%d 00:00 UTC' 2>/dev/null || date -u -d '30 days ago' +'%Y-%m-%d 00:00 UTC')"
 for suffix in cc dd ee; do
-  printf '{"events_count_last_seen":7,"events":[],"window_days":7,"latest_event":"2026-01-01 00:00 UTC","last_synced":"2026-09-01T00:00:00Z"}\n' \
+  printf '{"events_count_last_seen":7,"events":[],"window_days":7,"latest_event":"2025-01-01 00:00 UTC","last_synced":"2026-09-01T00:00:00Z"}\n' \
     > "$TMP/state/issues/00000000000000000000000000000${suffix}.json"
 done
 for suffix in ff gg; do
@@ -137,10 +138,11 @@ for suffix in ff gg; do
 done
 OUT="$(_run)"; RC=$?
 PROMPT="$(cat "$TMP/out/prompt.txt" 2>/dev/null || echo)"
-h_assert_absent  "$PROMPT" "00000000000000000000000000000cc" "⛔ 出窗记录不进候选（否则每轮占位到天荒地老）"
-h_assert_contains "$PROMPT" "00000000000000000000000000000ff" "窗口内的记录进候选"
-h_assert_contains "$PROMPT" "00000000000000000000000000000gg" "窗口内的另一条也进"
-h_assert_contains "$PROMPT" "以下 2 个 issue" "候选数 = 窗口内的条数，不被出窗记录挤掉"
+h_assert_absent  "$PROMPT" "00000000000000000000000000000cc" "⛔ 超出保留期的不进候选"
+h_assert_contains "$PROMPT" "00000000000000000000000000000ff" "⛔ 30 天前的记录**必须**进候选（7 天窗之外但保留期之内）"
+h_assert_contains "$PROMPT" "00000000000000000000000000000gg" "另一条同样进"
+h_assert_contains "$PROMPT" "intervalStartTime" "⛔ prompt 必须要求显式时间区间（默认只查 7 天，不传就空手而归）"
+h_assert_contains "$PROMPT" "以下 2 个 issue" "候选数不被超期记录挤掉"
 _teardown
 
 echo "── 壳层：无欠账时不加子句 ──"

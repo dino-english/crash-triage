@@ -68,7 +68,9 @@ FACT_FIELDS='threads, blameFrame, device, operatingSystem, memory, processState,
 # ⚠️ 清单按 id 排序后取前 N，**不随机、不按计数排序**：每轮取同一批直到它们被补上，
 #    「欠账数逐轮下降」才能成为可观测的收敛信号。
 BACKFILL_LIMIT="${CRASH_REPORT_BACKFILL_LIMIT:-3}"
-BACKFILL_CUTOFF="$(fc_cutoff_date "$FACT_WINDOW_DAYS")"
+# ⛔ 用**保留期**（89 天）判「抓不到」，不是取数窗口（7 天）——见 factcache.sh 顶部的订正说明。
+BACKFILL_CUTOFF="$(fc_cutoff_date "$FC_RETENTION_DAYS")"
+BACKFILL_FROM="$(fc_cutoff_date "$FC_RETENTION_DAYS")T00:00:00Z"
 BACKFILL_IDS=""
 BACKFILL_N=0
 for _bf in "$ISSUES_DIR"/*.json; do
@@ -94,6 +96,10 @@ if [ -n "$BACKFILL_IDS" ]; then
 【本轮欠账补抓】以下 ${BACKFILL_N} 个 issue 的事实层**有计数但一条事件都没存下来**，
 本轮对它们**全量抓取**事件明细并写入缓存，忽略判定一的计数比较：
 ${BACKFILL_IDS}
+⛔ 抓这几个时**必须显式传时间区间** \`filter.intervalStartTime=\"${BACKFILL_FROM}\"\` 与
+\`filter.intervalEndTime\`=当前时刻——\`crashlytics_list_events\` **默认只查最近 7 天**，
+而欠账记录的事件多半在 7 天之外（实测 08-17 的事件放宽窗口后能完整取回）。
+不传区间就会空手而归，看起来像「抓不到」，其实是没去要。
 ⚠️ 只抓这几个，不要扩大范围——其余 issue 仍按判定一处理。"
 fi
 

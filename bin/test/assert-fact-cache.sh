@@ -33,8 +33,9 @@ _fc_epoch() { # $1=ISO8601 Z → epoch 秒
 
 rc=0; n=0
 CLAIMED=0; STORED=0; OWED=0; UNFETCHABLE=0
-# 窗口起点：区分「还没抓」与「抓不到」（findings F-1/F-2）。⚠️ 7 天与 prompt 里的窗口一致。
-FC_CUT="$(fc_cutoff_date "${FACT_CACHE_WINDOW_DAYS:-7}")"
+# 分界是 **API 保留期 89 天**，⛔ 不是取数用的 7 天窗——按 7 天判会把一大批
+# **本可补**的记录报成「不可补」（2026-09-10 实测订正，详见 factcache.sh 顶部）。
+FC_CUT="$(fc_cutoff_date "$FC_RETENTION_DAYS")"
 while IFS= read -r id; do
   [ -n "$id" ] || continue
   f="$STATE/issues/$id.json"
@@ -92,7 +93,7 @@ done < <(jq -r '(.ios // [])[].id, (.android // [])[].id' "$SNAP" 2>/dev/null)
 #    events 是累积数组（只 append）。攒久了 M > N 是**正常**的（2026-09-08 开发机实测
 #    110 vs 29）；有意义的信号只有一个方向——M 远小于 N 说明有事件从没被抓下来
 #    （同日生产机实测 6 vs 55）。⛔ 别把它读成百分比。
-echo "ℹ️ 事件数对照：本轮窗口计数合计 ${CLAIMED} · 已存累积事件 ${STORED} 条 · 待补 ${OWED} 个 · 不可补 ${UNFETCHABLE} 个（事件已出窗）· ${n} 个 issue"
+echo "ℹ️ 事件数对照：本轮窗口计数合计 ${CLAIMED} · 已存累积事件 ${STORED} 条 · 待补 ${OWED} 个 · 不可补 ${UNFETCHABLE} 个（超出 89 天保留期）· ${n} 个 issue"
 
 [ $rc -eq 0 ] && echo "✅ 事实层产物断言通过（$n 个 issue）"
 exit $rc
