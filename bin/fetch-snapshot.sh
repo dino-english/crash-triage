@@ -190,6 +190,13 @@ ${FACT_CACHE_POLICY}${BACKFILL_CLAUSE}
 PROMPT_END
 fi
 
+# ⛔ **`firebase_read_resources` 必须放行**（2026-09-10 实测根因）：
+#    `crashlytics_get_report` 的工具描述原文写着「Agents **must read** the Firebase
+#    Crashlytics Reports Guide (firebase://guides/crashlytics/reports) **using the
+#    `firebase_read_resources` tool** before calling」。不放行它，模型会拒绝执行并回报
+#    「读取 Crashlytics Reports Guide 的权限未获授权」——⚠️ 那句话**字面是真的**，
+#    只是措辞让人以为是文件系统权限，我们照这个方向查了半个月（见记忆 model-misreports…）。
+#    它是只读工具（读 MCP resource），不违反下面那条「逐个列只读工具」的红线。
 # allowedTools 必须逐个列只读工具，禁止 "mcp__firebase" 前缀通配——
 # 前缀匹配会放行写操作 crashlytics_update_issue，2026-08-06 已因此误关过线上 issue
 # （见 $STATE/ledger/LEDGER.md「事故记录」；change crash-ledger-l2-ownership 起本地源移出仓库）。
@@ -278,6 +285,7 @@ run_agent() { # $1=尝试序号；输出同时进 stdout（跑批日志）与 ag
       "mcp__firebase__crashlytics_get_issue" \
       "mcp__firebase__crashlytics_list_events" \
       "mcp__firebase__crashlytics_batch_get_events" \
+      "mcp__firebase__firebase_read_resources" \
       "Read" "Write" "Grep" "Glob" \
       "Bash(git log:*)" "Bash(git -C:*)" "Bash(git branch:*)" "Bash(git show:*)" \
     --mcp-config "$ROOT/bin/mcp.json" \
