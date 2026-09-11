@@ -188,6 +188,8 @@ ISSUE_STATES_FILE="$OUT_DIR/issue-states.json"
 jq -sc 'map(select(.state != null) | {key: .id, value: .state}) | from_entries' \
   "$STATE"/issues/*.json > "$ISSUE_STATES_FILE" 2>/dev/null || echo '{}' > "$ISSUE_STATES_FILE"
 export CRASH_REPORT_ISSUE_STATES="$ISSUE_STATES_FILE"
+# 卡片渲染也要用（_fix_rows / 变化行）——⚠️ 函数不跨进程，但同进程内读一次变量即可。
+ISSUE_STATES_JSON="$(jq -c . "$ISSUE_STATES_FILE" 2>/dev/null || echo '{}')"
 
 if [ -x "$ROOT/bin/scan-fix-commits.sh" ]; then
   "$ROOT/bin/scan-fix-commits.sh" "$STATE" "$REPOS_ROOT/dino-english-ios" "$REPOS_ROOT/dino-english-android" \
@@ -943,7 +945,10 @@ _chg_rows() { # $1=平台key $2=桶名 $3=图标与词 $4=是否带事件数(1/0
     # ⛔ 全角括号先条件赋值再拼接，禁 ${var:+（...）}
     fixtxt=""
     if [ -n "$fixcommit" ]; then
-      if [ "$fixstatus" = "已修待验" ]; then fixtxt="（🛠️ 代码已修待验 · ${fixcommit}）"
+      # ⛔ 同 _fix_rows：已关闭优先（R4）。⚠️ 这是第三条渲染路径——改一处不够。
+      _cr_state="$(printf '%s' "$ISSUE_STATES_JSON" | jq -r --arg k "$id" '.[$k] // ""' 2>/dev/null || true)"
+      if [ "$_cr_state" = "CLOSED" ]; then fixtxt="（✅ 已关闭 · ${fixcommit}）"
+      elif [ "$fixstatus" = "已修待验" ]; then fixtxt="（🛠️ 代码已修待验 · ${fixcommit}）"
       else fixtxt="（⚠️ 修了仍在 · ${fixcommit}）"; fi
     fi
     printf -- '- %s %s %s%s%s%s\n' "$mark" "$idtok" "$title" "$suffix" "$vtxt" "$fixtxt"
@@ -973,7 +978,14 @@ _fix_rows() { # $1=平台key $2=是否带链接(1/0)
   [ -s "$FIXMAP_FILE" ] || return 0
   while IFS=$'\t' read -r id plat status commit subject; do
     [ -n "$id" ] || continue
-    if [ "$status" = "已修待验" ]; then mark="🛠️ 代码已修待验"; else mark="⚠️ 修了仍在"; fi
+    # ⛔ **已关闭优先**（失效模式 R4）：fixmap 来自「永久保留不清理」的事实层缓存，
+    #    2026-09-11 实测卡片上 6 条「已修待验」中 4 条在 Crashlytics 已是 CLOSED。
+    #    ⚠️ 台账那侧（render-ledger.sh）已先接上，卡片这条路径**当时漏了**——
+    #    同一个数据源两条渲染路径，只堵一条等于没堵。
+    _fr_state="$(printf '%s' "$ISSUE_STATES_JSON" | jq -r --arg k "$id" '.[$k] // ""' 2>/dev/null || true)"
+    if [ "$_fr_state" = "CLOSED" ]; then mark="✅ 已关闭"
+    elif [ "$status" = "已修待验" ]; then mark="🛠️ 代码已修待验"
+    else mark="⚠️ 修了仍在"; fi
     # ⛔ 与 _chg_rows 同一条约定：链接版不加反引号（md2docx.py 的链接正则不处理嵌套行内代码）。
     idtok="\`${id:0:8}\`"
     if [ "$want_link" = "1" ]; then

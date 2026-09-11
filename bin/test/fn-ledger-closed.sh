@@ -41,4 +41,17 @@ if grep -qF 'export CRASH_REPORT_ISSUE_STATES' "$ROOT/bin/crash-weekly.sh"; then
 else
   echo "  ❌ 周报没传状态表——渲染器拿不到，等于没接"; H_FAIL=$((H_FAIL+1))
 fi
+
+echo "── ⛔ 三条渲染路径都要接（2026-09-11 只接了台账那条，卡片仍报 6 条错的）──"
+# 同一个 fixmap 会被三处渲染：台账现状表 / 卡片 _fix_rows / 卡片变化行并入。
+for pat in 'if $states[$iss.id] == "CLOSED" then:render-ledger.sh' \
+           '_fr_state" = "CLOSED":crash-weekly.sh' \
+           '_cr_state" = "CLOSED":crash-weekly.sh'; do
+  needle="${pat%%:*}"; file="${pat##*:}"
+  if grep -qF "$needle" "$ROOT/bin/$file"; then
+    echo "  ✅ $file 已接：${needle:0:28}"; H_PASS=$((H_PASS+1))
+  else
+    echo "  ❌ $file 未接：${needle:0:28}——该路径会把 CLOSED 报成待验"; H_FAIL=$((H_FAIL+1))
+  fi
+done
 h_summary
