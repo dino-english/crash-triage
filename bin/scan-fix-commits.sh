@@ -65,8 +65,15 @@ scan_repo() { # $1=仓库路径 $2=平台标签
     # ⛔ 每个 grep 都要 `|| true`：无匹配返回 1，而 set -o pipefail 下会让整条管道失败（F31）。
     {
       printf '%s\n' "$_msg" | grep -oE '\[crash:[0-9a-fA-F]{8}\]' | grep -oE '[0-9a-fA-F]{8}' || true
-      printf '%s\n' "$_msg" | grep -oiE 'crashlytics( issue)?:[[:space:]]*[0-9a-fA-F]{32}' \
-        | grep -oE '[0-9a-fA-F]{32}' | cut -c1-8 || true
+      # ⛔ **冒号必须可选、长度 8 与 32 都要收**（2026-09-11 实测订正）。原正则写死
+      #    `crashlytics( issue)?:` 要求冒号、且只认 32 位，于是实际在用的两种写法全漏：
+      #      · iOS  a9c8c306：`修复 Crashlytics issue 8baf564f0cf7443bfcb27d8bd10f55d4`（无冒号）
+      #      · Android a4a7ce99（09-01）：`Crashlytics 26335e5d；不保证 SIGSEGV 归零`（无冒号、8 位）
+      #    后者正是我们事实层里的 issue——「已修待验恒为 0」不是没数据，是**没抓到**。
+      # ⚠️ 放宽不会引入误报：下面第 2 步只保留**能在当前 issue 集合里查到**的 short id，
+      #    随机的 8 位 hex（如 git 短哈希）匹配不上任何 issue，自然被丢弃。
+      printf '%s\n' "$_msg" | grep -oiE 'crashlytics([[:space:]]+issue)?:?[[:space:]]*[0-9a-fA-F]{8,32}' \
+        | grep -oE '[0-9a-fA-F]{8,32}' | cut -c1-8 || true
     } | tr 'A-Z' 'a-z' | sort -u | while read -r short; do
       [ -n "$short" ] || continue
       printf '%s\t%s\t%s\t%s\t%s\n' "$short" "${hash:0:8}" "$date" "$label" "$subject"
