@@ -2712,12 +2712,21 @@ if [ -x "$ROOT/bin/test/assert-artifacts.sh" ]; then
     echo "  ⚠️ 产物自检未通过（见上方 ❌ 行）——数据无误，但产物有增强项失效，投递照常" >&2
   fi
 fi
-  "$ROOT/bin/deliver.sh" "$PUBLISH_DIR/manifest.json" || echo "  ⚠️ 投递失败（数据已落盘，可重跑 deliver.sh 补投）"
+  # ⛔ 不得写成 `|| echo …`：那会把退出码吞掉（F17 同类），健康文件照写 ok:true。
+  #    2026-09-11 实测：投递挂了、群里收到告警卡，而整跑与 Hermes 双双记「成功」。
+  DELIVER_RC=0
+  "$ROOT/bin/deliver.sh" "$PUBLISH_DIR/manifest.json" || DELIVER_RC=$?
+  if [ "$DELIVER_RC" != 0 ]; then
+    echo "  ⚠️ 投递失败（rc=${DELIVER_RC}，数据已落盘，可重跑 deliver.sh 补投）"
+  fi
 fi
 
+# ⛔ ok 不得写死：它是「今天这轮到底成没成」的唯一机读判据，写死等于永远报成功。
 jq -n --arg t "$TS" --arg u "$DATA_UNTIL" --arg r "$RUN_ID" \
+  --argjson ok "$([ "${DELIVER_RC:-0}" = 0 ] && echo true || echo false)" \
+  --argjson drc "${DELIVER_RC:-0}" \
   --arg iv "$(printf '%s' "$IOS_COLS" | tr '\n' ' ')" --arg av "$(printf '%s' "$AND_COLS" | tr '\n' ' ')" \
-  '{last_run:$t,run_id:$r,ok:true,data_until:$u,versions:{ios:$iv,android:$av}}' > "$STATE/health-daily.json"
+  '{last_run:$t,run_id:$r,ok:$ok,deliver_rc:$drc,data_until:$u,versions:{ios:$iv,android:$av}}' > "$STATE/health-daily.json"
 
 # latest 软链指向本次跑批产物，供 2.4/2.5 回归对比与人工排查使用（ln -sfn 覆盖式，指向相对路径避免机器间路径漂移）
 ln -sfn "$TS" "$STATE/runs/$DAY/L1/latest"
@@ -2733,6 +2742,11 @@ find "$STATE/audit" -type f -mtime +60 -delete 2>/dev/null || true
 find "$STATE/reports" -type f -name '*.md' -mtime +90 -delete 2>/dev/null || true
 # 被 kill 的跑批留下的 SQL 临时文件：上方 bq_init 后挂的 EXIT trap 对 SIGKILL / cron 超时杀进程不生效
 find "$STATE" -maxdepth 1 -type f -name '.bq-sql-*.sql' -mtime +1 -delete 2>/dev/null || true
-audit run.end "" '{"ok":true}'
+# ⛔ 审计与退出码都要如实：投递失败时整跑**不是**成功的——群里收不到报告就是故障。
+audit run.end "" "$([ "${DELIVER_RC:-0}" = 0 ] && echo '{"ok":true}' || echo '{"ok":false,"reason":"deliver_failed"}')"
+if [ "${DELIVER_RC:-0}" != 0 ]; then
+  echo "=== 完成（投递失败，rc=${DELIVER_RC}）==="
+  RUN_COMPLETED=1; exit "$DELIVER_RC"
+fi
 echo "=== 完成 ==="
 RUN_COMPLETED=1

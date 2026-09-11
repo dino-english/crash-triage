@@ -42,6 +42,9 @@ export PATH
 # 身份钉死 bot：user 身份的 refresh token 会过期（需人工重登），无人值守跑必挂；
 # bot 身份不过期。且 bot 导入的文档会自动给 CLI 用户授 full_access，人照样能管。
 LARK_AS="${CRASH_REPORT_LARK_AS:-bot}"
+# 投递失败标记（见 fail）。⚠️ 每轮开头清一次，否则昨天的失败会让今天恒判失败。
+DELIVER_FAIL_MARK="${CRASH_REPORT_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/crash-triage}/.deliver-failed"
+rm -f "$DELIVER_FAIL_MARK" 2>/dev/null || true
 # 主力应用（壹帏管家 cli_aaf7b44ddeb8de14）。两个概念必须分开，合在一起会出大问题：
 #   CACHE_NS   —— docs.json / folders.json 的键前缀，**任何环境下都必须一致**，
 #                 否则 hermes 跑的时候认不出已建文档，会重新建一整套
@@ -58,6 +61,11 @@ TODAY="$(date +%Y-%m-%d)"
 
 fail() {
   echo "❌ $*" >&2
+  # ⛔ 落一个标记文件：fail 常常发生在 `$( )` 命令替换里，`exit 1` 只结束**子 shell**，
+  #    外层照常跑完并 `exit 0`——2026-09-11 实测就是这样：群里收到投递失败告警卡，
+  #    而 health-daily.json 写着 ok:true、Hermes 记 ok。**判据不一致的静默降级**。
+  #    标记跨子 shell 唯一可靠的载体是文件（函数与变量都跨不过去）。
+  : > "$DELIVER_FAIL_MARK" 2>/dev/null || true
   # 投递失败必须发出去：数据已落盘但群里没消息，是最容易被当成「今天没问题」的故障形态
   [ -x "$ROOT/bin/alert.sh" ] && "$ROOT/bin/alert.sh" --source deliver --severity error \
     --step "${CURRENT_STEP:-投递}" --message "$*" --rc 1 --run-id "${RUN_ID:-}" >/dev/null 2>&1 || true
@@ -723,5 +731,10 @@ if [ -s "$NEW_RESOURCES" ]; then
   echo "（索引页还要设成 DOC_INDEX_ID 才会走原地覆盖；台账走 docs.json 的 ledger 键自动记忆，无需环境变量）"
 fi
 doc_prune
+if [ -e "$DELIVER_FAIL_MARK" ]; then
+  rm -f "$DELIVER_FAIL_MARK" 2>/dev/null || true
+  echo "❌ 投递过程中有步骤失败（详见上方 ❌ 行）——⛔ 不得以 0 退出：群里已发告警卡，跑批却自称成功是最难发现的故障形态" >&2
+  RUN_COMPLETED=1; exit 1
+fi
 echo "=== 投递完成 ==="
 RUN_COMPLETED=1
