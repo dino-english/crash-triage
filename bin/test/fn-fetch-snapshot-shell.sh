@@ -153,6 +153,7 @@ PROMPT="$(cat "$TMP/out/prompt.txt" 2>/dev/null || echo)"
 h_assert_eq "0" "$RC" "⛔ 非零退出即说明脚本被 set -e 打断（`[ ] && VAR=` 那类写法）"
 h_assert_contains "$PROMPT" "本轮是否强制重抓：是" "强制重抓给模型的是结论不是变量对照"
 h_assert_contains "$PROMPT" "pageSize" "pageSize 要求在 prompt 里"
+h_assert_contains "$PROMPT" "intervalStartTime" "⛔ 时间区间要求也必须在 prompt 里（不传只查 7 天）"
 # ⛔ 工具级日志必须落盘：没有它就判不出「模型到底调没调 list_events」（F45 ③）
 if ls "$TMP/out"/agent-*.jsonl >/dev/null 2>&1; then
   echo "  ✅ 模型原始事件流已落盘（agent-*.jsonl）"; H_PASS=$((H_PASS+1))
