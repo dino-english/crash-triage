@@ -1281,7 +1281,18 @@ if [ "$MCP_OK" = 1 ]; then
      && "$ROOT/bin/scan-fix-commits.sh" "$STATE" "$REPOS_ROOT/dino-english-ios" \
         "$REPOS_ROOT/dino-english-android" "${CRASH_REPORT_FIX_SCAN_DAYS:-90}" \
         > "$FIXMAP_L1" 2>"$CRASH_DIR/fixmap-scan.log"; then
-    FIXED_PENDING="$(jq -r '[(.mapped // {}) | to_entries[] | select(.value.status == "已修待验")] | length' "$FIXMAP_L1" 2>/dev/null || echo 0)"
+    # ⛔ **必须与本轮 OPEN 集合求交**（2026-09-11 当天订正）。反扫的输入是事实层缓存，
+    #    而缓存「一次抓取永久保留、不清理」——**关闭的 issue 永远留在里面**。
+    #    实测：反扫出的 8 条里 6 条在 Crashlytics 已是 CLOSED（8baf564f / 470ed3ef /
+    #    85c581ed / fa48b2eb / a34175e5 / ce481263），把它们报成「已修待验」是错的。
+    # ⚠️ 与 ${CRASH_JSON}（本轮 topIssues，只含 OPEN）求交会**少报**——OPEN 但不在 top-N 的
+    #    issue 会漏掉（实测 2a800b33 / 26335e5d 就是这种）。⛔ 但告警宁可少报不可多报：
+    #    多报会让人去处理已经关掉的问题。真正的修法是按 issue 逐个取 state，见 R4。
+    FIXED_PENDING="$(jq -rn --slurpfile m "$FIXMAP_L1" --slurpfile c "$CRASH_JSON" '
+      ([($c[0].ios // []) + ($c[0].android // [])] | flatten | map(.id)) as $open
+      | [ (($m[0].mapped // {}) | to_entries[])
+          | select(.value.status == "已修待验") | select(.key as $k | $open | index($k)) ]
+      | length' 2>/dev/null || echo 0)"
   else
     echo "  ⚠️ 修复状态反扫失败，回落模型反查值（详见 fixmap-scan.log）" >&2
     FIXED_PENDING="$(jq -r '[((.ios // []) + (.android // []))[] | select(.fix_commit != null)] | length' "$CRASH_JSON" 2>/dev/null || echo 0)"
