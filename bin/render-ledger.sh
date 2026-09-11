@@ -20,6 +20,14 @@ DAY="${5:?缺少 day}"
 REPORT_URL="${6:-}"
 SEEN_FILE="${7:-}"   # 生命周期基准 {"<32位id>":{"first","last"}}；缺省则退回两态
 SEEN_CUTOFF="${8:-}" # 基准保留期起点（YYYY-MM-DD），早于它的条目在第 ④ 段输出时清理
+# issue 的 OPEN/CLOSED 状态表 {"<32位id>":"OPEN|CLOSED"}，由 fetch-issue-states.py 落进事实层后汇出。
+# ⛔ 没有它时**退回旧行为**（不标已关闭），⚠️ 但那意味着 CLOSED 的 issue 会被标成「已修待验」——
+#    失效模式 R4：反扫的输入是「永久保留不清理」的事实层缓存，2026-09-11 实测 24 条里 14 条已 CLOSED。
+STATES_FILE="${CRASH_REPORT_ISSUE_STATES:-}"
+STATES_JSON='{}'
+if [ -n "$STATES_FILE" ] && [ -s "$STATES_FILE" ]; then
+  STATES_JSON="$(jq -c . "$STATES_FILE" 2>/dev/null || echo '{}')"
+fi
 
 [ -s "$SNAPSHOT" ] || { echo "snapshot.json 为空：$SNAPSHOT" >&2; exit 1; }
 [ -s "$FIXMAP" ] || echo '{"mapped":{},"ambiguous":[],"platform_unavailable":[]}' > "$FIXMAP"
@@ -82,7 +90,8 @@ build_rows() { # $1=平台标签(iOS|Android) $2=snapshot key(ios|android)
   local urlpre; urlpre="$(issue_url_prefix "$key")"
   jq -r --arg label "$label" --arg key "$key" --arg day "$DAY" --arg urlpre "$urlpre" \
     --slurpfile fm "$FIXMAP" --argjson prev "$PREV_JSON" \
-    --argjson seen "$SEEN_JSON" --arg prevday "$SEEN_PREV_DAY" --argjson lcok "$LIFECYCLE_OK" '
+    --argjson seen "$SEEN_JSON" --arg prevday "$SEEN_PREV_DAY" --argjson lcok "$LIFECYCLE_OK" \
+    --argjson states "$STATES_JSON" '
     ($fm[0].mapped // {}) as $mapped |
     (.[$key] // [])[] |
     . as $iss |
@@ -100,7 +109,12 @@ build_rows() { # $1=平台标签(iOS|Android) $2=snapshot key(ios|android)
       # 只看 $p 会把回归的 issue 记成「今天首次纳入」。
       first_seen: ($s.first // $p.first_seen // $day),
       # 处置状态：反扫命中优先；否则保留历史结论；否则「未处理」（5.7：反扫只改这两列，不碰备注）
-      disposition: (if $fix != null then $fix.status
+      # ⛔ **已关闭优先于反扫结论**（失效模式 R4）：反扫读的是永久保留的事实层缓存，
+      #    关掉的 issue 永远留在里面，不加这一层就会把 CLOSED 的标成「已修待验」，
+      #    让人去跟进已经关掉的问题。2026-09-11 实测：台账 6 条已修待验中 4 条已 CLOSED。
+      disposition: (if $states[$iss.id] == "CLOSED" then
+                      (if $fix != null then "✅已关闭（\($fix.commit)）" else "✅已关闭" end)
+                    elif $fix != null then $fix.status
                     elif $p.disposition != null and $p.disposition != "" then $p.disposition
                     else "未处理" end),
       # 三态（spec crash-perf-issue-lifecycle）。⚠️ $s.last 是**上一轮**的值——
@@ -203,6 +217,10 @@ done
 # 反扫命中的状态变更（已修待验/修了仍在）也进时间线——这是台账真正的价值：结论随代码事实更新
 while IFS=$'\t' read -r id plat status commit subject; do
   [ -n "$id" ] || continue
+  # ⚠️ 已关闭的 issue 仍然进时间线（修复发生过是事实），但**不得**写成「已修待验」——
+  #    那是给人看的待办信号，而它已经关了。
+  _st="$(printf '%s' "$STATES_JSON" | jq -r --arg k "$id" '.[$k] // ""' 2>/dev/null || true)"
+  if [ "$_st" = "CLOSED" ]; then status="✅已关闭"; fi
   add_line "🛠️ [$plat] $status ${subject}（${commit}，issue ${id:0:8}）"
 done < <(jq -r '.mapped // {} | to_entries[] | [.key, .value.platform, .value.status, .value.commit, .value.subject] | @tsv' "$FIXMAP" 2>/dev/null || true)
 

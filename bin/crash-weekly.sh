@@ -176,6 +176,19 @@ FIXMAP_FILE="$OUT_DIR/fixmap.json"
 #    14 天藏掉了四分之三。⛔ 「已修待验」讲的是「代码改了还没验证到位」，
 #    这个状态天然跨多个 sprint，用两周窗口去框它是口径错配。
 #    90 与事实层的 89 天保留期同量级，git log 的成本可忽略。
+# ⛔ 反扫之前先把 issue 的 OPEN/CLOSED 取回来（失效模式 R4）：反扫读的是「永久保留不清理」的
+#    事实层缓存，2026-09-11 实测 24 条里 14 条已 CLOSED，其中 6 条被台账标成「已修待验」。
+# ⚠️ 取数失败时保持缓存原值并继续——状态缺失只让台账退回旧行为，不该拦下整条周报。
+if [ -f "$ROOT/bin/fetch-issue-states.py" ]; then
+  python3 "$ROOT/bin/fetch-issue-states.py" "$STATE" >&2 \
+    || echo "  ⚠️ issue 状态同步失败，台账沿用缓存里的既有 state" >&2
+fi
+# 汇出 {id: state} 供 render-ledger.sh 使用（它不该自己去翻事实层目录）
+ISSUE_STATES_FILE="$OUT_DIR/issue-states.json"
+jq -sc 'map(select(.state != null) | {key: .id, value: .state}) | from_entries' \
+  "$STATE"/issues/*.json > "$ISSUE_STATES_FILE" 2>/dev/null || echo '{}' > "$ISSUE_STATES_FILE"
+export CRASH_REPORT_ISSUE_STATES="$ISSUE_STATES_FILE"
+
 if [ -x "$ROOT/bin/scan-fix-commits.sh" ]; then
   "$ROOT/bin/scan-fix-commits.sh" "$STATE" "$REPOS_ROOT/dino-english-ios" "$REPOS_ROOT/dino-english-android" \
     "${CRASH_REPORT_FIX_SCAN_DAYS:-90}" > "$FIXMAP_FILE" 2>"$OUT_DIR/fixmap-scan.log" \
