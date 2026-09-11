@@ -1285,7 +1285,9 @@ if [ "$MCP_OK" = 1 ]; then
     #    而缓存「一次抓取永久保留、不清理」——**关闭的 issue 永远留在里面**。
     #    实测：反扫出的 8 条里 6 条在 Crashlytics 已是 CLOSED（8baf564f / 470ed3ef /
     #    85c581ed / fa48b2eb / a34175e5 / ce481263），把它们报成「已修待验」是错的。
-    # ⚠️ 与 ${CRASH_JSON}（本轮 topIssues，只含 OPEN）求交会**少报**——OPEN 但不在 top-N 的
+    # ✅ topIssues 只返回 OPEN（2026-09-11 实测：返回的 4 个 id 中 14 个已知 CLOSED 的一个都没有；
+    #    ⚠️ schema 里没有 state 过滤参数，但实际行为如此——⛔ 别据 schema 推断）。
+    # ⚠️ 求交仍会**少报**——OPEN 但不在 top-N 的
     #    issue 会漏掉（实测 2a800b33 / 26335e5d 就是这种）。⛔ 但告警宁可少报不可多报：
     #    多报会让人去处理已经关掉的问题。真正的修法是按 issue 逐个取 state，见 R4。
     FIXED_PENDING="$(jq -rn --slurpfile m "$FIXMAP_L1" --slurpfile c "$CRASH_JSON" '
