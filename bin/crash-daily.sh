@@ -1275,30 +1275,31 @@ if [ "$MCP_OK" = 1 ]; then
   #    `git log --grep="完整id"` 反查，那只认 **32 位**写法；而团队实际还在用
   #    `Crashlytics <8位>`（Android a4a7ce99）这种形式——于是「代码已修但未发版」常年为 0。
   #    改走确定性反扫（纯 git、不调模型、不走网络），与 L2 台账同一个数据源。
-  #    ⚠️ 反扫失败时回落模型值，⛔ 不静默变 0。
+  # ⛔ **并且必须按 issue 的开关状态过滤**（失效模式 R4）：反扫的输入是事实层缓存，
+  #    而缓存「永久保留不清理」——2026-09-11 实测 24 条里 14 条已 CLOSED，
+  #    其中 6 条被报成「已修待验」。状态由 fetch-issue-states.py 逐个取回（纯确定性，不经模型）。
+  # ⚠️ 状态同步失败时**保持缓存里的原值**，⛔ 不把未知当成 CLOSED——那会让 issue 凭空消失。
+  if [ -f "$ROOT/bin/fetch-issue-states.py" ]; then
+    python3 "$ROOT/bin/fetch-issue-states.py" "$STATE" >&2 || echo "  ⚠️ issue 状态同步失败，沿用缓存里的既有 state" >&2
+  fi
   FIXMAP_L1="$CRASH_DIR/fixmap.json"
   if [ -x "$ROOT/bin/scan-fix-commits.sh" ] \
      && "$ROOT/bin/scan-fix-commits.sh" "$STATE" "$REPOS_ROOT/dino-english-ios" \
         "$REPOS_ROOT/dino-english-android" "${CRASH_REPORT_FIX_SCAN_DAYS:-90}" \
         > "$FIXMAP_L1" 2>"$CRASH_DIR/fixmap-scan.log"; then
-    # ⛔ **必须与本轮 OPEN 集合求交**（2026-09-11 当天订正）。反扫的输入是事实层缓存，
-    #    而缓存「一次抓取永久保留、不清理」——**关闭的 issue 永远留在里面**。
-    #    实测：反扫出的 8 条里 6 条在 Crashlytics 已是 CLOSED（8baf564f / 470ed3ef /
-    #    85c581ed / fa48b2eb / a34175e5 / ce481263），把它们报成「已修待验」是错的。
-    # ✅ topIssues 只返回 OPEN（2026-09-11 实测：返回的 4 个 id 中 14 个已知 CLOSED 的一个都没有；
-    #    ⚠️ schema 里没有 state 过滤参数，但实际行为如此——⛔ 别据 schema 推断）。
-    # ⚠️ 求交仍会**少报**——OPEN 但不在 top-N 的
-    #    issue 会漏掉（实测 2a800b33 / 26335e5d 就是这种）。⛔ 但告警宁可少报不可多报：
-    #    多报会让人去处理已经关掉的问题。真正的修法是按 issue 逐个取 state，见 R4。
-    FIXED_PENDING="$(jq -rn --slurpfile m "$FIXMAP_L1" --slurpfile c "$CRASH_JSON" '
-      ([($c[0].ios // []) + ($c[0].android // [])] | flatten | map(.id)) as $open
-      | [ (($m[0].mapped // {}) | to_entries[])
-          | select(.value.status == "已修待验") | select(.key as $k | $open | index($k)) ]
-      | length' 2>/dev/null || echo 0)"
+    # 只数「有修复提交 且 当前仍 OPEN」的。⚠️ 缓存里没有 state 字段的（同步失败/首轮）
+    # 按**保守**处理：不计入——宁可少报，也不要让人去处理已经关掉的问题。
+    FIXED_PENDING=0
+    while IFS= read -r _fp_id; do
+      [ -n "$_fp_id" ] || continue
+      _fp_state="$(jq -r '.state // ""' "$STATE/issues/$_fp_id.json" 2>/dev/null || true)"
+      if [ "$_fp_state" = "OPEN" ]; then FIXED_PENDING=$((FIXED_PENDING + 1)); fi
+    done < <(jq -r '(.mapped // {}) | to_entries[] | select(.value.status == "已修待验") | .key' "$FIXMAP_L1" 2>/dev/null || true)
   else
     echo "  ⚠️ 修复状态反扫失败，回落模型反查值（详见 fixmap-scan.log）" >&2
     FIXED_PENDING="$(jq -r '[((.ios // []) + (.android // []))[] | select(.fix_commit != null)] | length' "$CRASH_JSON" 2>/dev/null || echo 0)"
   fi
+
   [ "${FIXED_PENDING:-0}" -gt 0 ] 2>/dev/null && add_alert "🔴 ${FIXED_PENDING} 个 issue 代码已修但未发版（全版本口径）"
 fi
 add_alert "$(red_line "崩溃率" "$IOS_RATE_PCT" "$AND_RATE_PCT" "$CRASH_RATE_RED" "$CRASH_RATE_YELLOW" "%")"

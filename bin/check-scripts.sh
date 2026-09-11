@@ -42,7 +42,12 @@ for f in sorted(pathlib.Path(sys.argv[1]).rglob('*.sh')):
             bad = 1
 sys.exit(bad)
 PY
-python3 -c "import ast; ast.parse(open('$SELF_DIR/md2docx.py').read())" 2>/dev/null || { echo "❌ md2docx.py 语法"; rc=1; }
+# ⚠️ 扫 bin/ 下**所有** .py，不写死文件名——2026-09-11 新增 fetch-issue-states.py 时
+# 才发现这条只盯着 md2docx.py 一个文件（与第 1 项「必须递归」同一类遗漏）。
+while IFS= read -r _py; do
+  python3 -c "import ast,sys; ast.parse(open(sys.argv[1]).read())" "$_py" 2>/dev/null \
+    || { echo "❌ Python 语法: ${_py#"$SELF_DIR"/}"; rc=1; }
+done < <(find "$SELF_DIR" -name '*.py' -type f | sort)
 
 # ── 3. 依赖方向 lint（change crash-perf-functional-core，design D5）───────────
 # bash 没有编译器，这是「内层不知道外层」这条依赖规则在这门语言里**唯一能落地的强制形式**。
