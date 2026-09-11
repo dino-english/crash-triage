@@ -145,6 +145,22 @@ h_assert_contains "$PROMPT" "intervalStartTime" "⛔ prompt 必须要求显式�
 h_assert_contains "$PROMPT" "以下 2 个 issue" "候选数不被超期记录挤掉"
 _teardown
 
+echo "── 壳层：强制重抓与 pageSize 必须进 prompt ──"
+_setup
+STUB_MODE=ok
+OUT="$(CRASH_REPORT_FORCE_REFETCH=1 _run)"; RC=$?
+PROMPT="$(cat "$TMP/out/prompt.txt" 2>/dev/null || echo)"
+h_assert_eq "0" "$RC" "⛔ 非零退出即说明脚本被 set -e 打断（`[ ] && VAR=` 那类写法）"
+h_assert_contains "$PROMPT" "本轮是否强制重抓：是" "强制重抓给模型的是结论不是变量对照"
+h_assert_contains "$PROMPT" "pageSize" "pageSize 要求在 prompt 里"
+_teardown
+_setup
+OUT="$(_run)"; RC=$?
+PROMPT="$(cat "$TMP/out/prompt.txt" 2>/dev/null || echo)"
+h_assert_eq "0" "$RC" "⛔ 不强制时同样不得被 set -e 打断"
+h_assert_contains "$PROMPT" "本轮是否强制重抓：否" "不强制时如实写「否」"
+_teardown
+
 echo "── 壳层：无欠账时不加子句 ──"
 _setup
 printf '{"events_count_last_seen":3,"events":[{"e":1}],"window_days":7,"last_synced":"2026-09-01T00:00:00Z"}\n' \

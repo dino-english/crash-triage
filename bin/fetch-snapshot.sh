@@ -31,6 +31,12 @@ STATE="${CRASH_REPORT_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/crash-tri
 ISSUES_DIR="$STATE/issues"
 mkdir -p "$ISSUES_DIR"
 FORCE_REFETCH="${CRASH_REPORT_FORCE_REFETCH:-0}"
+# ⛔ 给模型看的是**结论**不是变量对照：原文写「CRASH_REPORT_FORCE_REFETCH=1 为 1」，
+#    2026-09-11 实测模型收到了却照样报「命中·跳过」，强制重抓形同虚设——
+#    而卡片告警里「用 CRASH_REPORT_FORCE_REFETCH=1 重跑可补齐」正是靠它，等于开了张空头支票。
+FORCE_REFETCH_WORD=否
+# ⛔ 必须写 if：`[ … ] && VAR=值` 在不成立时整条返回 1，set -e 下当场终止脚本（F31 同类）。
+if [ "$FORCE_REFETCH" = 1 ]; then FORCE_REFETCH_WORD=是; fi
 
 # 观测字段的落盘由本脚本负责，不再交给模型（change crash-fact-cache-deterministic-records）。
 # shellcheck disable=SC1091
@@ -107,13 +113,13 @@ FACT_CACHE_POLICY="事实层缓存（${ISSUES_DIR}/<32位id>.json，一 issue �
 对每一个 issue 执行**两个独立判定**，不要把它们挤在一起：
 
 【判定一：要不要抓取事件明细】——只决定是否调用 crashlytics_list_events（省的是真钱）
-  - 强制重抓：若环境要求 CRASH_REPORT_FORCE_REFETCH=${FORCE_REFETCH} 为 1，直接全量抓取。
+⛔ **只要本判定的结论是「抓」，调 crashlytics_list_events 就必须显式传 `pageSize`（取 50）**——
+它的**默认值是 1**，不传就只回一条，事实层永远攒不出样本量，台账/周报的
+「✅钻取确认（采样 n=…）」也就永远是 n=1。2026-09-10 实测：同一批 issue 不传共抓到 24 条，
+传 pageSize=50 抓到 185 条。⚠️ 全量、增量、强制重抓**三条路径都适用**。
+  - **本轮是否强制重抓：${FORCE_REFETCH_WORD}**。为「是」时忽略下面所有计数比较，对每个 issue 都全量抓取。
   - 先用 Read 工具读 ${ISSUES_DIR}/<该 issue 完整 32 位 id>.json。
     - 文件不存在 → 全量抓取，事件按 ${FACT_FIELDS} 等原始字段保存
-      ⛔ 调 crashlytics_list_events **必须显式传 pageSize**（取 50）——
-      它的**默认值是 1**，不传就只回一条，事实层永远攒不出样本量，
-      台账/周报的「✅钻取确认（采样 n=…）」也就永远是 n=1。2026-09-10 实测：
-      同一批 issue 不传 pageSize 共抓到 24 条，传 pageSize=50 抓到 185 条。
       （尤其 threads 按原样存文本块，不要假设能拆成帧数组）。
     - 线上计数 **大于** 文件里的 events_count_last_seen → 只抓这次返回的事件，
       按唯一标识（无唯一 id 时用时间戳+blameFrame 组合）与已有 events 数组合并去重，
