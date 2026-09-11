@@ -11,7 +11,7 @@
 ⛔ 不经模型：直接 spawn MCP server 说 JSON-RPC。状态是确定性事实，
 交给模型只会多一层不可信的转述（见记忆 measure-before-inferring）。
 """
-import json, pathlib, subprocess, sys, re
+import json, pathlib, subprocess, sys, re, time
 
 APPS = {"ios": "1:465344775452:ios:610bc2f8ea0750fff466d9",
         "android": "1:465344775452:android:2c546b57b0176325f466d9"}
@@ -44,13 +44,21 @@ class MCP:
                 return m
 
     def state(self, app_id, issue_id):
-        self.n += 1
-        self._send({"jsonrpc": "2.0", "id": self.n, "method": "tools/call", "params": {
-            "name": "crashlytics_get_issue",
-            "arguments": {"appId": app_id, "issueId": issue_id}}})
-        txt = json.dumps(self._recv(self.n), ensure_ascii=False)
-        m = re.search(r"state:\s*\|?\s*\\n?\s*([A-Z]+)", txt) or re.search(r'"state"\s*:\s*"([A-Z]+)"', txt)
-        return m.group(1) if m else None
+        """⚠️ 带退避重试：这个 API **会瞬时报错**（2026-09-11 实测 24 条里 3 条失败，
+        单独重试全部成功）。记忆 raw-mcp-call 记过「429 很常见，30s/60s 退避两轮即过」。
+        ⛔ 不重试的代价是静默少报——无 state 的记录按保守规则不计入「已修待验」。"""
+        for delay in (0, 10, 30):
+            if delay:
+                time.sleep(delay)
+            self.n += 1
+            self._send({"jsonrpc": "2.0", "id": self.n, "method": "tools/call", "params": {
+                "name": "crashlytics_get_issue",
+                "arguments": {"appId": app_id, "issueId": issue_id}}})
+            txt = json.dumps(self._recv(self.n), ensure_ascii=False)
+            m = re.search(r"state:\s*\|?\s*\\n?\s*([A-Z]+)", txt) or re.search(r'"state"\s*:\s*"([A-Z]+)"', txt)
+            if m:
+                return m.group(1)
+        return None
 
     def close(self):
         self.p.terminate()
@@ -68,6 +76,7 @@ def main():
         return 0
     mcp = MCP(cmd)
     ok = failed = 0
+    failed_ids = []
     counts = {}
     for f in files:
         try:
@@ -79,6 +88,7 @@ def main():
         if not st:
             # ⛔ 取不到就**保持原值**：把未知写成 CLOSED 会让 issue 从台账上凭空消失
             failed += 1
+            failed_ids.append((rec.get("id") or f.stem)[:8])
             continue
         rec["state"] = st
         rec["state_synced"] = __import__("datetime").datetime.now(__import__("datetime").timezone.utc) \
@@ -88,7 +98,9 @@ def main():
         ok += 1
     mcp.close()
     summary = " · ".join(f"{k} {v}" for k, v in sorted(counts.items()))
-    print(f"  issue 状态同步：{ok} 条（{summary}）" + (f" · ⚠️ 失败 {failed} 条" if failed else ""), file=sys.stderr)
+    # ⚠️ 失败必须报出**是哪几条**：只给个数没法诊断，而「无 state → 不计入」是静默少报。
+    tail = f" · ⚠️ 失败 {failed} 条（{', '.join(failed_ids)}）" if failed else ""
+    print(f"  issue 状态同步：{ok} 条（{summary}）{tail}", file=sys.stderr)
     return 0
 
 
