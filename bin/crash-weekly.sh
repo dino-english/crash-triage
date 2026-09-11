@@ -171,9 +171,14 @@ LEDGER_DIR="$STATE/ledger"
 LEDGER_LOCAL="$LEDGER_DIR/LEDGER.md"
 mkdir -p "$LEDGER_DIR"
 FIXMAP_FILE="$OUT_DIR/fixmap.json"
+# ⚠️ 回溯窗口 2026-09-11 从 14 天改为 90 天。同一份仓库同一天实测：
+#    14 天命中 2 条，90 天命中 **8 条**（其中 2 条是「修了仍在」）——
+#    14 天藏掉了四分之三。⛔ 「已修待验」讲的是「代码改了还没验证到位」，
+#    这个状态天然跨多个 sprint，用两周窗口去框它是口径错配。
+#    90 与事实层的 89 天保留期同量级，git log 的成本可忽略。
 if [ -x "$ROOT/bin/scan-fix-commits.sh" ]; then
   "$ROOT/bin/scan-fix-commits.sh" "$STATE" "$REPOS_ROOT/dino-english-ios" "$REPOS_ROOT/dino-english-android" \
-    "${CRASH_REPORT_FIX_SCAN_DAYS:-14}" > "$FIXMAP_FILE" 2>"$OUT_DIR/fixmap-scan.log" \
+    "${CRASH_REPORT_FIX_SCAN_DAYS:-90}" > "$FIXMAP_FILE" 2>"$OUT_DIR/fixmap-scan.log" \
     || echo "  ⚠️ 修复状态反扫失败，台账现状表本轮不更新处置状态列（详见 fixmap-scan.log）"
 else
   echo '{"mapped":{},"ambiguous":[],"platform_unavailable":["ios","android"]}' > "$FIXMAP_FILE"
