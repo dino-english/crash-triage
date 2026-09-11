@@ -311,8 +311,12 @@ is_fixed_resource_key() { # $1=台账键 → 0=永久固定（该提示回填）
   esac
 }
 # 有固定 doc_id 就覆盖，没有就新建；新建时把 URL 打出来，方便一次性钉成固定文档
-publish_doc() { # $1=本地文件 $2=标题 $3=doc_id(可空) $4=文件夹 token(可空) $5=台账键 $6=格式 → stdout: URL
-  local fixed="${3:-}" key="${5:-}" fmt="${6:-markdown}" u=""
+publish_doc() { # $1=本地文件 $2=标题 $3=doc_id(可空) $4=文件夹 token(可空) $5=台账键 $6=格式 $7=回退文件(可空) → stdout: URL
+  # ⛔ $7 必须传：XML 建档失败时回退的是**另一个文件**（markdown），不是同一个 .xml。
+  #    2026-09-11 生产实测：XML 建档被拒后，回退把同一个 .xml 喂给 drive +import，
+  #    lark-cli 报 `unsupported file extension: xml`——两层全挂，日报当天没有文档。
+  #    注释里「失败回退 markdown 导入（保证链路不因排版功能挂掉）」写了一年，从来没实现过。
+  local fixed="${3:-}" key="${5:-}" fmt="${6:-markdown}" fb="${7:-$1}" u=""
   # 显式配置 > 自动记忆 > 新建
   [ -z "$fixed" ] && [ -n "$key" ] && fixed="$(doc_get "$key")"
   if [ -n "$fixed" ]; then
@@ -321,7 +325,7 @@ publish_doc() { # $1=本地文件 $2=标题 $3=doc_id(可空) $4=文件夹 token
     echo "  ↳ 覆盖不成（文档可能已被删），重建一份" >&2
   fi
   if [ "$fmt" = xml ]; then u="$(create_xml_doc "$1" "${4:-}" || true)"; fi
-  [ -n "$u" ] || u="$(import_doc "$1" "$2" "${4:-}")"
+  [ -n "$u" ] || u="$(import_doc "$fb" "$2" "${4:-}")"
   [ -n "$key" ] && doc_put "$key" "$u"
   # 判据与完整理由见上方 is_fixed_resource_key（⛔ 别把 case 抄回这里，夹具靠抽取它来测）。
   # ⚠️ 用 if 而不是 `f "$key" && note_new …`：条件位上的命令豁免于 set -e 与 ERR trap。
@@ -597,7 +601,7 @@ case "$TYPE" in
     # 日报每天一份（跨天留痕），但**同一天重跑覆盖当天那份**——否则每次重试都多一份同名文档
     DAILY_XML="$(m create_doc.xml_file)"
     if [ -s "$DAILY_XML" ]; then
-      URL_DAILY="$(publish_doc "$DAILY_XML" "$DAILY_TITLE" "" "$F_DAILY" "daily-$DAY" xml)"
+      URL_DAILY="$(publish_doc "$DAILY_XML" "$DAILY_TITLE" "" "$F_DAILY" "daily-$DAY" xml "$DAILY_FILE")"
     else
       URL_DAILY="$(publish_doc "$DAILY_FILE" "$DAILY_TITLE" "" "$F_DAILY" "daily-$DAY")"
     fi
@@ -610,7 +614,7 @@ case "$TYPE" in
       fill "$INDEX_FILE" "__DAILY_URL__"  "$URL_DAILY"
       INDEX_XML="$(m index_doc.xml_file)"
       if [ -s "$INDEX_XML" ]; then
-        URL_INDEX="$(publish_doc "$INDEX_XML" "$INDEX_TITLE" "$(m index_doc.doc_id)" "$F_ROOT" index xml)"
+        URL_INDEX="$(publish_doc "$INDEX_XML" "$INDEX_TITLE" "$(m index_doc.doc_id)" "$F_ROOT" index xml "$INDEX_FILE")"
       else
         URL_INDEX="$(publish_doc "$INDEX_FILE" "$INDEX_TITLE" "$(m index_doc.doc_id)" "$F_ROOT" index)"
       fi
@@ -645,7 +649,7 @@ case "$TYPE" in
     if [ "$WEEKLY_QUIET" = "0" ]; then
       REPORT_XML="$(m create_doc.xml_file)"
       if [ -s "$REPORT_XML" ]; then
-        URL_REPORT="$(publish_doc "$REPORT_XML" "$REPORT_TITLE" "" "$F_WEEKLY" "weekly-$DAY" xml)"
+        URL_REPORT="$(publish_doc "$REPORT_XML" "$REPORT_TITLE" "" "$F_WEEKLY" "weekly-$DAY" xml "$REPORT_FILE")"
       elif [ -n "$REPORT_FILE" ]; then
         URL_REPORT="$(publish_doc "$REPORT_FILE" "$REPORT_TITLE" "" "$F_WEEKLY" "weekly-$DAY")"
       fi
