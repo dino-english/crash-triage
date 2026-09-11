@@ -27,7 +27,7 @@ and_out="$(h_run _mcp_split android "$T/crash.json" "$T/snap.json" "$SEEN")"
 ios_out="$(h_run _mcp_split ios     "$T/crash.json" "$T/snap.json" "$SEEN")"
 
 h_assert_eq "1	1" "$and_out" "① Android：真新增 1（bbbbbbbb）+ 回归 1（63db031f）⛔ 旧实现在这里报「新增 2」"
-h_assert_eq "1	0" "$ios_out" "② iOS：上一轮 ids 为空 → aaaaaaaa 算新增，基准里也没有"
+h_assert_eq "-1	-1" "$ios_out" "② ⛔ 上一轮 ids 为空 → 整体弃权（-1），不得当成一批新增（2026-09-06 真发过「新增 7」的假告警）"
 
 # ⛔ 基准里有 = 回归，⛔ 不得再计进新增（这是本夹具的核心）
 SEEN_ALL='{"63db031f3bf602113122abbf58f9de46":"2026-08-19","bbbbbbbb111122223333444455556666":"2026-08-20"}'
@@ -40,12 +40,12 @@ h_assert_eq "2	0" "$(h_run _mcp_split android "$T/crash.json" "$T/snap.json" '{}
 
 # ⚠️ 上一轮 ids 缺失（字段不存在）不得当成「全是新增之外的东西」——按空列表处理
 echo '{"day":"2026-09-06"}' > "$T/snap-bare.json"
-h_assert_eq "2	1" "$(h_run _mcp_split android "$T/crash.json" "$T/snap-bare.json" "$SEEN")" \
-  "⑤ 上一轮无 *_ids 字段 → 三条全算「不在上一轮」，再按基准分列"
+h_assert_eq "-1	-1" "$(h_run _mcp_split android "$T/crash.json" "$T/snap-bare.json" "$SEEN")" \
+  "⑤ ⛔ 上一轮无 *_ids 字段 → 同样弃权：没有基准就没有「新增」可言"
 
 # ⛔ 平台不得串
-h_assert_eq "0	1" "$(h_run _mcp_split ios "$T/crash.json" "$T/snap-bare.json" '{"aaaaaaaa111122223333444455556666":"2026-08-01"}')" \
-  "⑥ iOS 单独判定，不受 android 条目影响"
+h_assert_eq "-1	-1" "$(h_run _mcp_split ios "$T/crash.json" "$T/snap-bare.json" '{"aaaaaaaa111122223333444455556666":"2026-08-01"}')" \
+  "⑥ iOS 单独判定，不受 android 条目影响（该轮 ios 无上一轮数据 → 弃权）"
 
 # MCP 抓取失败（/dev/null）：⛔ 必须安静返回 0/0，不得触发 ERR trap
 h_assert_eq "0	0" "$(h_run _mcp_split android /dev/null "$T/snap.json" "$SEEN")" "⑦ 本轮无数据 → 0/0"

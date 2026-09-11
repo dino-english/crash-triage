@@ -1202,11 +1202,20 @@ fi
 # 摘要行三态拆分：「不在上一轮 OPEN 列表里」有两种情形，⛔ 不得挤进同一个「新增」——
 # 回归意味着修复失效或场景重现，与全新问题的处置方式不同（spec crash-perf-issue-lifecycle）。
 # 全部走参数、不读全局，便于夹具直接抽出来跑。
-_mcp_split() { # $1=平台键(ios|android) $2=本轮 MCP json $3=上一轮快照 $4=基准 json → "新增数<TAB>回归数"
+# ⛔ **上一轮为空时必须整体弃权**（2026-09-11 实测订正）。
+#    2026-09-05 那轮 MCP 取数全空（iOS 0 类 · Android 0 类），于是 09-06 的摘要行把
+#    一整批老 issue 报成「🔴 Android 新增 7 个」——对照 09-04 的快照，62f88f39 / efa47ac9
+#    那天就在。⚠️ 「上一轮没数据」与「上一轮确实没有这些 issue」是两件事，
+#    用同一套判据处理就会把取数故障渲染成一批假新增。假告警比漏报更贵。
+#    返回 `-1\t-1` 表示「判不了」，由调用方改打说明文案，⛔ 不得当成 0。
+_mcp_split() { # $1=平台键(ios|android) $2=本轮 MCP json $3=上一轮快照 $4=基准 json → "新增数<TAB>回归数"（-1 = 判不了）
   jq -rn --slurpfile c "$2" --slurpfile s "$3" --argjson seen "$4" --arg k "$1" '
     ($s[0][($k + "_ids")] // []) as $prev
-    | [ ($c[0][$k] // [])[] | select(.id as $i | $prev | index($i) | not) ] as $gone
-    | "\(([$gone[] | select($seen[.id] == null)] | length))\t\(([$gone[] | select($seen[.id] != null)] | length))"
+    | if ($prev | length) == 0 then "-1\t-1"
+      else
+        [ ($c[0][$k] // [])[] | select(.id as $i | $prev | index($i) | not) ] as $gone
+        | "\(([$gone[] | select($seen[.id] == null)] | length))\t\(([$gone[] | select($seen[.id] != null)] | length))"
+      end
   ' 2>/dev/null || printf '0\t0'
 }
 
@@ -1236,7 +1245,10 @@ AND_ANR_RATE="$(mv_ and "$AND_ALERT_VER" errtype.anr_rate_pct)"   # iOS 无 ANR�
 if [ "$MCP_OK" = 1 ] && [ -f "$SNAP" ]; then
   IFS=$'\t' read -r NEW_IOS REGR_IOS <<< "$(_mcp_split ios     "$CRASH_JSON" "$SNAP" "$MCP_SEEN_JSON")"
   IFS=$'\t' read -r NEW_AND REGR_AND <<< "$(_mcp_split android "$CRASH_JSON" "$SNAP" "$MCP_SEEN_JSON")"
-  if [ "$MCP_LIFECYCLE_OK" != 1 ]; then
+  # ⛔ 「判不了」优先于其余分支：上一轮快照为空时任何分列都是假的。
+  if [ "${NEW_IOS:-0}" = "-1" ] || [ "${NEW_AND:-0}" = "-1" ]; then
+    add_alert "ℹ️ 本轮不分列 issue 变化：上一轮快照为空（多半是那轮 MCP 取数失败），⛔ 与之相比得出的「新增」全是假的"
+  elif [ "$MCP_LIFECYCLE_OK" != 1 ]; then
     # ⛔ 基准未建立时**不得分列**：此时「不在基准里」对所有 issue 都成立，分列出来的
     #    「新增」是伪判定。按 L2 同一套做法，本轮只报合计并说明分不了（1789add 那条原则：
     #    判定对象要看「答不答得了」）。下一轮起基准就有了。
