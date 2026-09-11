@@ -290,6 +290,22 @@ preflight_model_endpoint() {
 preflight_model_endpoint
 
 # allowedTools 必须逐个列只读工具（理由见上方注释块）。
+# 把 stream-json 还原成人读的正文：跑批日志里要的是模型说了什么，不是几百行 JSON。
+# ⛔ **不得只保留正文**：工具调用（调了哪个 MCP 工具、传了什么参数）只存在于 .jsonl 里，
+#    而那正是 2026-09-08 登记为「根因不可判定的唯一阻塞」（失效模式 F45 ③）的东西——
+#    2026-09-11 想判「模型到底有没有抓事件」，卡的就是它。
+# ⚠️ 桩/旧版 CLI 可能不吐 JSON：解析不出内容时**原样透出**，不要把日志吃空。
+agent_text() {
+  local line out any=0
+  while IFS= read -r line; do
+    out="$(printf '%s' "$line" | jq -r 'select(.type=="assistant") | (.message.content[]? | select(.type=="text") | .text) // empty' 2>/dev/null || true)"
+    if [ -n "$out" ]; then printf '%s\n' "$out"; any=1; continue; fi
+    # 非 JSON（桩、旧版、报错行）原样透出
+    if ! printf '%s' "$line" | jq -e . >/dev/null 2>&1; then printf '%s\n' "$line"; any=1; fi
+  done
+  return 0
+}
+
 run_agent() { # $1=尝试序号；输出同时进 stdout（跑批日志）与 agent-<N>.log（事后排查）
   "${AGENT_CMD:-claude}" -p "$PROMPT" \
     --add-dir "$AND_REPO" \
@@ -303,8 +319,12 @@ run_agent() { # $1=尝试序号；输出同时进 stdout（跑批日志）与 ag
       "Read" "Write" "Grep" "Glob" \
       "Bash(git log:*)" "Bash(git -C:*)" "Bash(git branch:*)" "Bash(git show:*)" \
     --mcp-config "$ROOT/bin/mcp.json" \
-    < /dev/null 2>&1 | tee "${AGENT_LOG_BASE}-$1.log"
+    --output-format stream-json --verbose \
+    < /dev/null 2>&1 | tee "${AGENT_LOG_BASE}-$1.jsonl" | agent_text
+  # ⚠️ 退出码取**第一段**（模型本身），不是 tee/agent_text 的——pipefail 下最左的失败会胜出，
+  #    但 agent_text 恒 0，所以这里拿到的就是模型的码。
 }
+
 
 # 产物齐全才算成功；full 模式多要一份 report.md（与 crash-weekly.sh 的判据对齐）。
 artifacts_ok() {

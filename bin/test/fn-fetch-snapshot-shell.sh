@@ -153,6 +153,13 @@ PROMPT="$(cat "$TMP/out/prompt.txt" 2>/dev/null || echo)"
 h_assert_eq "0" "$RC" "⛔ 非零退出即说明脚本被 set -e 打断（`[ ] && VAR=` 那类写法）"
 h_assert_contains "$PROMPT" "本轮是否强制重抓：是" "强制重抓给模型的是结论不是变量对照"
 h_assert_contains "$PROMPT" "pageSize" "pageSize 要求在 prompt 里"
+# ⛔ 工具级日志必须落盘：没有它就判不出「模型到底调没调 list_events」（F45 ③）
+if ls "$TMP/out"/agent-*.jsonl >/dev/null 2>&1; then
+  echo "  ✅ 模型原始事件流已落盘（agent-*.jsonl）"; H_PASS=$((H_PASS+1))
+else
+  echo "  ❌ 没有 agent-*.jsonl——工具调用不可见，根因永远判不了"; H_FAIL=$((H_FAIL+1))
+fi
+h_assert_contains "$OUT" "事实层" "⚠️ 桩的纯文本仍要透出到跑批日志（不得被 JSON 解析吃空）"
 _teardown
 _setup
 OUT="$(_run)"; RC=$?
