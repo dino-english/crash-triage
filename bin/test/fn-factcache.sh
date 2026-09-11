@@ -50,6 +50,24 @@ h_assert_eq "2026-09-08 00:00 UTC" "$(jq -r '.latest_event' "$TMP/$ID.json")" "�
 # ⑤ 正常路径必须安静（F30：乱报的检查会训练人忽略告警）
 h_assert_silent fc_record "$TMP" "$ID" android "标题" 9 1 "" 7 "$NOW" ""
 
+echo "── fn-factcache：事件体积收口 ──"
+B="$(mktemp -d)"
+# 造一条 40 个 breadcrumb 的事件
+python3 - "$B/x.json" <<'PYJ'
+import json,sys
+json.dump({"id":"x","events":[{"eventId":"1","blameFrame":{"f":"keep"},
+  "breadcrumbs":[{"i":i} for i in range(40)]}]}, open(sys.argv[1],"w"))
+PYJ
+h_run fc_trim_events "$B/x.json" 15 >/dev/null
+h_assert_eq "15" "$(jq -r '.events[0].breadcrumbs | length' "$B/x.json")" "breadcrumbs 收到 15 条"
+h_assert_eq "39" "$(jq -r '.events[0].breadcrumbs[-1].i' "$B/x.json")" "⛔ 保留的是**最后** 15 条（崩溃前最近的才有诊断价值）"
+h_assert_eq "keep" "$(jq -r '.events[0].blameFrame.f' "$B/x.json")" "⛔ 不动 blameFrame——分析真正吃的就是它"
+h_assert_eq "1" "$(jq -r '.events | length' "$B/x.json")" "⛔ 不砍事件条数（样本量是证据等级的依据）"
+h_run fc_trim_events "$B/x.json" 15 >/dev/null
+h_assert_eq "15" "$(jq -r '.events[0].breadcrumbs | length' "$B/x.json")" "幂等：再跑一次不变"
+h_assert_silent fc_trim_events "$B/x.json" 15
+rm -rf "$B"
+
 echo "── fn-factcache：断言判时刻不判日期（三向）──"
 # ⛔ 这三条是本 change 的核心回归。改之前第三条（本地时间标 Z）在 L1 场景**会误过**。
 A_DIR="$(mktemp -d)"; mkdir -p "$A_DIR/issues"

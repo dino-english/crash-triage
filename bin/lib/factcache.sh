@@ -83,3 +83,26 @@ fc_unfetchable() { # $1=事实层文件 $2=窗口起点(YYYY-MM-DD) → rc 0=抓
   if [[ "$le" < "$2" ]]; then return 0; fi
   return 1
 }
+
+# ── 事件体积收口（2026-09-11）────────────────────────────────────
+# ⛔ 起因是我自己造的生产问题：09-10 用 pageSize=50 补齐后，单个事实层文件涨到 295 KB，
+#    **超过模型 Read 的 25k token 上限**（实测报错 `File content (93665 tokens) exceeds
+#    maximum allowed tokens (25000)`）——而 L2 周报的钻取分析正要读这些文件，
+#    读不了就退回「聚合推断」，等于把补齐换来的证据等级又赔回去。
+# ⚠️ 只砍 breadcrumbs：实测单条事件 3.2 KB 里它占 2.3 KB，而分析真正吃的 blameFrame 只有 74 字节。
+#    ⛔ 不砍事件条数——样本量是「✅钻取确认（采样 n=…）」的依据，砍了就回到 n=1 的老问题。
+fc_trim_events() { # $1=事实层文件 $2=每条事件保留的 breadcrumb 条数（默认 15）→ 有改动才重写
+  local f="$1" keep="${2:-15}" tmp
+  [ -s "$f" ] || return 0
+  tmp="$(mktemp)" || return 1
+  # breadcrumbs 按时间顺序，**保留最后 N 条**——崩溃前最近发生的才有诊断价值。
+  if jq --argjson k "$keep" '
+       (.events // []) |= map(
+         if (.breadcrumbs? | type) == "array" and (.breadcrumbs | length) > $k
+         then .breadcrumbs |= .[-$k:] else . end)' "$f" > "$tmp" 2>/dev/null; then
+    if cmp -s "$tmp" "$f"; then rm -f "$tmp"; else mv "$tmp" "$f"; fi
+  else
+    rm -f "$tmp"; return 1
+  fi
+  return 0
+}

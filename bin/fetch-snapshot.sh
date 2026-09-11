@@ -371,6 +371,9 @@ if [ -s "$OUT_DIR/snapshot.json" ]; then
     _frc=0
     fc_record "$ISSUES_DIR" "$_fid" "$_fplat" "$_ftitle" "$_fev" "$_fus" "" \
               "$FACT_WINDOW_DAYS" "$FC_NOW" "" || _frc=$?
+    # ⛔ 体积收口放在回写之后、无条件执行：模型写多少 breadcrumbs 不受我们控制，
+    #    唯一可靠的收口点是 shell（2026-09-11 生产已有 2 个文件超出模型 Read 上限）。
+    fc_trim_events "$ISSUES_DIR/$_fid.json" "${CRASH_REPORT_BREADCRUMB_KEEP:-15}" || true
     case "$_frc" in
       0) FC_WROTE=$((FC_WROTE + 1));;
       3) FC_MISSING=$((FC_MISSING + 1));;
