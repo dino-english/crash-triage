@@ -35,7 +35,11 @@ FORCE_REFETCH="${CRASH_REPORT_FORCE_REFETCH:-0}"
 #    2026-09-11 实测模型收到了却照样报「命中·跳过」，强制重抓形同虚设——
 #    而卡片告警里「用 CRASH_REPORT_FORCE_REFETCH=1 重跑可补齐」正是靠它，等于开了张空头支票。
 FORCE_REFETCH_WORD=否
-# ⛔ 必须写 if：`[ … ] && VAR=值` 在不成立时整条返回 1，set -e 下当场终止脚本（F31 同类）。
+# ⚠️ **已订正的过期结论**（2026-09-11 实测）：此处曾注为「`[ … ] && VAR=值` 在条件不成立时
+#    会触发 set -e 当场终止脚本」——**不成立**。bash 对 `&&` 列表有豁免（除最后一个命令外），
+#    实测 `set -euo pipefail; [ "0" = 1 ] && V=是; echo 到这里` 正常执行、rc=0。
+#    真正会被 set -e 打断的是**裸命令**失败（如 `grep -q` 无匹配，F31 说的是这一种）。
+#    写成 if 只是为了与本文件其余分支统一、读起来更直白，不是因为 && 有危险。
 if [ "$FORCE_REFETCH" = 1 ]; then FORCE_REFETCH_WORD=是; fi
 
 # 观测字段的落盘由本脚本负责，不再交给模型（change crash-fact-cache-deterministic-records）。

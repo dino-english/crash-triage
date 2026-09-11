@@ -203,8 +203,11 @@ while IFS=$'\t' read -r iid plat title events users latest; do
   #    FORCE_REFETCH=1 且文件已存在时，旧实现走的就是 jq -n 全量覆盖这条路。
   #    ⛔ 不要图省事直接改成「一律就地更新」——那会顺手改掉强制重抓的行为，
   #    属于本 change 之外的改动（该行为是否合理另议，见 findings.md）。
-  # ⛔ 必须写成 if：`[ … ] && rm` 在 verdict != new 时整条返回 1，
-  #    在 set -e 下会当场终止脚本（F31 同类）。
+  # ⚠️ **已订正的过期结论**（2026-09-11 实测）：此处曾注为「`[ … ] && VAR=值` 在条件不成立时
+  #    会触发 set -e 当场终止脚本」——**不成立**。bash 对 `&&` 列表有豁免（除最后一个命令外），
+  #    实测 `set -euo pipefail; [ "0" = 1 ] && V=是; echo 到这里` 正常执行、rc=0。
+  #    真正会被 set -e 打断的是**裸命令**失败（如 `grep -q` 无匹配，F31 说的是这一种）。
+  #    写成 if 只是为了与本文件其余分支统一、读起来更直白，不是因为 && 有危险。
   if [ "$verdict" = new ]; then rm -f "$f"; fi
   _rc=0
   fc_record "$ISSUES_DIR" "$iid" "$plat" "$title" "$events" "$users" "$latest" \
