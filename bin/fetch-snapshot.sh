@@ -118,10 +118,10 @@ FACT_CACHE_POLICY="事实层缓存（${ISSUES_DIR}/<32位id>.json，一 issue �
 
 【判定一：要不要抓取事件明细】——只决定是否调用 crashlytics_list_events（省的是真钱）
 ⛔ **只要本判定的结论是「抓」，调 crashlytics_list_events 就必须显式传两个参数**：
-`pageSize`（取 50）与时间区间 `filter.intervalStartTime="${BACKFILL_FROM}"` / `filter.intervalEndTime`=当前时刻。
+\`pageSize\`（取 50）与时间区间 \`filter.intervalStartTime="${BACKFILL_FROM}"\` / \`filter.intervalEndTime\`=当前时刻。
 ⚠️ **区间不传只查最近 7 天**（API 默认），事件早于 7 天的 issue 会一无所获、看起来像「抓不到」——
 2026-09-11 实测：强制重抓的 4 次调用全都没传区间。区间上限是 90 天保留期。
-`pageSize` 的理由——
+\`pageSize\` 的理由——
 它的**默认值是 1**，不传就只回一条，事实层永远攒不出样本量，台账/周报的
 「✅钻取确认（采样 n=…）」也就永远是 n=1。2026-09-10 实测：同一批 issue 不传共抓到 24 条，
 传 pageSize=50 抓到 185 条。⚠️ 全量、增量、强制重抓**三条路径都适用**。
