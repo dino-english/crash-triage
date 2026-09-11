@@ -1271,7 +1271,21 @@ fi
 # ⚠️ 双端都统计是安全的：**非 null 在两端都无歧义**（提交信息里确实引用了这个 issue），
 #    有歧义的是 null——而 null 本来就不进这个计数。渲染侧对 null 的两端差异另有处理。
 if [ "$MCP_OK" = 1 ]; then
-  FIXED_PENDING="$(jq -r '[((.ios // []) + (.android // []))[] | select(.fix_commit != null)] | length' "$CRASH_JSON" 2>/dev/null || echo 0)"
+  # ⛔ **不再信模型的 fix_commit**（2026-09-11 订正）。L1 的 prompt 让模型用
+  #    `git log --grep="完整id"` 反查，那只认 **32 位**写法；而团队实际还在用
+  #    `Crashlytics <8位>`（Android a4a7ce99）这种形式——于是「代码已修但未发版」常年为 0。
+  #    改走确定性反扫（纯 git、不调模型、不走网络），与 L2 台账同一个数据源。
+  #    ⚠️ 反扫失败时回落模型值，⛔ 不静默变 0。
+  FIXMAP_L1="$CRASH_DIR/fixmap.json"
+  if [ -x "$ROOT/bin/scan-fix-commits.sh" ] \
+     && "$ROOT/bin/scan-fix-commits.sh" "$STATE" "$REPOS_ROOT/dino-english-ios" \
+        "$REPOS_ROOT/dino-english-android" "${CRASH_REPORT_FIX_SCAN_DAYS:-90}" \
+        > "$FIXMAP_L1" 2>"$CRASH_DIR/fixmap-scan.log"; then
+    FIXED_PENDING="$(jq -r '[(.mapped // {}) | to_entries[] | select(.value.status == "已修待验")] | length' "$FIXMAP_L1" 2>/dev/null || echo 0)"
+  else
+    echo "  ⚠️ 修复状态反扫失败，回落模型反查值（详见 fixmap-scan.log）" >&2
+    FIXED_PENDING="$(jq -r '[((.ios // []) + (.android // []))[] | select(.fix_commit != null)] | length' "$CRASH_JSON" 2>/dev/null || echo 0)"
+  fi
   [ "${FIXED_PENDING:-0}" -gt 0 ] 2>/dev/null && add_alert "🔴 ${FIXED_PENDING} 个 issue 代码已修但未发版（全版本口径）"
 fi
 add_alert "$(red_line "崩溃率" "$IOS_RATE_PCT" "$AND_RATE_PCT" "$CRASH_RATE_RED" "$CRASH_RATE_YELLOW" "%")"
