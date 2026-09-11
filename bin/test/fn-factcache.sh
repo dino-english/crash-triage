@@ -50,22 +50,27 @@ h_assert_eq "2026-09-08 00:00 UTC" "$(jq -r '.latest_event' "$TMP/$ID.json")" "�
 # ⑤ 正常路径必须安静（F30：乱报的检查会训练人忽略告警）
 h_assert_silent fc_record "$TMP" "$ID" android "标题" 9 1 "" 7 "$NOW" ""
 
-echo "── fn-factcache：事件体积收口 ──"
+echo "── fn-factcache：事件体积收口（分层保留）──"
 B="$(mktemp -d)"
-# 造一条 40 个 breadcrumb 的事件
 python3 - "$B/x.json" <<'PYJ'
 import json,sys
-json.dump({"id":"x","events":[{"eventId":"1","blameFrame":{"f":"keep"},
-  "breadcrumbs":[{"i":i} for i in range(40)]}]}, open(sys.argv[1],"w"))
+# 20 条事件，breadcrumbs 是**字符串**（与线上一致，⛔ 不是数组——按数组写的版本一个字节没减）
+evs=[{"eventId":str(i),"eventTime":f"2026-09-{i+1:02d}T00:00:00Z","version":{"v":"1.6.0"},
+      "blameFrame":{"f":"keep"},"issue":{"id":"abc"},"device":{"m":"x"*200},
+      "breadcrumbs":"L"*3000} for i in range(20)]
+json.dump({"id":"x","events":evs}, open(sys.argv[1],"w"))
 PYJ
-h_run fc_trim_events "$B/x.json" 15 >/dev/null
-h_assert_eq "15" "$(jq -r '.events[0].breadcrumbs | length' "$B/x.json")" "breadcrumbs 收到 15 条"
-h_assert_eq "39" "$(jq -r '.events[0].breadcrumbs[-1].i' "$B/x.json")" "⛔ 保留的是**最后** 15 条（崩溃前最近的才有诊断价值）"
-h_assert_eq "keep" "$(jq -r '.events[0].blameFrame.f' "$B/x.json")" "⛔ 不动 blameFrame——分析真正吃的就是它"
-h_assert_eq "1" "$(jq -r '.events | length' "$B/x.json")" "⛔ 不砍事件条数（样本量是证据等级的依据）"
-h_run fc_trim_events "$B/x.json" 15 >/dev/null
-h_assert_eq "15" "$(jq -r '.events[0].breadcrumbs | length' "$B/x.json")" "幂等：再跑一次不变"
-h_assert_silent fc_trim_events "$B/x.json" 15
+SZ0=$(wc -c < "$B/x.json")
+h_run fc_trim_events "$B/x.json" 5 >/dev/null
+h_assert_eq "20" "$(jq -r '.events | length' "$B/x.json")" "⛔ 事件条数一条不减（采样 n 靠它）"
+h_assert_eq "5"  "$(jq -r '[.events[]|select(.breadcrumbs)] | length' "$B/x.json")" "只有最近 5 条留 breadcrumbs"
+h_assert_eq "20" "$(jq -r '[.events[]|select(.blameFrame)] | length' "$B/x.json")" "⛔ blameFrame 全保留——分析真正吃的是它"
+h_assert_eq "20" "$(jq -r '[.events[]|select(.eventTime)] | length' "$B/x.json")" "⛔ eventTime 全保留（scan-fix-commits 读它）"
+h_assert_eq "2026-09-20T00:00:00Z" "$(jq -r '.events[-1].eventTime' "$B/x.json")" "留细节的是**最近**那几条，不是最早的"
+if [ "$(wc -c < "$B/x.json")" -lt "$SZ0" ]; then echo "  ✅ 体积真的降了（$SZ0 → $(wc -c < "$B/x.json")）"; H_PASS=$((H_PASS+1));
+else echo "  ❌ 体积没变——多半又把 breadcrumbs 当成数组了"; H_FAIL=$((H_FAIL+1)); fi
+h_run fc_trim_events "$B/x.json" 5 >/dev/null
+h_assert_eq "5" "$(jq -r '[.events[]|select(.breadcrumbs)] | length' "$B/x.json")" "幂等：再跑一次不变"
 rm -rf "$B"
 
 echo "── fn-factcache：断言判时刻不判日期（三向）──"

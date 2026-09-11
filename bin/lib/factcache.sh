@@ -91,15 +91,22 @@ fc_unfetchable() { # $1=事实层文件 $2=窗口起点(YYYY-MM-DD) → rc 0=抓
 #    读不了就退回「聚合推断」，等于把补齐换来的证据等级又赔回去。
 # ⚠️ 只砍 breadcrumbs：实测单条事件 3.2 KB 里它占 2.3 KB，而分析真正吃的 blameFrame 只有 74 字节。
 #    ⛔ 不砍事件条数——样本量是「✅钻取确认（采样 n=…）」的依据，砍了就回到 n=1 的老问题。
-fc_trim_events() { # $1=事实层文件 $2=每条事件保留的 breadcrumb 条数（默认 15）→ 有改动才重写
-  local f="$1" keep="${2:-15}" tmp
+fc_trim_events() { # $1=事实层文件 $2=保留全量细节的最近事件数（默认 10）→ 有改动才重写
+  local f="$1" keep="${2:-10}" tmp
   [ -s "$f" ] || return 0
   tmp="$(mktemp)" || return 1
-  # breadcrumbs 按时间顺序，**保留最后 N 条**——崩溃前最近发生的才有诊断价值。
+  # ⚠️ breadcrumbs 是**字符串**不是数组（2026-09-11 实测：我先按数组写过一版，一个字节没减）。
+  #    它占整个文件的 70%（190KB / 274KB，平均每条 3.8KB）。
+  # 分层保留：最近 $keep 条事件留全量细节；更早的只留「样本量与版本分布」用得到的几项。
+  # ⛔ 事件条数一条不减——「✅钻取确认（采样 n=…）」的 n 靠它。
   if jq --argjson k "$keep" '
-       (.events // []) |= map(
-         if (.breadcrumbs? | type) == "array" and (.breadcrumbs | length) > $k
-         then .breadcrumbs |= .[-$k:] else . end)' "$f" > "$tmp" 2>/dev/null; then
+       def compact: {eventId, eventTime, version, blameFrame, issue: (.issue.id? // .issue)};
+       (.events // []) |= (
+         sort_by(.eventTime // "") as $s
+         | ($s | length) as $n
+         | (if $n > $k then $n - $k else 0 end) as $cut
+         | [ $s[0:$cut][] | compact ] + $s[$cut:]
+       )' "$f" > "$tmp" 2>/dev/null; then
     if cmp -s "$tmp" "$f"; then rm -f "$tmp"; else mv "$tmp" "$f"; fi
   else
     rm -f "$tmp"; return 1
