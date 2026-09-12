@@ -45,46 +45,30 @@ cat "$STATE/health-daily.json"   # L1 健康（L2 是 health.json）；日志在
 ### 跨进程边界（8 个子脚本：`export`+argv 进、文件+退出码出）
 
 - ⚠️ **函数不跨进程**——核心层在每个子脚本里各自 source
-- ⚠️ **普通赋值不跨进程，必须 `export`**（`REPOS_ROOT` 漏过：周报整跑失败、日报误判「超时」）
+- ⚠️ **普通赋值不跨进程，必须 `export`**，⛔ 且子进程有自己的默认值、漏 export 不报错（`REPOS_ROOT` 漏过：周报整跑失败、日报误判「超时」）
 - ⚠️ **退出码是唯一失败信号**，「成功」判据必须两端一致——判据不一致是静默降级的温床
 
 ### 数据口径 → docs/CLAUDE-架构与数据口径.md
 
-37 条口径规则**已全部下沉**到那份文档（2026-09-04，为压回 8,000 常驻预算；下沉前
-逐条核过覆盖，三条只在这里有过的已原文搬入）。改数字、改查询、改渲染前必须读它——
-走 `.claude/skills/crash-metric-change/`，它第 1 步就是强制读「数据口径 / 版本口径 /
-阈值与告警」三节。
+37 条口径规则**已全部下沉**到那份文档（2026-09-04，下沉前逐条核过覆盖）。改数字、改查询、
+改渲染前必须读它——走 `.claude/skills/crash-metric-change/`，它第 1 步就强制读
+「数据口径 / 版本口径 / 阈值与告警」三节。
 
 只留一条在这里，因为它咬的是**不改指标的人**：
 
 - ⛔ **bq 的 CSV 一律走 `csv2tsv`（bin/lib/csv.sh），禁 `awk -F,` / `cut -d,`**——Apple 机型标识符自带逗号（`iPad7,11`），裸切会把 1 个事件渲染成 11 且无告警
 
+### 告警 · 卡片 · 投递 · lark-cli → 各自的 docs
 
-### 告警
+原本在这里的 20 条已全部下沉（2026-09-12，逐条核过覆盖，docs 侧比这里更详细）：
+阈值与摘要行、缺分析可见、卡片文案与台账同步 → **架构与数据口径**；列宽只能实发验证、
+新检查双向测试 → **测试盲区**；失败原因与补救建议、两个渲染定义点（F29 / F30 / F35）
+→ **失效模式登记**；单调度器、open_id、`path.env` / `local.env` → **部署与运维**；
+lark-cli → **lark-cli勘误**。动手改这四块前，按下表读对应那份。
 
-- ⚠️ 小样本回退判据是 `adopt.sessions`（**1 天窗口**），不是崩溃段 7 天窗——看错窗口会把「会不会告警」判反
-- ⛔ **回退必须在摘要行说明**——换了判定对象不说，比漏报更难排查
-- ⛔ 不要说「首次纳入统计必然红档」——会不会红取决于判定对象是谁（由 1 天窗小样本回退决定）
-- ⚠️ 缺分析必须在卡片可见（「⚠️ 本周无深度分析 — 原因」）——缺分析与无异常是两件事
-- ⛔ **失败原因从日志读真实 API 错误码，不按退出码猜**（429 额度 / 529 过载 / 5xx / 4xx），识别不出时**明说识别不出**。⚠️ 写死「常见原因：额度耗尽」会把 529 说成额度问题，让人干等
-- ⛔ **补救建议必须由产生原因的那个分支一并赋值**，不得在渲染处写死——否则会出现「原因：显式跳过」+「建议：等额度恢复」这种自相矛盾
-- ⛔ **新增的检查/告警不得走触发 ERR trap 的路径**，且加完要**双向测试**（违规样本变红 + 全量代码不误报）。⚠️ `grep` 无匹配返回 1，放进 `set -e` 路径必须 `|| true`
+只留一条在这里，因为它咬的是每个写 bash 的人：
 
-### 卡片与文档
-
-- ⚠️ 表格列名不能叫 `ios`/`android`（CardKit 平台变体键，**只有真发一张才炸**）——用 `c1`…`c4`
-- ⚠️ 卡片单元格用短文案 `CELL_BREVITY=1`（如「⚠️ 停更」），完整文案留文档——长文案把列宽撑爆截断
-- ⚠️ **卡片列宽只有真发一张才验得出**（DRY RUN 与 markdown 预览都验不出，盲区④）——单发 `$STATE/publish/card.json` 到开发机 `ou_` 私聊即可，不必重跑链路；⛔ 压缩时不得砍掉有记录的口径标注（样本量括注、两端窗口标注）
-- ⚠️ 卡片表格的列集合有**两个定义点**（`build_card_table` 出 JSON、`md_table` 出预览与日报 md）——改一处会让**预览与实发不一致**（F35）
-- ⚠️ `ROW_DEFS` 拆 CARD(6)/DOC(13)：显式 3 处 + 别名 3 处；⚠️ 改名时别名处**不报错只静默拿空集合**——拆共享常量前先 `grep -n` 数清调用点
-
-### 投递、台账与部署
-
-- ⚠️ **只能有一个调度器在跑**——launchd 与 Hermes cron 双跑会并发写坏 `docs.json`/归档
-- ⚠️ open_id 按 app 隔离（跨 app 报 `99992361`）；群 `oc_` 是租户级
-- ⚠️ **两台机器的 `docs.json` 指向同一份索引页与台账**——开发机投 `ou_` 时自动跳过归档/索引/台账同步
-- ⚠️ `path.env` 是探测缓存不是配置（旧名 `config.env` 已废）；真配置写 `local.env`，人手写、脚本永不覆写
-- 台账同步全程**不得 `overwrite`**；block ID 不可跨轮缓存——见 docs/CLAUDE-架构与数据口径.md「台账口径」
+- ⛔ `grep` 无匹配返回 1，放进 `set -e` 路径必须 `|| true`；⚠️ 新增的检查/告警**不得走触发 ERR trap 的路径**，且加完要**双向测试**（违规样本变红 + 全量代码不误报）
 
 ### 模型与环境
 
@@ -93,20 +77,13 @@ cat "$STATE/health-daily.json"   # L1 健康（L2 是 health.json）；日志在
 - **L2 根因边界**：崩溃段可出但必须标「未经复核」并区分「✅钻取确认」与「⚠️聚合推断」；**性能段不出根因**；台账只收结论
 - **`claude -p` 必须 `< /dev/null`**，`--mcp-config` 显式传
 - **`repos/` 只 fetch 不 checkout / reset**（自动探测指向同级工作仓库）
-- **`REPOS_ROOT` 必须 export**（子进程有自己的默认值）
 - **`unset PYTHONPATH`**（两入口开头）——Hermes 注入的 3.12 包树让 bq/gcloud 导入即崩，报错文案误导为「重装 SDK」
 - **超时用 `run_with_timeout`**，`set -e` 下 `|| RC=$?` 捕获 124 才走降级
 - **L2 平稳周照常投递**——`send=false` 只由 DRY RUN 产生，与本周有无变化无关
 
-### lark-cli（全文见 docs/CLAUDE-lark-cli勘误.md）
-
-- profile 用 appId `cli_aaf7b44ddeb8de14`；`docs +fetch` 正文在 `.data.document.content`
-- ⛔ 其值是 **DocxXML 文本不是块结构 JSON**——拿 block id 要解析 XML 标签，`jq` 找块永远落空
-- `--content @绝对路径` 被拒（用 stdin）；source `deliver.sh` 片段会覆盖调用方 `ROOT`/`STATE`
-
 ## 规格与台账
 
-OpenSpec 驱动（`openspec/`，schema `spec-driven`）。**动手改脚本前先看对应 change 的 design/tasks**——阈值、卡片结构、staleness 兜底都有记录的理由与取舍。台账由 **L2 独占产出**（change `crash-ledger-l2-ownership`），修复状态由反扫两个业务仓库的 commit message 驱动。⚠️ **两种形式都认**：`[crash:<8位id>]`（最初约定，实测两仓近 90 天各 0 条）与 `Crashlytics[ issue]: <32位id>`（**事实上正在用的**，Android 写在 subject、iOS 写在 body）。⛔ 「Android 无此约定故 `fix_commit` 恒 null」是**已订正的过期结论**——2026-09-01 改扫描器后反扫从 0 条变 6 条。⚠️ 仍要扫**整条 message 不是 subject**（两仓落点不同）。
+OpenSpec 驱动（`openspec/`，schema `spec-driven`）。**动手改脚本前先看对应 change 的 design/tasks**——阈值、卡片结构、staleness 兜底都有记录的理由与取舍。台账由 **L2 独占产出**（change `crash-ledger-l2-ownership`），修复状态由反扫两个业务仓库的 commit message 驱动：⚠️ **两种形式都认**（`[crash:<8位id>]` 与事实上正在用的 `Crashlytics[ issue]: <32位id>`），⚠️ 且要扫**整条 message 不是 subject**。⛔ 「Android 无此约定故 `fix_commit` 恒 null」是**已订正的过期结论**——原委见 docs/CLAUDE-架构与数据口径.md。
 
 ## 按任务继续阅读
 

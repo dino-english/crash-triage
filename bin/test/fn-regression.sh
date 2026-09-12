@@ -83,6 +83,18 @@ out="$(h_run state_text_perf no_version ios 1.5.4 '2026-08-26 06:59 UTC')"
 h_assert_contains "$out" '本轮未取到' '历史有值 + 本轮无 → 判为取数故障'
 h_assert_contains "$out" '2026-08-24' '⚠️ 沿用/未取到文案必须带日期（不然连续多轮失败看不出僵住）'
 
+echo "── 第 4 态：有会话却没有性能数据（2026-09-12）──"
+# ⛔ 与「该版本无数据」不是一回事：前者说明线上有人在跑但它不上报，后者可能只是没放量。
+# 实测起因：iOS 1.7.0（24 设备 / 207 会话 7d）性能表 30 天零行，卡片却只显示「— 无数据」。
+out="$(h_run state_text_perf no_version ios 9.9.9 '2026-09-11 06:59 UTC' 207)"
+h_assert_contains "$out" "有会话" "有会话且无性能数据 → 明说有会话"
+h_assert_absent  "$out" "该版本无数据" "⛔ 不得再渲染成「该版本无数据」"
+h_assert_absent  "$out" "内测" "⛔ 只陈述事实，不写原因（流水线分辨不出是不是 Debug 包）"
+out="$(h_run state_text_perf no_version ios 9.9.9 '2026-09-11 06:59 UTC' 0)"
+h_assert_contains "$out" "无数据" "会话数为 0 → 回落原第 3 态文案"
+out="$(h_run state_text_perf no_version ios 9.9.9 '2026-09-11 06:59 UTC')"
+h_assert_contains "$out" "无数据" "⚠️ 不传会话数（旧调用形态）→ 行为不变"
+
 # ③ ⛔ 本轮取到 0：0 是慢帧/冻结/错误率的合法值，MUST NOT 被当成缺失
 HIST_ARR='[{"day":"2026-08-25","and":{"1.5.4":{"start_p50_1d":null,"start_p95_1d":null,"slow_pct_1d":null,"frozen_pct_1d":"0.0","net_err_pct_1d":null}}}]'
 h_assert_eq "2026-08-25" "$(h_run hist_perf_last_day and 1.5.4)" '⛔ 冻结率 0.0 是有值——真值性判断会把它读成 null'

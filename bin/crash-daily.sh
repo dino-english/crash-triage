@@ -980,8 +980,10 @@ perf_eta_of() { # $1=plat $2=版本 → YYYY-MM-DD 或空
   if printf '%s\n' "$tail" | grep -qx -- "$2"; then day_shift "$DAY" 1; else printf ''; fi
 }
 # 第 3 态细分后的性能单元格文案。前两态原样委托给 state_text()，⛔ 一字不改。
-state_text_perf() { # $1=state $2=plat $3=版本 $4=表整体最新时间戳
-  local d eta
+state_text_perf() { # $1=state $2=plat $3=版本 $4=表整体最新时间戳 $5=该版本会话数（可空）
+  # ⛔ 会话数**由调用方传入**，不在函数里读 ${TMP}：那会把文件依赖塞进一个本可纯测的函数，
+  #    夹具里 $TMP 未设时 set -u 直接触发 ERR trap（2026-09-12 当场踩到）。
+  local d eta sess="${5:-}"
   if [ "$1" != no_version ]; then state_text "$1" "$4"; return 0; fi
   d="$(hist_perf_last_day "$2" "$3")"
   if [ -n "$d" ]; then
@@ -994,9 +996,20 @@ state_text_perf() { # $1=state $2=plat $3=版本 $4=表整体最新时间戳
   if [ -n "$eta" ]; then
     if [ "$CELL_BREVITY" = 1 ]; then printf -- '— 预计 %s' "${eta:5}"
     else printf -- '— 尚无数据（预计 %s 到位）' "$eta"; fi
-  else
-    state_text no_version "$4"
+    return 0
   fi
+  # ⚠️ 第 4 态（2026-09-12）：**有会话却没有性能数据**。与「该版本无数据」不是一回事——
+  #    前者说明这个版本线上有人在跑、但它不上报性能；后者可能只是还没放量。
+  #    2026-09-11 实测 iOS 1.7.0（24 设备 / 207 会话 7d）性能表 30 天零行，而同量级的
+  #    1.5.2（225 会话）有 591 条——低流量解释不了，读者却只看到一个「— 无数据」。
+  # ⛔ **只陈述事实，不写原因**：流水线从 BigQuery 分辨不出这是不是内部 Debug 包，
+  #    那是推断。原因留给读文档的人查（脚注/登记表），⚠️ 写进单元格就成了断言。
+  if [ -n "$sess" ] && [ "$sess" != "0" ] && [ "$sess" != "null" ]; then
+    if [ "$CELL_BREVITY" = 1 ]; then printf -- '— 有会话无性能'
+    else printf -- '— 有会话（%s）但无性能数据' "$sess"; fi
+    return 0
+  fi
+  state_text no_version "$4"
 }
 
 spark_hist() { jq -r --arg p "$1" --arg v "$2" --arg k "$3" --argjson n "$SPARK_DAYS" \
@@ -1387,7 +1400,7 @@ cell() { # $1=plat $2=版本 $3=行键
       crash_free|crash_count|crash_rate|crash_affected|anr_count|anr_rate|nonfatal_count|crash_brief|anr_brief) printf '%s' "$(state_text "$st" "$([ "$1" = ios ] && echo "$IOS_CRASH_MAX" || echo "$AND_CRASH_MAX")")";;
       sessions) printf '—';;
       # ⚠️ 只有性能各行走细分（C 组）；上面崩溃各行仍走原 state_text，判据与文案一字未动
-      *) printf '%s' "$(state_text_perf "$st" "$1" "$2" "$([ "$1" = ios ] && echo "$IOS_PERF_MAX" || echo "$AND_PERF_MAX")")";;
+      *) printf '%s' "$(state_text_perf "$st" "$1" "$2" "$([ "$1" = ios ] && echo "$IOS_PERF_MAX" || echo "$AND_PERF_MAX")" "$(mv_ "$1" "$2" adopt.sessions)")";;
     esac
     return 0
   fi
@@ -1433,7 +1446,7 @@ cell() { # $1=plat $2=版本 $3=行键
     anr_brief)      if [ "$1" = ios ]; then
                       if [ "$(mv_ "$1" "$2" perf.state)" != "ok" ]; then
                         # iOS 的「卡死信号」装的是冻结帧率，属性能数据，同样走第 3 态细分
-                        printf '%s' "$(state_text_perf "$(mv_ "$1" "$2" perf.state)" "$1" "$2" "$IOS_PERF_MAX")"
+                        printf '%s' "$(state_text_perf "$(mv_ "$1" "$2" perf.state)" "$1" "$2" "$IOS_PERF_MAX" "$(mv_ "$1" "$2" adopt.sessions)")"
                       else
                         val="$(mv_ "$1" "$2" perf.frozen)"
                         if [ -z "$val" ]; then printf -- '— 样本不足'

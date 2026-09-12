@@ -21,6 +21,9 @@ JSON
 #    新实现必须反过来——渲染 fixmap 的三条、完全不碰这条。
 DIFF='{"ios":{"total":0,"events":0,"fixed_pending":[{"id":"deadbeef000011112222333344445555","title":"⛔不该出现的快照标题","fix_commit":"ffffffff"}]},"android":{"total":0,"events":0,"fixed_pending":[]}}'
 
+# ⚠️ _fix_rows 自 2026-09-11 起读 ${ISSUE_STATES_JSON}（issue 开关状态）。夹具必须显式给出，
+#    否则 set -u 下每次调用都打一行 unbound 噪音——它不让夹具变红，但会淹掉真错误。
+ISSUE_STATES_JSON='{}'
 h_load "$ROOT/bin/crash-weekly.sh" _fix_rows
 
 ios0="$(h_run _fix_rows ios 0)"
