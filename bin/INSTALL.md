@@ -10,7 +10,7 @@
 
 | | L1 每日数据日报 | L2 每周变化播报 |
 |---|---|---|
-| 定时 | 每天 07:00 | 每周一 06:30 |
+| 定时 | 每天 08:30 | 每周一 05:30 |
 | 数据源 | BigQuery（crashlytics / sessions / performance） | Firebase MCP（topIssues 等） |
 | 用不用模型 | **否**，纯 `bq` + `jq` + `lark-cli` | 是，仅用于取数与 git 反查 |
 | 碰不碰仓库 | 只读 clone（git 反查修复状态） | 只读 clone |
@@ -210,7 +210,7 @@ bash "$CRASH_REPORT_ROOT/bin/crash-daily.sh"         # L1（BigQuery 表就绪�
 
 | | 任务 | 默认时间 | cron 表达式 | job 名 |
 |---|---|---|---|---|
-| **L1** | 每日数据日报 | **每天 07:00** | `0 7 * * *` | `crash-daily` |
+| **L1** | 每日数据日报 | **每天 08:30** | `30 8 * * *` | `crash-daily` |
 | **L2** | 每周变化播报 | **每周一 05:30** | `30 5 * * 1` | `crash-weekly` |
 
 时间是**本机时区**（Asia/Kuala_Lumpur），不是 UTC。改时间：
@@ -226,12 +226,16 @@ hermes cron edit <job_id> --schedule '0 10 * * *'       # 改完立即生效，�
 - **赶在上班前出结果**：大家 09:00 左右到，07:00 跑完的报告正好在群聊顶端
 - **L2 比 L1 早 90 分钟**：完整 triage 实测跑 **12 分钟以上**（2026-08-07 实测，且中途断连失败过一次）。原定 06:30 与 07:00 的 L1 会重叠，两者都调 lark-cli 会加剧限流——已撞过 429。留 90 分钟余量
 
+> ⚠️ 以上三条是 **L1 定在 07:00 时**的论证。2026-08-27 L1 已改到 **08:30**（`30 8 * * *`），
+> 理由与上面无关：perf 分区约 23:54 UTC 才落地，07:00(+08) = 23:00 UTC 系统性地早 54 分钟，
+> 白白多背一天滞后。原委与「必须在新代码之后改」的顺序约束见 docs/CLAUDE-部署与运维.md。
+
 ### 7.3 安装
 
 `bin/install.sh` 的第 6 步已自动生成 wrapper 并提示注册命令。手工注册：
 
 ```bash
-hermes cron create '0 7 * * *'  --name crash-daily  --no-agent --script crash-daily.sh
+hermes cron create '30 8 * * *' --name crash-daily  --no-agent --script crash-daily.sh
 hermes cron create '30 5 * * 1' --name crash-weekly --no-agent --script crash-weekly.sh
 ```
 
@@ -250,7 +254,7 @@ hermes cron list | grep -A3 crash
 hermes cron edit <job_id> --schedule '55 16 * * *'      # 改到 5 分钟后
 sleep 300 && sqlite3 ~/.hermes/cron/executions.db \
   "SELECT status,claimed_at,finished_at,error FROM executions ORDER BY claimed_at DESC LIMIT 1;"
-hermes cron edit <job_id> --schedule '0 7 * * *'        # 还原
+hermes cron edit <job_id> --schedule '30 8 * * *'       # 还原
 ```
 
 > ⚠️ **不要用 `hermes cron run <id>` 判断成败**：它**总是打印 `Ran now: failed`**，与实际结果无关（Hermes 后台派发路径漏设 `execution_success`，见 `tools/cronjob_tools.py:1347` vs `hermes_cli/cron.py:476`）。以 `executions.db` 的 status 与 `$STATE/logs/` 的脚本日志为准。

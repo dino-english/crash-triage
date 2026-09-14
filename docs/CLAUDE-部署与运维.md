@@ -149,7 +149,7 @@ scp dino911@dino911s-mac-mini:.local/state/crash-triage/report-index.jsonl repor
 
 | | L1 日报 `crash-daily.sh` | L2 周报 `crash-weekly.sh` |
 |---|---|---|
-| 定时 | 每天 07:00（Hermes cron） | 每周一 05:30（Hermes cron） |
+| 定时 | 每天 08:30（Hermes cron） | 每周一 05:30（Hermes cron） |
 | 数据源 | BigQuery（crashlytics / sessions / performance） | BigQuery（`fetch-snapshot-bq.sh`）+ git 反查 |
 | 用不用模型 | 否（`fetch-snapshot.sh` light 对照除外） | **数据层否**；仅分析层（`report.md` 根因/方案）用模型，失败只降级 |
 | 职责 | **高频数据呈现**，不做分析、不碰结论 | **分析与结论沉淀** |
