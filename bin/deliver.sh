@@ -538,7 +538,7 @@ sync_ledger() { # $1=doc_id  $2=FATAL现状表文件  $3=表格式(xml|markdown)
   if [ "$DRY_RUN" = "1" ]; then
     echo "  [dry-run] 台账同步：定位「${LEDGER_HEADING_TEXT}」→ block_replace 现状表（找不到则 bootstrap append 全文）" >&2
     [ -s "$nf_file" ] && echo "  [dry-run] 台账同步：定位「${LEDGER_NF_HEADING_TEXT}」→ block_replace NON_FATAL 现状表" >&2
-    [ -s "$tl_file" ] && echo "  [dry-run] 台账同步：append 时间线增量（$(wc -l < "$tl_file" | tr -d ' ') 行）" >&2
+    [ -s "$tl_file" ] && echo "  [dry-run] 台账同步：append 时间线增量（$(grep -c . "$tl_file" || true) 行）" >&2
     return 0
   fi
 
@@ -578,12 +578,16 @@ sync_ledger() { # $1=doc_id  $2=FATAL现状表文件  $3=表格式(xml|markdown)
   fi
 
   # ── append 时间线增量（只增不改；无增量则跳过，不产生空 append）────────
+  # ⚠️ 行数用 `grep -c .` 数**非空行**，⛔ 不用 `wc -l`：源文件带尾部换行，`wc -l` 会比实际
+  #    追加的条数多 1（2026-09-14 实测报「16 行」而飞书里是 15 条）。这行日志是「追加了几行」
+  #    的唯一判据，差 1 会在下次排查时把人引向「丢了一行」。
+  # ⛔ grep -c 无匹配返回 1，`|| true` 不可省（F31）。
   if [ -s "$tl_file" ]; then
     _tlout=""
     if _tlout="$(cd "$(dirname "$tl_file")" && "${LK[@]}" docs +update --command append \
           --doc "$doc" --doc-format "$tl_fmt" --content "@$(basename "$tl_file")" \
           --as "$LARK_AS" --format json 2>&1)" && _lark_write_ok "$_tlout"; then
-      echo "  ✅ 台账变更时间线已追加（$(wc -l < "$tl_file" | tr -d ' ') 行）" >&2
+      echo "  ✅ 台账变更时间线已追加（$(grep -c . "$tl_file" || true) 行）" >&2
     else
       echo "  ⚠️ 台账时间线追加失败或未生效（现状表已同步成功，不影响主链路）" >&2
       echo "     $(printf '%s' "$_tlout" | json_only | jq -rc '.data.result // "?", (.data.warnings // [])' 2>/dev/null | tr '\n' ' ' || true)" >&2
