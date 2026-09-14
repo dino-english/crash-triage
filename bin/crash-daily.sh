@@ -1156,7 +1156,7 @@ alert_ver() { # $1=plat键 → "判定版本<TAB>回退原因"（未回退时原
   s1="$(mv_ "$1" "$v1" adopt.sessions)"
   # ⚠️ 会话数取不到时不按条件①回退（宁可维持既有行为，也不因取数失败静默换判定对象）
   if [ -n "$s1" ] && [ "$(awk -v a="$s1" -v b="$SAMPLE_SESSION_MIN" 'BEGIN{print (a<b)}')" = "1" ]; then
-    printf '%s\t会话数 %s < %s，比率无法分辨阈值' "$top" "$s1" "$SAMPLE_SESSION_MIN"; return 0
+    printf '%s\t最新版 %s 会话数 %s < %s，比率无法分辨阈值' "$top" "$v1" "$s1" "$SAMPLE_SESSION_MIN"; return 0
   fi
   pst="$(mv_ "$1" "$v1" perf.state)"
   # ⚠️ 同理，perf.state 取不到（空）时不回退——只在**明确不是 ok** 时才判定为无性能数据。
