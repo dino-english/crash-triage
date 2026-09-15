@@ -99,7 +99,15 @@ dSYM 且构建不报错），但两层 xcconfig 仍注入 `SWIFT_ACTIVE_COMPILAT
 拆到单个 session 看：946 行里只有 **5 个不同的 `event_timestamp`**，却有 **945 个不同的
 `received_timestamp`**，全部落在 05:05:16 → 06:13:22 这 68 分钟内——**5 个真实事件被重投了约 190 次**。
 
-**不是我们重复拉取**，是 Firebase → BigQuery 投递侧的重试风暴。⛔ 而且**不是一次性的，在升级**：
+**不是我们重复拉取**（全仓对 BigQuery 只有 `bq query` 一个动作，`check-scripts.sh` 第 5 项还把它
+收口在 `bin/lib/bq.sh`；没有 `bq load` / `--destination_table` / `INSERT`，**SELECT 造不出行**）。
+⚠️ 重投发生在**上报侧**，不在导出层：每个副本都有**独立的 `received_timestamp`**，
+说明它是被 Firebase 重复**接收**的，而不是导出时复制的。单 session 的 945 次重投，
+相邻间隔均值 4.32 秒、**最大恰好 10.000 秒**——这是一条带 10 秒上限的重试退避曲线。
+09-02 一天波及 **272 台设备、8 个版本**，`received_timestamp` 一直拖到 **09-04 00:51**
+（事件发生在 09-02，重投持续了两天）。⚠️ 到底是设备端 SDK 收不到 ack 一直重发、
+还是 Firebase 接收层重复入账，**BigQuery 里判不出**——但两者都在我们上游。
+⛔ 而且**不是一次性的，在升级**：
 
 | 日期 | 放大倍数 |
 | --- | --- |
