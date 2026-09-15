@@ -100,6 +100,11 @@ DAYS="${CRASH_REPORT_DAYS:-1}"
 # 性能窗口（D3）：firebase_performance 每日批量同步滞后约 2 天，DAYS=1 在每天 07:00 跑必然空表，
 # 故独立放宽到 3 天；版本放量保持 DAYS（sessions REALTIME 为实时活源）。
 PERF_DAYS="${CRASH_REPORT_PERF_DAYS:-3}"
+# 性能表回看窗：只用来回答「该版本在表里最后一次有行是哪天」（F49），⛔ 不参与任何取数口径。
+# 30 天是实测选的：表按**摄取时间**分区（`type: DAY` 无 `field`），`DATE(event_timestamp)`
+# 过滤本来就不裁分区——2026-09-15 dry-run 实测 3 天与 30 天扫描字节**完全相同**
+# （iOS 38,648,835 / Android 84,224,220），耗时同为 2.1~2.6s。拉长回看是免费的。
+PERF_LOOKBACK_DAYS="${CRASH_REPORT_PERF_LOOKBACK_DAYS:-30}"
 # 崩溃窗口与 MCP topIssues 的 Firebase 默认 7 天窗一致；日窗口太窄（iOS 样本极少）会误读为「无崩溃」。
 CRASH_DAYS="${CRASH_REPORT_CRASH_DAYS:-7}"
 # 前后台摘要行的出现条件（change crash-fg-bg-split）：样本 >= N 且后台占比 >= P%。
@@ -384,23 +389,28 @@ table_max() { [ -n "$1" ] || { echo ""; return 0; }
 # ⚠️ 同一条查询顺带把**残日**（> LCD，即那 7 小时未完整的尾巴）也数出来：
 #    某版本「窗口内 0 行、残日有行」⇒ 明天 LCD 推进一天它就有数据了，第 3 态细分据此说出
 #    「预计 X 到位」而不是空口承诺（change crash-data-completeness C 组）。多一列不多一条查询。
-perf_version_scan() { # $1=perf表 $2=起日 $3=止日(LCD) → TSV「版本 窗口内行数 残日行数」
-  [ -n "$1" ] && [ -n "$2" ] && [ -n "$3" ] || { echo ""; return 0; }
+# ⚠️ 第 4 列 last_day（2026-09-15，F49）：该版本在**回看窗内**最后一次有行的日期。
+#    只把 WHERE 下界从窗口起日放宽到 $4，in_win / in_tail 仍按 $2/$3 算——⛔ 两列的值一个不变
+#    （2026-09-15 实测：两端前 3 列逐字节一致）。⛔ 回看窗内一行都没有的版本**不出现在结果里**，
+#    正是第 4 态需要的判据：查不到 = 它真的从不上报。
+perf_version_scan() { # $1=perf表 $2=起日 $3=止日(LCD) $4=回看起日 → TSV「版本 窗口内 残日 表内末次有行日」
+  [ -n "$1" ] && [ -n "$2" ] && [ -n "$3" ] && [ -n "$4" ] || { echo ""; return 0; }
   local _t0=$SECONDS _rc=0 _out
   _out="$(bqq csv "SELECT app_display_version AS v,
       COUNTIF(DATE(event_timestamp) BETWEEN '$2' AND '$3') AS in_win,
-      COUNTIF(DATE(event_timestamp) > '$3') AS in_tail
-    FROM \`$1\` WHERE DATE(event_timestamp) >= '$2' GROUP BY v" \
+      COUNTIF(DATE(event_timestamp) > '$3') AS in_tail,
+      MAX(DATE(event_timestamp)) AS last_day
+    FROM \`$1\` WHERE DATE(event_timestamp) >= '$4' GROUP BY v" \
     | tail -n +2 | grep -v '^$' | csv2tsv || true)" || _rc=$?
-  audit query perf_version_scan "$(jq -cn --arg tbl "$1" --arg from "$2" --arg to "$3" \
+  audit query perf_version_scan "$(jq -cn --arg tbl "$1" --arg from "$2" --arg to "$3" --arg look "$4" \
     --argjson n "$(printf '%s' "$_out" | grep -c . || true)" --argjson secs "$((SECONDS - _t0))" --argjson rc "$_rc" \
-    '{fn:"perf_version_scan",table:$tbl,from:$from,to:$to,versions:$n,secs:$secs,rc:$rc}')"
+    '{fn:"perf_version_scan",table:$tbl,from:$from,to:$to,lookback_from:$look,versions:$n,secs:$secs,rc:$rc}')"
   [ -n "$_out" ] && printf '%s\n' "$_out"
   return 0
 }
 # 从 perf_version_scan 的 TSV 里取某一列非零的版本清单。⛔ 走 csv2tsv 的产物按制表符切，
 #    不裸 cut -d,（版本号不含逗号，但这条纪律不因「这次碰巧安全」而破例）。
-scan_vers() { # $1=scan TSV $2=列号(2=窗口内 3=残日) → 该列 > 0 的版本
+scan_vers() { # $1=scan TSV $2=列号(2=窗口内 3=残日；4=末次有行日，不走本函数) → 该列 > 0 的版本
   printf '%s\n' "$1" | awk -F'\t' -v c="$2" 'NF>=3 && $c+0 > 0 {print $1}' || true
 }
 
@@ -623,8 +633,9 @@ AND_NEWEST="$(pick_newest "$AND_VER_CSV" "$VERSION_COUNT")"
 IOS_TOPSESS="$(pick_top_sessions "$IOS_VER_CSV")"
 AND_TOPSESS="$(pick_top_sessions "$AND_VER_CSV")"
 # 性能段分域选版（B 组）：候选 = 该端最新 4 版（想要 2 + 回溯上限 2，design D4）
-IOS_PERF_SCAN="$(perf_version_scan "$IOS_PERF_TBL" "$PERF_WIN_START" "$PERF_LCD")"
-AND_PERF_SCAN="$(perf_version_scan "$AND_PERF_TBL" "$PERF_WIN_START" "$PERF_LCD")"
+PERF_LOOKBACK_START="$(day_shift "$PERF_LCD" "-$((PERF_LOOKBACK_DAYS - 1))")"
+IOS_PERF_SCAN="$(perf_version_scan "$IOS_PERF_TBL" "$PERF_WIN_START" "$PERF_LCD" "$PERF_LOOKBACK_START")"
+AND_PERF_SCAN="$(perf_version_scan "$AND_PERF_TBL" "$PERF_WIN_START" "$PERF_LCD" "$PERF_LOOKBACK_START")"
 IOS_PERF_AVAIL="$(scan_vers "$IOS_PERF_SCAN" 2)"; IOS_PERF_TAIL="$(scan_vers "$IOS_PERF_SCAN" 3)"
 AND_PERF_AVAIL="$(scan_vers "$AND_PERF_SCAN" 2)"; AND_PERF_TAIL="$(scan_vers "$AND_PERF_SCAN" 3)"
 IOS_PERF_VERS="$(pick_versions_perf "$(pick_newest "$IOS_VER_CSV" $((VERSION_COUNT + 2)))" "$IOS_PERF_AVAIL" "$VERSION_COUNT" 2)"
@@ -979,6 +990,14 @@ perf_eta_of() { # $1=plat $2=版本 → YYYY-MM-DD 或空
   local tail; [ "$1" = ios ] && tail="$IOS_PERF_TAIL" || tail="$AND_PERF_TAIL"
   if printf '%s\n' "$tail" | grep -qx -- "$2"; then day_shift "$DAY" 1; else printf ''; fi
 }
+# 该版本在性能表回看窗内最后一次有行的日期（F49）。⛔ 与 hist_perf_last_day() 的区别是命门所在：
+# 那个读 metrics-history.jsonl，即**流水线自己写过的历史**——版本首次进报告时它必然为空，
+# 于是「上报过、只是停了」会被误判成「从不上报」。本函数问的是**表**，不受流水线见闻限制。
+# ⚠️ 读全局 scan 与 perf_eta_of 同族（夹具照样可替换），⛔ 不读 ${TMP}。
+perf_last_day_of() { # $1=plat $2=版本 → YYYY-MM-DD 或空
+  local scan; [ "$1" = ios ] && scan="$IOS_PERF_SCAN" || scan="$AND_PERF_SCAN"
+  printf '%s\n' "$scan" | awk -F'\t' -v v="$2" 'NF>=4 && $1==v {print $4; exit}' || true
+}
 # 第 3 态细分后的性能单元格文案。前两态原样委托给 state_text()，⛔ 一字不改。
 state_text_perf() { # $1=state $2=plat $3=版本 $4=表整体最新时间戳 $5=该版本会话数（可空）
   # ⛔ 会话数**由调用方传入**，不在函数里读 ${TMP}：那会把文件依赖塞进一个本可纯测的函数，
@@ -996,6 +1015,15 @@ state_text_perf() { # $1=state $2=plat $3=版本 $4=表整体最新时间戳 $5=
   if [ -n "$eta" ]; then
     if [ "$CELL_BREVITY" = 1 ]; then printf -- '— 预计 %s' "${eta:5}"
     else printf -- '— 尚无数据（预计 %s 到位）' "$eta"; fi
+    return 0
+  fi
+  # ⚠️ 问表（2026-09-15，F49）：流水线自己没见过这个版本 ≠ 表里没有过。
+  #    ⛔ 必须排在残日分支**之后**——残日有行时「预计 X 到位」比「上次有值」更有用，不能被抢走。
+  #    命中则走与第 2 态**完全相同**的文案：它本就是同一件事（历史有值、本轮没有）。
+  d="$(perf_last_day_of "$2" "$3")"
+  if [ -n "$d" ]; then
+    if [ "$CELL_BREVITY" = 1 ]; then printf '⚠️ 未取到 %s' "${d:5}"
+    else printf '⚠️ 本轮未取到（上次有值 %s）' "$d"; fi
     return 0
   fi
   # ⚠️ 第 4 态（2026-09-12）：**有会话却没有性能数据**。与「该版本无数据」不是一回事——

@@ -63,10 +63,13 @@ h_assert_contains "$(acls '' 9)"                          '未识别'     '⛔ �
 
 
 echo "── 第 3 态细分（C 组：⛔ 0 不得被当成缺失）──"
-h_load "$ROOT/bin/crash-daily.sh" hist_lookup hist_perf_last_day perf_eta_of state_text_perf state_text
+h_load "$ROOT/bin/crash-daily.sh" hist_lookup hist_perf_last_day perf_eta_of perf_last_day_of state_text_perf state_text
 PERF_HIST_KEYS='["start_p50_1d","start_p95_1d","slow_pct_1d","frozen_pct_1d","net_err_pct_1d"]'
 CELL_BREVITY=0
 IOS_PERF_TAIL=""; AND_PERF_TAIL=""; DAY="2026-08-27"
+# ⚠️ 2026-09-15 起 state_text_perf 多问一次表（F49），漏设这两个全局会在 set -u 下触发 ERR trap。
+#    空串 = 「表里也查不到」，正是本节各条既有断言要的前提，⛔ 不改变任何既有判据。
+IOS_PERF_SCAN=""; AND_PERF_SCAN=""
 . "$ROOT/bin/lib/core/format.sh"   # ⛔ 用真的 day_shift，夹具里造个假的等于没测
 
 # ① 全 null：这版从没产出过性能数据 → 不能说「本轮未取到」
