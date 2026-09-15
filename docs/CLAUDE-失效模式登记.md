@@ -14,6 +14,44 @@
 
 ## 一、🔇 无工具可抓（最高风险）
 
+### F47 · 「没有数据」的原因可能整个不在本仓库里
+
+日报性能单元格对 iOS 1.7.0 / 1.8.0 渲染「— 无数据」。读者（和我）第一反应是查取数：
+窗口？版本过滤？导出停更？**全都不是**——那两个版本**不上报性能**。
+
+真因在业务仓的构建配置，**流水线从 BigQuery 一个字节都看不出来**：
+
+- `dino-english-ios/fastlane/build_config.yml` → `channels.adhoc.configuration: Debug`
+  （刻意如此：摇一摇调试菜单 / 切后端环境 / `-Onone`）；`testflight` 通道才是 Release
+- iOS `Common/App/AppLaunch.swift` `#if DEBUG → isDataCollectionEnabled = false`；
+  ⚠️ `AppLaunch+PostHogReplay.swift` 里 RC `performance_monitoring_enabled` 在 Debug 下
+  **直接 `return` 不生效**——远程开关救不回来，只能改代码
+- Android `app/src/debug/AndroidManifest.xml` → `firebase_performance_collection_enabled=false`
+- Crashlytics 与 Performance 是**两套 SDK、两个开关** → 会话/崩溃照常上报，性能表零行
+
+**发生**：2026-09-11 查数发现 iOS 1.7.0（24 设备 / 207 会话 7d）性能表 30 天零行，而同量级的
+1.5.2（225 会话）有 591 条——低流量解释不了。2026-09-12 加了第 4 态（commit `ba6fc42`）。
+⚠️ 当时「adhoc 用 Debug 配」还只是推断；2026-09-15 直读 `build_config.yml` + `Fastfile:125`
+证实，并核对 iOS 最新 tag 是 **v1.6.0**（1.7.0/1.8.0 从未上架，那 207 个会话全是内部真机）。
+
+**为什么无工具可抓**：本仓库的缺数三态（表未同步 / 数据未同步 / 该版本无数据）判的都是
+「数据在不在」，**没有一态能表达「它本来就不报」**。这不是三态设计漏了，是**判据物理上不在
+BigQuery 里**——要证实得跨仓读构建配置和 git tag。⚠️ 与 F32 同源：**写进单元格就成了断言**，
+所以第 4 态只陈述「有会话（N）但无性能数据」这个事实，原因留在这里。
+
+**防复发**——见到性能缺数，先按这张表分诊，⛔ 别一上来就查取数：
+
+| 现象 | 判定 | 动作 |
+| --- | --- | --- |
+| 单个**高版本号**缺，且该版本号无对应 tag | 内部 adhoc Debug 包 | ⛔ 不是故障，等发版 |
+| 某端**所有**版本同时缺 | RC 被远程关 / 导出中断 | 查 Firebase 侧（`table_max()` 不带版本过滤） |
+| 历史有值、本轮没有 | 走的是第 2 态不是第 3/4 态 | **要查**，取数故障或导出退化 |
+
+⚠️ 2026-09-15 评估过「让内部包也上报」的两条改法，**结论是不改，等发版**：
+adhoc 另开一个 Release 通道会丢掉调试菜单（那正是它用 Debug 的理由）；
+⛔ 在 Debug 下开采集更糟——`-Onone` 未优化编译的启动/慢帧数据与 Release **不可比**，
+而日报整张卡就是按版本逐列对比的，塞一列不可比的数**比空着更有害**（同 F26「同名不同义」）。
+
 ### F37 · `[ -s ]` 判的是「有没有字节」，不是「有没有内容」
 
 ```bash
