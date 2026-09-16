@@ -105,6 +105,14 @@ PERF_DAYS="${CRASH_REPORT_PERF_DAYS:-3}"
 # 过滤本来就不裁分区——2026-09-15 dry-run 实测 3 天与 30 天扫描字节**完全相同**
 # （iOS 38,648,835 / Android 84,224,220），耗时同为 2.1~2.6s。拉长回看是免费的。
 PERF_LOOKBACK_DAYS="${CRASH_REPORT_PERF_LOOKBACK_DAYS:-30}"
+# 启动 trace 的样本量下限（2026-09-16，F50）。⛔ 与 SAMPLE_SESSION_MIN **不是一回事**：
+# 那个判会话数、且只用于告警判定对象回退；这个判 `_app_start` 的样本数。实测 iOS 1.7.0
+# 当天会话很多、样本只有 1 个——会话门槛对性能单元格**结构上就拦不住**。
+# ⚠️ 两个阈值分开：**P95 在 n<20 时退化成最大值**，比 P50 更早失真。
+# 实测选值（2026-09-16，最近 4 个 3 天窗口）：主力版本 iOS 1.6.0 = 1681/1432/1386/673、
+# Android 1.6.0 = 2769/2035/2187/398，**从不触发**；噪音列（1~13 个样本）全部触发。
+PERF_P50_SAMPLE_MIN="${CRASH_REPORT_PERF_P50_SAMPLE_MIN:-10}"
+PERF_P95_SAMPLE_MIN="${CRASH_REPORT_PERF_P95_SAMPLE_MIN:-20}"
 # 崩溃窗口与 MCP topIssues 的 Firebase 默认 7 天窗一致；日窗口太窄（iOS 样本极少）会误读为「无崩溃」。
 CRASH_DAYS="${CRASH_REPORT_CRASH_DAYS:-7}"
 # 前后台摘要行的出现条件（change crash-fg-bg-split）：样本 >= N 且后台占比 >= P%。
@@ -682,7 +690,7 @@ collect_window() { # $1=plat键 $2=版本 $3=crash表 $4=sess表 $5=perf表 $6=c
   local p="$1" v="$2" key="$1-$2"
   local issues='[]' rate='[]' n=0 ev=0 latest="" cev="" sess="" aff="" rp="" rfrac="" cstate
   local traces="$TMP/traces-$key.csv" screens="$TMP/screens-$key.csv" net="$TMP/net-$key.csv"
-  local p50="" p95="" wscreen="" wslow="" frozen="" neterr="" pstate prows=0
+  local p50="" p95="" p_n="" wscreen="" wslow="" frozen="" neterr="" pstate prows=0
   local wsamples="" wnet="" wnet_pct=""
   local vsess vdev
   # ANR 与 NON_FATAL：两者的 is_fatal 均为 FALSE，**不能复用上面的崩溃查询**
@@ -753,6 +761,9 @@ collect_window() { # $1=plat键 $2=版本 $3=crash表 $4=sess表 $5=perf表 $6=c
   # 当成故障告警发出去（2026-08-21 07:00：4 个版本 × 2 处 = 群里连发 8 张误报卡）。
   p50="$(int "$(grep '^_app_start,' "$traces" 2>/dev/null | cut -d, -f3 | head -1 || true)")"
   p95="$(int "$(grep '^_app_start,' "$traces" 2>/dev/null | cut -d, -f4 | head -1 || true)")"
+  # ⚠️ 第 2 列是 `COUNT(*) AS n`（perf-traces.sql），2026-09-16 前一直没被读——
+  #    于是 1 个样本也照样渲染成 P50/P95 数字发出去（F50）。⛔ 同一条 grep，不多一次取数。
+  p_n="$(int "$(grep '^_app_start,' "$traces" 2>/dev/null | cut -d, -f2 | head -1 || true)")"
   wscreen="$(csv "$screens" 1)"
   wslow="$(pct "$(csv "$screens" 3)")"
   # 冻结率取「最差慢帧页」同一行的冻结率（沿用既有口径，仅在标签上明确写出「最差页」）
@@ -774,7 +785,7 @@ collect_window() { # $1=plat键 $2=版本 $3=crash表 $4=sess表 $5=perf表 $6=c
   jq -n --arg v "$v" --arg cstate "$cstate" --arg pstate "$pstate" \
     --arg n "$n" --arg ev "$ev" --arg latest "$latest" --arg aff "$aff" \
     --arg cev "$cev" --arg csess "$sess" --arg rp "$rp" --arg rfrac "$rfrac" \
-    --arg p50 "$p50" --arg p95 "$p95" --arg wscreen "$wscreen" --arg wslow "$wslow" \
+    --arg p50 "$p50" --arg p95 "$p95" --arg pn "$p_n" --arg wscreen "$wscreen" --arg wslow "$wslow" \
     --arg frozen "$frozen" --arg neterr "$neterr" --arg vsess "$vsess" --arg vdev "$vdev" \
     --arg wsamp "$wsamples" --arg wnet "$wnet" --arg wnetp "$wnet_pct" \
     --arg anrev "$anr_ev" --arg anrinst "$anr_inst" --arg anrrp "$anr_rp" --arg anrfrac "$anr_rfrac" \
@@ -789,7 +800,7 @@ collect_window() { # $1=plat键 $2=版本 $3=crash表 $4=sess表 $5=perf表 $6=c
              crash_events:$cev, sessions:$csess, rate_pct:$rp, rate_frac:$rfrac,
              crash_free_pct:$cfree, crash_free_bad:$cfreebad, crash_free_frac:$cfreefrac,
              affected_users:$affu},
-      perf:{state:$pstate, p50:$p50, p95:$p95, worst_screen:$wscreen, worst_slow:$wslow,
+      perf:{state:$pstate, p50:$p50, p95:$p95, start_samples:$pn, worst_screen:$wscreen, worst_slow:$wslow,
             frozen:$frozen, net_err:$neterr,
             worst_samples:$wsamp, worst_net:$wnet, worst_net_pct:$wnetp},
       errtype:{anr_events:$anrev, anr_installs:$anrinst, anr_rate_pct:$anrrp, anr_rate_frac:$anrfrac,
@@ -1415,6 +1426,19 @@ sample_note() { # $1=plat $2=版本
   fi
   return 0
 }
+# 性能样本提示（trace 级）。⛔ 与 sample_note **不是一回事**——那个判会话数，这个判性能样本数。
+# 2026-09-16 实测：iOS 1.7.0 当天会话很多、`_app_start` 样本只有 1 个（P50=P95=178ms
+# 正是单样本的指纹），会话门槛结构上拦不住（F50）。
+# ⛔ **标出来而不是藏起来**：与 MIN_SESSIONS 同源纪律——门槛会把刚放量的新版静默剔除，
+#    而「新版只有 1 个样本」本身就是要看见的事。⚠️ 同 slow_worst 附样本量的既有决策 D5。
+perf_sample_note() { # $1=样本数（可空）$2=阈值
+  [ -n "$1" ] || { printf ''; return 0; }
+  if [ "$(awk -v a="$1" -v b="$2" 'BEGIN{print (a<b)}')" = "1" ]; then
+    # 卡片窄列只留符号+数字，文档写全（与 sample_note 同规格）
+    [ "$CELL_BREVITY" = 1 ] && printf ' ⚠️%s' "$1" || printf ' ⚠️ 样本 %s' "$1"
+  fi
+  return 0
+}
 cell() { # $1=plat $2=版本 $3=行键
   local st val samp lbl wn wp wscr
   case "$3" in
@@ -1490,9 +1514,11 @@ cell() { # $1=plat $2=版本 $3=行键
                     fi;;
     nonfatal_count) val="$(mv_ "$1" "$2" errtype.nonfatal_events)"
                     [ -n "$val" ] && printf '%s 次 / %s 人' "$val" "$(mv_ "$1" "$2" errtype.nonfatal_installs)" || printf -- '—';;
-    start_p50)      val="$(mv_ "$1" "$2" perf.p50)"; [ -n "$val" ] && printf '%sms' "$val" || printf -- '— 样本不足';;
+    start_p50)      val="$(mv_ "$1" "$2" perf.p50)"
+                    [ -n "$val" ] && printf '%sms%s' "$val" "$(perf_sample_note "$(mv_ "$1" "$2" perf.start_samples)" "$PERF_P50_SAMPLE_MIN")" || printf -- '— 样本不足';;
     start_p95)      val="$(mv_ "$1" "$2" perf.p95)"
-                    [ -n "$val" ] && cell_color "$val" "$START_P95_RED" "$START_P95_YELLOW" "${val}ms" || printf -- '— 样本不足';;
+                    # ⚠️ 阈值与 P50 不同：P95 在 n<20 时退化成最大值，比 P50 更早失真
+                    [ -n "$val" ] && printf '%s%s' "$(cell_color "$val" "$START_P95_RED" "$START_P95_YELLOW" "${val}ms")" "$(perf_sample_note "$(mv_ "$1" "$2" perf.start_samples)" "$PERF_P95_SAMPLE_MIN")" || printf -- '— 样本不足';;
     slow_worst)     val="$(mv_ "$1" "$2" perf.worst_slow)"
                     # 附样本量（决策 D5）：94% 在 3 次打开和 3000 次打开上是完全不同的结论
                     if [ -n "$val" ]; then
