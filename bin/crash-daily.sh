@@ -1439,6 +1439,30 @@ perf_sample_note() { # $1=样本数（可空）$2=阈值
   fi
   return 0
 }
+# 版本间对比的样本量守卫（F50 延伸，2026-09-17 生产卡实抓）。
+# ⛔ 单元格标了、对比列没标 = 只修了一半：2026-09-17 的卡上 iOS「1505ms ⚠️ 样本 3」与
+# 「759ms ⚠️ 样本 2」两格都标了，它们的差却渲染成醒目的红色 `+746ms ↑`，一个警告都没有。
+# ⚠️ 一个不带任何限定的 `+746ms ↑` 读者会当成真实劣化，而它是 3 个样本与 2 个样本的差。
+# 修法：补 `⚠️ 样本 N`（取两侧较小值）。⛔ 不藏数字——藏起来会把「新版刚放量」一并藏掉
+# （MIN_SESSIONS 纪律）。
+# ⛔ **订正一处过度声称**（2026-09-17 查产物）：原注释写「不再染红断言变差」，但实测
+#    **那个差值从来就不是红的**——文档路径剥掉全部 font 标记（整份 md 零个），而卡片
+#    **压根没有对比列**。⇒ 这里退回 `neutral` 在当前两种产物里**没有可观察效果**，
+#    保留它只是语义正确（样本不足就不该判好坏），⚠️ 别把它当成修好了什么。
+#    ⚠️ 顺带：`delta_cell` 的红绿判定对**所有**调用者都落不到产物上，是另一件事，未处理。
+perf_delta_cell() { # $1=plat $2=最新版 $3=上一版 $4=perf 字段 $5=阈值
+  local v1 v2 n1 n2 nmin
+  v1="$(mv_ "$1" "$2" "$4")"; v2="$(mv_ "$1" "$3" "$4")"
+  # ⚠️ 任一侧没值时原样委托——delta_cell 自己会渲染「—」，⛔ 别在「—」后面挂警告
+  { [ -n "$v1" ] && [ -n "$v2" ]; } || { delta_cell "$v1" "$v2" ms lower_better; return 0; }
+  n1="$(mv_ "$1" "$2" perf.start_samples)"; n2="$(mv_ "$1" "$3" perf.start_samples)"
+  nmin="$(awk -v a="${n1:-0}" -v b="${n2:-0}" 'BEGIN{print (a<b)?a:b}')"
+  if [ "$(awk -v a="$nmin" -v b="$5" 'BEGIN{print (a<b)}')" = "1" ]; then
+    printf '%s%s' "$(delta_cell "$v1" "$v2" ms neutral)" "$(perf_sample_note "$nmin" "$5")"
+    return 0
+  fi
+  delta_cell "$v1" "$v2" ms lower_better
+}
 cell() { # $1=plat $2=版本 $3=行键
   local st val samp lbl wn wp wscr
   case "$3" in
@@ -1563,8 +1587,8 @@ delta_of() { # $1=plat $2=V1 $3=V2 $4=行键
     anr_brief)      if [ "$1" = ios ]; then delta_cell "$(mv_ "$1" "$2" perf.frozen)" "$(mv_ "$1" "$3" perf.frozen)" pp lower_better
                     else delta_cell "$(mv_ "$1" "$2" errtype.anr_rate_pct)" "$(mv_ "$1" "$3" errtype.anr_rate_pct)" pp lower_better; fi;;
     nonfatal_count) delta_cell "$(mv_ "$1" "$2" errtype.nonfatal_events)" "$(mv_ "$1" "$3" errtype.nonfatal_events)" n lower_better;;
-    start_p50)      delta_cell "$(mv_ "$1" "$2" perf.p50)"       "$(mv_ "$1" "$3" perf.p50)"       ms lower_better;;
-    start_p95)      delta_cell "$(mv_ "$1" "$2" perf.p95)"       "$(mv_ "$1" "$3" perf.p95)"       ms lower_better;;
+    start_p50)      perf_delta_cell "$1" "$2" "$3" perf.p50 "$PERF_P50_SAMPLE_MIN";;
+    start_p95)      perf_delta_cell "$1" "$2" "$3" perf.p95 "$PERF_P95_SAMPLE_MIN";;
     slow_worst)     # 两版「最差页」未必是同一个页面，直接比百分比会误导，标出来
                     s1="$(mv_ "$1" "$2" perf.worst_screen)"; s2="$(mv_ "$1" "$3" perf.worst_screen)"
                     printf '%s' "$(delta_cell "$(mv_ "$1" "$2" perf.worst_slow)" "$(mv_ "$1" "$3" perf.worst_slow)" pp lower_better)"
