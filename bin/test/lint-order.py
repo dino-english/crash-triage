@@ -14,7 +14,11 @@ bash 顺序执行，声明与使用隔着几百行时没有任何工具在守。
 import re, sys, pathlib
 
 ASSIGN = re.compile(r'^([A-Z][A-Z0-9_]*)=')
-FUNC_S = re.compile(r'^([a-z_][a-z0-9_]*)\(\)\s*\{\s*$')
+# ⚠️ `{` 后面允许尾随注释（2026-09-17）：本仓库几乎每个函数都写成 `f() { # $1=…`，
+#    而原正则要求 `{` 后直接换行 —— 实测 268 个函数定义里**只认得出 98 个，63% 完全看不见**。
+#    后果有两层：①那 170 个函数的先用后定从来没被检查过（当天就踩了 internal_note）；
+#    ②它们的函数体被当成顶层扫描，`in_func` 的排除形同虚设，不误报纯属运气。
+FUNC_S = re.compile(r'^([a-z_][a-z0-9_]*)\(\)\s*\{\s*(?:#.*)?$')
 FUNC_1 = re.compile(r'^([a-z_][a-z0-9_]*)\(\)\s*\{.*\}\s*$')      # 单行函数
 VAR_USE = re.compile(r'\$\{([A-Z][A-Z0-9_]*)\}|\$([A-Z][A-Z0-9_]*)')
 VAR_DEF = re.compile(r'\$\{[A-Z][A-Z0-9_]*[:-]')                   # ${V:-x} 形式，整体跳过
@@ -56,7 +60,12 @@ for f in sorted(pathlib.Path(sys.argv[1]).rglob('*.sh')):
         body = VAR_DEF.sub('', raw)                    # 剥掉 ${V:-x} 这类
         for a, b in VAR_USE.findall(body):
             used.setdefault(a or b, n)
-        for name in re.findall(r'(?:^|[;&|]\s*|\$\(\s*|\bthen\s+|\belse\s+|\bdo\s+)([a-z_][a-z0-9_]{2,})\s', raw):
+        # ⚠️ 终止符必须含 `)`（2026-09-17）：原先只认空白，于是 `x="$(func)"` 这种
+        #    **零参数命令替换**整类漏检——名字后面紧跟的是 `)` 不是空白。
+        #    实测全仓有 13 处这种写法，此前一处都没被这条 lint 看过；
+        #    当天就踩了：`add_alert "$(internal_note)"` 先用后定，check-scripts 全绿放行，
+        #    跑批日志里躺着 `internal_note: command not found` 而退出码是 0（F24 同源的静默）。
+        for name in re.findall(r'(?:^|[;&|]\s*|\$\(\s*|\bthen\s+|\belse\s+|\bdo\s+)([a-z_][a-z0-9_]{2,})(?=[\s)])', raw):
             used.setdefault(name, n)
     # 函数定义行（顶层）
     for a, b in ranges:

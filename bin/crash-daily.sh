@@ -628,7 +628,8 @@ fi
 
 # ── 版本解析（唯一源 = sessions 活表，design D1）────────────────────
 step "解析版本清单"
-resolve_versions() { # $1=sessions表 → CSV「version,sessions,devices」（无表头，未排序）
+resolve_versions() { # $1=sessions表 → CSV「version,sessions,devices,devs_perf_on,max_build_tail3」（无表头，未排序）
+  # ⚠️ 2026-09-17 起多两列（内部构建判据）。既有消费者只取第 1~3 列，⛔ 形态兼容。
   [ -n "$1" ] || return 0
   bqq csv "$(q_render latest-versions.sql TABLE="$1" DAYS="$DAYS" MIN_SESSIONS="$MIN_SESSIONS")" \
     | tail -n +2 || true
@@ -672,6 +673,30 @@ ver_newest_of() { [ "$1" = ios ] && printf '%s' "$IOS_NEWEST" || printf '%s' "$A
 perf_only_tag() { # $1=plat $2=版本 → 角标或空
   if printf '%s\n' "$(ver_newest_of "$1")" | grep -qx -- "$2"; then printf ''; return 0; fi
   if [ "$CELL_BREVITY" = 1 ]; then printf -- '·性能'; else printf ' 性能兜底'; fi
+}
+# 该版本是不是**内部构建**（未上架）。⛔ 两端判据不同，**不可互换**：
+#  · iOS：该版本所有设备的 Performance 采集都关着（`devs_perf_on = 0`）。实测 30 天双向干净——
+#    1.8.0(0/39)、1.5.6(0/28) 被标；1.7.0(501/536)、1.6.0(2024/2081)、1.7.1(13/15) 不标。
+#  · Android：⛔ 上面那个字段在 Android 恒 false，**用了就是全版本误标**。改用
+#    `max_build_tail3 = 0`（该版本所有 build 都未过 CI）。实测 30 天只命中 1.8.0。
+# ⚠️ 判据只够**标注**，⛔ 不够用来过滤版本：Android 上架首日只有 4~7 台设备，与内部包重叠，
+#    任何门槛都会让新版上架第一天从报告里消失（2026-09-17 实测 170012 首日 7 台 → 次日 529 台）。
+internal_build() { # $1=plat $2=版本 → 1 或空
+  local csv v4 v5
+  [ "$1" = ios ] && csv="$IOS_VER_CSV" || csv="$AND_VER_CSV"
+  v4="$(ver_field "$csv" "$2" 4)"; v5="$(ver_field "$csv" "$2" 5)"
+  if [ "$1" = ios ]; then [ "$v4" = "0" ] && printf 1
+  else [ "$v5" = "0" ] && printf 1; fi
+  return 0
+}
+# 本轮出现在报告里的内部构建清单 → 摘要行用（⛔ 放摘要行不放表头：表头有 5 个定义点，
+# 改部分不改全部正是 F35；且表头宽度已实发验证过会被截，见 perf_only_tag 的注释）。
+internal_note() { # → 摘要行文案或空
+  local out="" v
+  for v in $IOS_COLS; do [ -n "$(internal_build ios "$v")" ] && out="${out:+$out · }iOS $v"; done
+  for v in $AND_COLS; do [ -n "$(internal_build and "$v")" ] && out="${out:+$out · }Android $v"; done
+  [ -n "$out" ] || { printf ''; return 0; }
+  printf 'ℹ️ 内部构建（未上架，性能数字仅供参考）：%s' "$out"
 }
 # 最新版 / 上一版（告警与版本间对比的两端）
 IOS_V1="$(printf '%s\n' "$IOS_NEWEST" | sed -n 1p)"; IOS_V2="$(printf '%s\n' "$IOS_NEWEST" | sed -n 2p)"
@@ -1369,6 +1394,9 @@ _fb=""
 [ "$IOS_ALERT_FALLBACK" = 1 ] && _fb="iOS ${IOS_ALERT_VER}（${IOS_ALERT_WHY}）"
 [ "$AND_ALERT_FALLBACK" = 1 ] && _fb="${_fb:+$_fb · }Android ${AND_ALERT_VER}（${AND_ALERT_WHY}）"
 [ -n "$_fb" ] && add_alert "ℹ️ 告警判定对象：${_fb}——最新版答不了这个问题，故改判会话量最大的版本（表格仍按最新版分列，一列不少）"
+# 内部构建标注（2026-09-17）。⛔ **只标不过滤**：Android 上架首日 4~7 台设备与内部包重叠，
+# 任何过滤都会让新版上架第一天整列消失——而那恰恰是最该盯的一天。
+add_alert "$(internal_note)"
 
 # ⚠️ 排在最后加：摘要按加入顺序渲染，🔴 崩溃/性能必须在前——流水线自身的降级不该压过线上问题。
 # add_alert 对空串是 no-op，断言通过时这行不产生任何输出。

@@ -16,7 +16,18 @@
 SELECT
   application.display_version                AS version,
   COUNT(DISTINCT session_id)                 AS sessions,
-  COUNT(DISTINCT instance_id)                AS devices
+  COUNT(DISTINCT instance_id)                AS devices,
+  -- 内部构建判据（2026-09-17）。⛔ **不在 SQL 里按平台分叉**：同一份 SQL 双端共用，
+  -- 各自跑出该端可用的那一列，由渲染层决定用哪条（与 crash-rate.sql 的 affected_users 同构）。
+  --  · iOS 用 devs_perf_on：上架包采集全开、内部 adhoc 包全关（实测 30 天双向干净）。
+  --    ⚠️ Android 该字段恒 false，这一列在 Android 上恒为 0，⛔ 不可据此判 Android。
+  --  · Android 用 max_build_tail3：versionCode = 版本号基数 + CI 分配的 build number
+  --    （见业务仓 build_config.yml 的 version_code_from_version_name），末三位 000 = 未过 CI 的本地包。
+  --    ⚠️ SAFE_CAST：iOS 的 build_version 形如 1.8.0.28 不是整数，转不动返回 NULL，正合预期。
+  --    ⛔ 它只分得出「本地包 vs CI 包」，分不出「内部分发 vs 上架」——实测 1.6.0 的 160015~160019
+  --    都是 CI 包却只有 3~9 台设备。故仅用于**标注**，⛔ 不可用来过滤版本。
+  COUNT(DISTINCT IF(performance_data_collection_enabled, instance_id, NULL)) AS devs_perf_on,
+  MAX(MOD(SAFE_CAST(application.build_version AS INT64), 1000))              AS max_build_tail3
 FROM `{{TABLE}}`
 WHERE event_timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {{DAYS}} DAY)
   AND application.display_version IS NOT NULL
