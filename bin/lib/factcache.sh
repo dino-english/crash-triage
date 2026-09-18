@@ -113,3 +113,22 @@ fc_trim_events() { # $1=事实层文件 $2=保留全量细节的最近事件数�
   fi
   return 0
 }
+
+# ── 「是不是真事件」的唯一判据（2026-09-18，change crash-fact-cache-model-free-events）──
+# ⛔ **只许有这一处**：抓取判定的 `stored` 与产物断言必须同源。两边各写一遍 jq
+#    就是 FACT_CACHE_POLICY 那类漂移的温床（本文件顶部第 4~8 行记的正是同一个教训）。
+# 判据取 **eventId 非空**——三种合法形态都有它：bq 路径的精简条目
+# `{blameFrame,eventId,eventTime,issue,version}`、模型路径的完整条目、
+# 以及 fc_compact 压缩后的条目（compact 的投影里保留了 eventId）。
+# ⚠️ 2026-09-18 实测：模型拿不到数据时会写出
+#    `{"format":…,"encoding":"base64","data":"__EVENT_0__"}` 这种占位条目。
+#    只数数组长度会把它当成 5 条真事件，于是 `events_count_last_seen` 与已存条数相等，
+#    `cache_verdict` 从此**永久判命中跳过**——⛔ 比缺文件更糟且不自愈。
+# 双向实测（2026-09-18 全量）：27 个文件 189 条真事件**全部**有 eventId，零误报；
+# 毒记录 5 条**全部**判假。
+# 输出：真实事件条数；文件不存在或解析失败输出 -1（沿用调用方既有的 -1 语义）
+fc_real_events() { # $1=事实层文件路径
+  [ -s "$1" ] || { printf -- '-1'; return 0; }
+  jq -r '[(.events // [])[] | select(((.eventId // "") | tostring | length) > 0)] | length' \
+    "$1" 2>/dev/null || printf -- '-1'
+}

@@ -50,7 +50,15 @@ while IFS= read -r id; do
 
   # 内容覆盖率的两个累加项（非判定，只输出——理由见 D5：当前基线下任何阈值都会全红）
   CLAIMED=$((CLAIMED + $(jq -r '(.events_count_last_seen // 0) | tonumber? // 0' "$f")))
-  _st="$(jq -r '(.events // []) | length' "$f")"
+  # ⛔ 数的是**真事件**不是数组长度（fc_real_events）。2026-09-18 之前这里只数长度，
+  #    于是模型写出的 5 条 `{"data":"__EVENT_0__"}` 占位条目**全数通过**断言（F52）。
+  _all="$(jq -r '(.events // []) | length' "$f")"
+  _st="$(fc_real_events "$f")"
+  if [ "$_all" -gt 0 ] && [ "$_st" -lt "$_all" ] 2>/dev/null; then
+    # ⛔ 比缺文件更糟：占位条目让「已存」等于线上计数，此后永久判命中跳过、不自愈。
+    echo "❌ ${id:0:8} 事实层有占位条目（$_all 条里只有 $_st 条是真事件，判据 eventId 非空）"
+    rc=1
+  fi
   STORED=$((STORED + _st))
   # 欠账 = 计数为正而一条事件都没有（change crash-fact-cache-events-backfill）。
   # 逐轮看这个数在不在降，是「补抓有没有真在收敛」的唯一判据。

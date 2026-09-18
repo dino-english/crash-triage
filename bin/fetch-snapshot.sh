@@ -87,7 +87,8 @@ for _bf in "$ISSUES_DIR"/*.json; do
   [ -e "$_bf" ] || continue
   [ "$BACKFILL_N" -lt "$BACKFILL_LIMIT" ] || break
   _bc="$(jq -r '(.events_count_last_seen // 0) | tonumber? // 0' "$_bf" 2>/dev/null || echo 0)"
-  _bs="$(jq -r '(.events // []) | length' "$_bf" 2>/dev/null || echo -1)"
+  # ⛔ 同 fetch-snapshot-bq.sh：数真事件，占位条目不计入（fc_real_events，2026-09-18）
+  _bs="$(fc_real_events "$_bf")"
   # ⛔ 事件已滑出窗口的记录**不进候选**（findings F-1）：它们抓不到，
   #    而按 id 排序的节流会让它们每轮占住一个名额，把真正可补的永远挤在后面。
   #    2026-09-10 实测：15 条欠账里 13 条已出窗，按 id 排序前三名全是它们。
@@ -98,51 +99,20 @@ for _bf in "$ISSUES_DIR"/*.json; do
     BACKFILL_N=$((BACKFILL_N + 1))
   fi
 done
-# ⛔ 全角括号先条件赋值再拼接，禁 ${var:+（…）}——bash 会把全角字节并进变量名。
-BACKFILL_CLAUSE=""
-if [ -n "$BACKFILL_IDS" ]; then
-  BACKFILL_CLAUSE="
+# ⚠️ BACKFILL_IDS 不再拼进 prompt（2026-09-18）：欠账补抓改由确定性脚本执行，
+#    这份清单往下喂给 bin/fetch-events-mcp.py。⛔ 不喂就永远补不上——欠账记录
+#    多半不在本轮快照里，确定性脚本不会自发去碰它们。
 
-【本轮欠账补抓】以下 ${BACKFILL_N} 个 issue 的事实层**有计数但一条事件都没存下来**，
-本轮对它们**全量抓取**事件明细并写入缓存，忽略判定一的计数比较：
-${BACKFILL_IDS}
-⛔ 抓这几个时**必须显式传 \`pageSize\`（取 50）与时间区间** \`filter.intervalStartTime=\"${BACKFILL_FROM}\"\` 与
-\`filter.intervalEndTime\`=当前时刻——\`crashlytics_list_events\` **默认只查最近 7 天**，
-而欠账记录的事件多半在 7 天之外（实测 08-17 的事件放宽窗口后能完整取回）。
-不传区间就会空手而归，看起来像「抓不到」，其实是没去要。
-⚠️ 只抓这几个，不要扩大范围——其余 issue 仍按判定一处理。"
-fi
-
-FACT_CACHE_POLICY="事实层缓存（${ISSUES_DIR}/<32位id>.json，一 issue 一文件，永久保留不清理）——
-对每一个 issue 执行**两个独立判定**，不要把它们挤在一起：
-
-【判定一：要不要抓取事件明细】——只决定是否调用 crashlytics_list_events（省的是真钱）
-⛔ **只要本判定的结论是「抓」，调 crashlytics_list_events 就必须显式传两个参数**：
-\`pageSize\`（取 50）与时间区间 \`filter.intervalStartTime="${BACKFILL_FROM}"\` / \`filter.intervalEndTime\`=当前时刻。
-⚠️ **区间不传只查最近 7 天**（API 默认），事件早于 7 天的 issue 会一无所获、看起来像「抓不到」——
-2026-09-11 实测：强制重抓的 4 次调用全都没传区间。区间上限是 90 天保留期。
-\`pageSize\` 的理由——
-它的**默认值是 1**，不传就只回一条，事实层永远攒不出样本量，台账/周报的
-「✅钻取确认（采样 n=…）」也就永远是 n=1。2026-09-10 实测：同一批 issue 不传共抓到 24 条，
-传 pageSize=50 抓到 185 条。⚠️ 全量、增量、强制重抓**三条路径都适用**。
-  - **本轮是否强制重抓：${FORCE_REFETCH_WORD}**。为「是」时忽略下面所有计数比较，对每个 issue 都全量抓取。
-  - 先用 Read 工具读 ${ISSUES_DIR}/<该 issue 完整 32 位 id>.json。
-    - 文件不存在 → 全量抓取，事件按 ${FACT_FIELDS} 等原始字段保存
-      （尤其 threads 按原样存文本块，不要假设能拆成帧数组）。
-    - 线上计数 **大于** 文件里的 events_count_last_seen → 只抓这次返回的事件，
-      按唯一标识（无唯一 id 时用时间戳+blameFrame 组合）与已有 events 数组合并去重，
-      **已有事件记录原样保留、不改写**，只 append 新增的。
-    - 线上计数 **等于或小于** → **不抓取**（0 次额外 MCP 调用，这是本判定的核心目的）。
-      ⚠️ 小于是正常的：线上计数是**滚动窗口内**的取值，老事件出窗即下降，**它不是单调量**。
-      计数下降只意味着没有新事件，不意味着这个 issue 该被忽略。
-
-【判定二：观测字段】——**你不要写**
-  events_count_last_seen · users_last_seen · window_days · last_synced · latest_event
-  这五个字段由调用方在你退出后按快照内容统一回写，**你不要修改它们**。
-  你只需保证 events 数组的合并语义（已有记录原样保留、只 append 新增）。
-
-抓取失败（MCP 调用报错/超时）：不中止整体流程，跳过该 issue 的事实层更新，
-在报告里标明该 issue 的事实层「抓取失败/不完整」（区分「已查证为空」与「未查」）。"
+# ⛔ **事实层不再由模型写**（2026-09-18，change crash-fact-cache-model-free-events）。
+# 原因见失效模式 F52：`crashlytics_list_events` 的结果一超限就不下发给模型，它只拿到 2KB
+# 预览和一个磁盘路径——事件数据从未进入其上下文。它写不出来，却会写出
+# `{"data":"__EVENT_0__"}` 这种占位条目冒充成功，而那种记录**永久判命中跳过、不自愈**。
+# ⚠️ 这段文字仍留在 prompt 里，是因为不说一句「别碰」，模型会自己去碰——
+#    2026-09-18 实测它在没被要求的情况下仍尝试写 issues/ 下的文件。
+FACT_CACHE_POLICY="事实层缓存（${ISSUES_DIR}/）——**你完全不要碰它**。
+不要读它、不要写它、不要调 crashlytics_list_events 抓事件明细、不要为它生成任何文件。
+事件明细与观测字段都由调用方在你退出后用确定性脚本处理。
+⛔ 你**唯一**要产出的是上面列出的文件，多写任何 ${ISSUES_DIR}/ 下的东西都会被当作脏数据。"
 
 
 if [ "$MODE" = "full" ]; then
@@ -172,13 +142,14 @@ fix_commit 用 git -C 仓库 log --oneline --all --grep="完整id" 反查，找�
 ② ${OUT_DIR}/report.md —— 按 skill 报告模板写，含根因、版本流转、风险分级与修复方案。
 开头必须加一行：> 本报告由每周自动化流程生成，修复方案未经人工复核，落地前须验证。
 
-③ ${FACT_CACHE_POLICY}${BACKFILL_CLAUSE}
+③ ${FACT_CACHE_POLICY}
 
 若某个仓库的 git 命令无法执行，必须在 report.md 顶部显式声明该平台反查未完成。
 不得让 null 冒充「查过没有」。
 
-不 commit、不 push、不改业务代码。三类文件都处理完后只回复 OK，附一行统计：
-"事实层：命中 N 个（跳过）· 部分命中 M 个（增量抓取）· 未命中 K 个（全量抓取）· 失败 F 个"。
+不 commit、不 push、不改业务代码。三类文件都处理完后只回复 OK。
+⛔ 不要自报事实层统计——2026-09-18 实测该自述两个方向都错过（把成功报成失败、
+把受影响条目数报错）。事实层的成败以产物断言为准，见 bin/test/assert-fact-cache.sh。
 PROMPT_END
 else
 read -r -d '' PROMPT <<PROMPT_END || true
@@ -201,10 +172,9 @@ filter.issueErrorTypes=["FATAL"]，pageSize=20：
 把结果写到 ${OUT_DIR}/snapshot.json，结构严格如下，数字必须是 JSON 数字：
 {"ios":[{"id":"32位hex","title":"...","events":N,"users":N,"fix_commit":null,"fix_branches":[]}],"android":[同上结构]}
 
-${FACT_CACHE_POLICY}${BACKFILL_CLAUSE}
+${FACT_CACHE_POLICY}
 
-写完只回复 OK，附一行统计：
-"事实层：命中 N 个（跳过）· 部分命中 M 个（增量抓取）· 未命中 K 个（全量抓取）· 失败 F 个"。
+写完只回复 OK。⛔ 不要自报事实层统计（理由同上：自述不可作判据）。
 PROMPT_END
 fi
 
@@ -357,12 +327,67 @@ for _try in $(seq 1 "$ATTEMPTS"); do
   if [ "$AGENT_RC" = 0 ]; then AGENT_RC=1; fi   # rc=0 但产物不全，同样判失败
 done
 
+# ── 模型被权限闸拦下的次数（2026-09-18，失效模式 F52）────────────────────
+# ⛔ 这曾是**没有人会发现**的一类失败：退出码、健康文件、审计事件流全部正常，
+#    而 `"This command requires approval"` 只躺在 .jsonl 里，从没人数过。
+#    实测趋势 09-13→09-18 是 4 → 4 → 10 → 12，一路涨到把事实层写空。
+# ⚠️ 被拒**本身不是故障**（09-13 那 4 次只是版本探测），所以这里只提示不判失败——
+#    ⛔ 新增的检查不得自己成为告警噪音源（F30），也不得走进 ERR trap（F31）。
+# ⛔ `grep -c` 无匹配返回 1 且**不输出**，`|| echo 0` 会得到两个 0（F21）——
+#    只能先接住空串再补 0。
+_denied=0
+for _al in "${AGENT_LOG_BASE}"-*.jsonl; do
+  [ -e "$_al" ] || continue
+  _dn="$(grep -c "This command requires approval" "$_al" 2>/dev/null || true)"
+  [ -n "$_dn" ] || _dn=0
+  _denied=$((_denied + _dn))
+done
+if [ "$_denied" -gt 0 ]; then
+  echo "  ⚠️ 模型被权限闸拦下 ${_denied} 次——⛔ 不是噪音：它会改去写脚本绕行，绕不过就静默少写（F52）"
+fi
+
 # ── 观测字段回写（change crash-fact-cache-deterministic-records D1）──────
 # 模型只负责「要不要抓事件明细」与 events 数组；观测字段由这里确定性写入。
 # ⛔ 位置必须在**落盘校验之前**：反过来会对刚被隔离（mv 走）的文件写出一份只有观测字段的
 #    残缺记录。先回写再隔离，坏文件照常被隔离，下一轮全量重抓补回，与原语义一致。
 # ⚠️ 缺文件的**不补建**（factcache.sh 的 rc=3）：补一条带真实计数的记录会让下一轮的抓取
 #    判定把它当成已缓存而跳过，事件明细就永远补不回来了。宁可留空让下轮全量重抓。
+# ── 事实层事件明细：确定性抓取（2026-09-18，change crash-fact-cache-model-free-events）──
+# ⛔ **不经模型**：`crashlytics_list_events` 的大结果不下发给它，它只拿到 2KB 预览和一个
+#    磁盘路径，于是写出占位条目冒充成功（失效模式 F52）。裸调 MCP 没有这个问题。
+# ⚠️ 与 AGENT_CMD 同一套钩子形态：`FACT_EVENTS_CMD` 可被夹具整体替换，零 MCP 调用验壳层。
+# ⛔ 定义必须早于下面的使用——顶层「先用后定」会被 check-scripts 第 7 项拦下。
+_fact_events_run() { # 参数原样透传
+  if [ -n "${FACT_EVENTS_CMD:-}" ]; then
+    "$FACT_EVENTS_CMD" "$@"
+  else
+    env -u PYTHONPATH python3 "$ROOT/bin/fetch-events-mcp.py" "$@"
+  fi
+}
+FACT_EVENTS_RC=0
+if [ -s "$OUT_DIR/snapshot.json" ]; then
+  _fe_force=""
+  if [ "$FORCE_REFETCH" = 1 ]; then _fe_force="--force"; fi
+  {
+    jq -r '(.ios     // [] | map([.id,"ios",     ((.events // 0)|tostring)] | @tsv) | .[]),
+           (.android // [] | map([.id,"android", ((.events // 0)|tostring)] | @tsv) | .[])' \
+      "$OUT_DIR/snapshot.json" 2>/dev/null || true
+    # ⚠️ 欠账清单必须一起喂：那些 id 多半**不在本轮快照里**，确定性脚本不会自发去碰，
+    #    不喂就永远补不上（归档 change events-backfill 建这份清单正是为此）。
+    for _bid in $BACKFILL_IDS; do
+      printf '%s\t%s\t%s\n' "$_bid" \
+        "$(jq -r '.platform // "android"' "$ISSUES_DIR/$_bid.json" 2>/dev/null || echo android)" \
+        "$(jq -r '(.events_count_last_seen // 0) | tostring' "$ISSUES_DIR/$_bid.json" 2>/dev/null || echo 0)"
+    done
+  } | _fact_events_run --issues-dir "$ISSUES_DIR" \
+        --ios-app "$IOS_APP_ID" --android-app "$AND_APP_ID" \
+        --days "$FC_RETENTION_DAYS" --page-size 50 $_fe_force || FACT_EVENTS_RC=$?
+  # ⛔ 走 stdout 不走 stderr：crash-daily.sh 调本脚本时带 2>/dev/null（F-4 那条教训）。
+  if [ "$FACT_EVENTS_RC" != 0 ]; then
+    echo "  ⚠️ 事实层事件抓取有失败项（rc=${FACT_EVENTS_RC}）——逐条结论见产物断言"
+  fi
+fi
+
 FC_WROTE=0; FC_MISSING=0; FC_FAILED=0
 if [ -s "$OUT_DIR/snapshot.json" ]; then
   FC_NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"

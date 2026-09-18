@@ -39,6 +39,19 @@ if [ ${#MISSING[@]} -gt 0 ]; then
   echo "   node/jq/git/bq 用 brew 装（bq 在 google-cloud-sdk）；claude / lark-cli 用 npm -g 装"
   exit 1
 fi
+# ── python 三方依赖（2026-09-18，change crash-fact-cache-model-free-events）──
+# 事实层取数要解析 MCP 返回的 YAML（`crashlytics_list_events` 只吐 YAML，
+# 其 inputSchema 里没有输出格式参数，躲不掉）。⚠️ 生产机实测 /usr/bin/python3（Xcode 3.9）
+# 与 /opt/homebrew/bin/python3 **都不带 PyYAML**。
+# ⛔ 缺了必须在装机阶段就炸，不能留到跑批时——那时的表现是事实层静默少写、无人察觉。
+# ⚠️ 探测必须 `env -u PYTHONPATH`：两个入口脚本开头都 unset 了它，
+#    带着 Hermes 注入的 PYTHONPATH 探到的模块，跑批时根本不在。
+if ! env -u PYTHONPATH python3 -c 'import yaml' 2>/dev/null; then
+  echo "❌ python3 缺少 PyYAML（事实层解析 MCP 返回需要）"
+  echo "   装：python3 -m pip install --user pyyaml"
+  exit 1
+fi
+printf '  %-10s %s\n' "py-yaml" "已就绪"
 # 去重后拼 PATH，尾部补系统目录兜底
 UNIQ="$(printf '%s\n' "${DIRS[@]}" | awk '!seen[$0]++' | paste -sd: -)"
 printf 'PATH="%s:/usr/bin:/bin:/usr/sbin:/sbin"\n' "$UNIQ" > "$STATE/path.env"

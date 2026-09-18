@@ -182,7 +182,9 @@ while IFS=$'\t' read -r iid plat title events users latest; do
     # 已存事件条数（change crash-fact-cache-events-backfill）：欠账记录必须判 append 而非 skip。
     # ⚠️ bq 路径的 append 是空操作（它本来就拿不到事件明细），但计数会进跑批日志——
     #    继续把欠账报成「跳过」等于日志在说谎。真正的补抓在模型路径。
-    stored="$(jq -r '(.events // []) | length' "$f" 2>/dev/null || echo -1)"
+    # ⛔ 数的是**真事件**不是数组长度（fc_real_events，2026-09-18）：占位条目会让
+    #    这里等于线上计数、从此永久判 skip。判据与产物断言同源，不许各写一份。
+    stored="$(fc_real_events "$f")"
   else
     exists=0; prev=0; stored=-1
   fi
