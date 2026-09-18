@@ -84,6 +84,15 @@
       绕法：`python3 -m venv <dir> && <dir>/bin/pip install pyyaml`，
       跑之前 `PATH="<dir>/bin:$PATH"`。要不要固化成仓库约定，待定。
 
-- [ ] 4.2 ⛔ **尚未部署**——生产仍跑旧代码。部署后首个跑批核验
+- [x] 4.1c **已部署**（2026-09-18，`97068e1` → `a944d85`）。生产核验：
+      HEAD 对得上 · 工作区干净 · `/bin/bash bin/check-scripts.sh` 全绿（bash 3.2.57）·
+      两个 cron 在位（daily 09-19 08:30 / weekly 09-21 05:30）·
+      ⚠️ `update.sh` 的 `❌ setup.sh 失败` 与「无 hermes cron 任务」是**已知假故障**
+      （非交互 ssh 无 brew PATH）——本次逐条证伪过：`path.env` mtime 仍是 08-20 未被动，
+      带真实 PATH 实跑 `setup.sh` rc=0 且打印 `py-yaml 已就绪`，写出的 path.env 内容一致。
+      ⛔ 不能因为「记着是假故障」就跳过——本次刚好改过 setup.sh，必须实测才敢这么说。
+      **新夹具在生产真的运行了**（那里有 PyYAML），22 条 0 失败。
+
+- [ ] 4.2 部署后首个跑批核验（2026-09-19 08:30）
       → 验：morning-verify 四项 + 事实层欠账数**较前一轮下降**
       ⚠️ 判据要问「这轮到底补上几条」，不是「代码路径对不对」
