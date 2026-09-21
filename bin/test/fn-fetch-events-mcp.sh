@@ -35,10 +35,15 @@ _events_n() { jq '(.events // []) | length' "$TMP/issues/$ID.json" 2>/dev/null |
 if [ ! -x "$FETCHER" ] && [ ! -f "$FETCHER" ]; then
   echo "❌ 找不到 $FETCHER"; exit 1
 fi
-# ⚠️ 没有 PyYAML 就跳过而不是失败：装机闸在 setup.sh，这里报红只会误导
+# ⚠️ 没有 PyYAML 就跳过而不是失败：装机闸在 setup.sh，这里报红只会误导。
+# ⛔ 但**退出码用 77 不用 0**——0 会让 check-scripts 把「没跑」当成「通过」，
+#    而本夹具覆盖的正是 429 退避、取不到不落盘这些生产里碰不到的分支（盲区⑥）。
+# 开发机装不上（PEP 668 托管）时的绕法：
+#   python3 -m venv /tmp/ct-venv && /tmp/ct-venv/bin/pip install pyyaml
+#   PATH="/tmp/ct-venv/bin:$PATH" bash bin/test/fn-fetch-events-mcp.sh
 if ! env -u PYTHONPATH python3 -c 'import yaml' 2>/dev/null; then
-  echo "ℹ️ 未安装 PyYAML，跳过 fetch-events-mcp 夹具（装机闸见 bin/setup.sh）"
-  exit 0
+  echo "ℹ️ 未安装 PyYAML，跳过 fetch-events-mcp 夹具（绕法见本文件头部；装机闸见 bin/setup.sh）"
+  exit 77
 fi
 
 echo "── 取数：正常抓取并落盘 ──"

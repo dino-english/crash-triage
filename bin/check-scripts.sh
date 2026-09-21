@@ -208,9 +208,23 @@ fi
 #    写完即失效，与「一个不会红的检查项」等价。⚠️ 它们全部离线、秒级、当时全绿，
 #    没被跑纯粹是因为这行写死了一个文件名，新增夹具要靠人记得回来改。
 # ⚠️ 逐个跑而不是 `for f in …; do bash "$f"; done || rc=1`：后者只保留最后一个的退出码。
+# ⛔ **跳过不是通过**（2026-09-21）：`fn-fetch-events-mcp.sh` 在缺 PyYAML 的机器上
+#    会自己跳过，而它覆盖的正是 429 退避、取不到不落盘这些最危险的分支。
+#    夹具原本打一行 ℹ️ 就 exit 0，混在一片 ✅ 里**看起来像通过了**——
+#    与 F51「一个不会红的检查项」和盲区⑥ 是同一回事。
+#    约定：夹具用**退出码 77** 自述「缺依赖、跳过」，这里单独计数并在末尾报出来。
+_FX_SKIPPED=0
+_FX_SKIPPED_NAMES=""
 for _fx in "$SELF_DIR"/test/fn-*.sh; do
   [ -f "$_fx" ] || continue
-  bash "$_fx" || rc=1
+  _fxrc=0
+  bash "$_fx" || _fxrc=$?
+  if [ "$_fxrc" = 77 ]; then
+    _FX_SKIPPED=$((_FX_SKIPPED + 1))
+    _FX_SKIPPED_NAMES="${_FX_SKIPPED_NAMES}${_FX_SKIPPED_NAMES:+ }$(basename "$_fx")"
+  elif [ "$_fxrc" != 0 ]; then
+    rc=1
+  fi
 done
 
 # ── 9. ShellCheck（可选依赖）─────────────────────────────────────
@@ -225,6 +239,11 @@ if command -v shellcheck >/dev/null 2>&1; then
   fi
 else
   echo "ℹ️ 未安装 shellcheck，跳过静态检查（可选依赖，不影响退出码）"
+fi
+# ⛔ 跳过必须在「全部通过」**之前**报出来，否则读的人只会看见最后那行 ✅。
+if [ "$_FX_SKIPPED" -gt 0 ]; then
+  echo "⚠️ ${_FX_SKIPPED} 个夹具被跳过（缺依赖）：${_FX_SKIPPED_NAMES}"
+  echo "   ⛔ 跳过不是通过——它们覆盖的分支本轮**没有任何验证**。装依赖的办法见夹具头部注释"
 fi
 [ $rc -eq 0 ] && echo "✅ 全部通过"
 exit $rc
