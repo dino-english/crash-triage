@@ -227,6 +227,21 @@ for _fx in "$SELF_DIR"/test/fn-*.sh; do
   fi
 done
 
+# ⛔ 夹具里**不得出现 `exit 0`**（2026-09-21，仍属第 8 项，不新增检查项）。
+#    唯一合法的结尾是 `h_summary`（它按失败数给退出码）。一个提前的 `exit 0`
+#    就是「静默跳过」，而 check-scripts 会把它记成通过——本轮之前
+#    fn-fetch-events-mcp.sh 正是这样把 429 退避等分支藏了起来（盲区⑥）。
+#    缺依赖要跳过就 `exit 77`，上面的循环会单独计数并报出来。
+# ⚠️ 实测基线：本行加入时全仓 fn-*.sh 命中 **0 处**，零误报。
+# ⚠️ 若将来桩脚本的 heredoc 里真的需要 `exit 0`，这条会误报——那时改判据，别删检查。
+# ⛔ grep 无匹配返回 1，必须 || true（F31）。
+_bad_exit="$(grep -nE '^[[:space:]]*exit 0([[:space:]]|$)' "$SELF_DIR"/test/fn-*.sh 2>/dev/null || true)"
+if [ -n "$_bad_exit" ]; then
+  echo "❌ 夹具里出现 \`exit 0\`——⛔ 跳过要用 exit 77，否则会被记成通过："
+  printf '%s\n' "$_bad_exit" | sed 's/^/     /'
+  rc=1
+fi
+
 # ── 9. ShellCheck（可选依赖）─────────────────────────────────────
 # 生产机是无人值守的 Mac mini，不该为开发期工具多一项装机步骤。
 # 未安装 → 跳过并提示，**不影响退出码**；已安装 → 计入。
