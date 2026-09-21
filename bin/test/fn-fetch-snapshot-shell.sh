@@ -138,7 +138,11 @@ h_assert_absent  "$FEIN" "00000000000000000000000000000ff" "⛔ 有真事件的�
 h_assert_eq "5" "$(printf '%s\n' "$FEIN" | grep -c . || true)" \
   "⛔ 节流生效：3 个欠账 + 2 个本轮快照 issue"
 # ⛔ 模型侧必须彻底撒手——它一碰就会写出占位条目（F52）
-h_assert_contains "$PROMPT" "你完全不要碰它" "prompt 明确要求模型不碰事实层"
+h_assert_contains "$PROMPT" "只读不写" "prompt 要求事实层只读不写"
+# ⛔ 2026-09-21 回归：初版写成「不要读它」，L2 当周证据等级从 4 处✅钻取确认掉到 0 处，
+#    模型在报告里原话「未读取…事实层缓存，因此均为⚠️聚合推断」。封锁能力要分清读与写。
+h_assert_contains "$PROMPT" "要读" "⛔ 必须要求模型**读**事实层——那是✅钻取确认的唯一依据"
+h_assert_absent  "$PROMPT" "不要读它" "⛔ 不得禁止读取（禁读 = 证据等级全线降级）"
 h_assert_absent  "$PROMPT" "【本轮欠账补抓】" "⛔ 欠账段不得再进 prompt"
 h_assert_absent  "$PROMPT" "失败 F 个" "⛔ 不得再让模型自报事实层统计"
 _teardown
