@@ -257,7 +257,19 @@ doc_get() { [ -s "$DOC_STORE" ] && jq -r --arg k "${CACHE_NS}|$1" '.[$k] // empt
 # 不清理的话每天净增一个键、从不回收——量不大但属于没人管的增长。
 # index / ledger 这类固定键不带日期，不受影响。
 DOC_KEEP_DAYS="${CRASH_REPORT_DOC_KEEP_DAYS:-90}"
+# ⛔ **空值一律拒绝写入**（2026-09-22 实测事故）：发布失败时 publish_doc 会拿着空 URL 走到这里
+#    （`[ -n "$key" ] && doc_put "$key" "$u"` 只守了键、没守值，而另外两个调用点都守了
+#    `${FURL}` —— 三处里只有它漏，F1 那一类）。当天把生产 docs.json 的 `index`
+#    与 `daily-<今天>` 两个键抹成了空串。
+# ⚠️ 后果不是「少记一条」而是**固定 URL 漂移**：下一轮 doc_get 拿到空 → 走新建分支 → 建出
+#    另一份索引页/台账，而卡片、台账、群里的历史链接全指向旧的那一份，且没有任何告警。
+# ⛔ 守在**写入点**而不是各调用点：调用点会继续增加，漏一个就重演。
+# ⚠️ 拒绝后 return 0 不中断投递——发布失败上游已经打过 ❌，这里再失败一次只会盖掉真正的原因。
 doc_put() {
+  if [ -z "${2:-}" ]; then
+    echo "  ⚠️ 拒绝把空值写进 docs.json（键 $1）——发布多半失败了，保留上一轮的 URL" >&2
+    return 0
+  fi
   local tmp; tmp="$(mktemp)"
   { [ -s "$DOC_STORE" ] && cat "$DOC_STORE" || echo '{}'; } \
     | jq --arg k "${CACHE_NS}|$1" --arg v "$2" '. + {($k):$v}' > "$tmp" && mv "$tmp" "$DOC_STORE"
