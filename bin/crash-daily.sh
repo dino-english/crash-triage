@@ -63,6 +63,10 @@ fi
 # （生产机因 wrapper 里已 export、普通赋值保留 export 属性而侥幸没中招。）
 export CRASH_REPORT_CHAT_ID
 export PATH
+# 投递分流口子：必须在 local.env **之后**，否则会被它盖掉（见 bin/lib/divert.sh 头部）。
+# shellcheck disable=SC1091
+. "$ROOT/bin/lib/divert.sh"
+apply_chat_divert || exit 2
 
 TS="$(date +%Y%m%d-%H%M%S)"
 # 文档标题带时分：同日多次跑批会覆盖 docs.json 里同一份文档（键 daily-<日期>），

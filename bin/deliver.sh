@@ -38,6 +38,10 @@ fi
 # （生产机因 wrapper 里已 export、普通赋值保留 export 属性而侥幸没中招。）
 export CRASH_REPORT_CHAT_ID
 export PATH
+# 投递分流口子：必须在 local.env **之后**，否则会被它盖掉（见 bin/lib/divert.sh 头部）。
+# shellcheck disable=SC1091
+. "$ROOT/bin/lib/divert.sh"
+apply_chat_divert || exit 2
 
 # 身份钉死 bot：user 身份的 refresh token 会过期（需人工重登），无人值守跑必挂；
 # bot 身份不过期。且 bot 导入的文档会自动给 CLI 用户授 full_access，人照样能管。
