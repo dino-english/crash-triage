@@ -385,6 +385,19 @@ p=pathlib.Path(sys.argv[1]); p.write_text(p.read_text().replace(sys.argv[2], sys
 PY
 }
 
+# 发布前断言：**即将发布的那个文件**不得残留未回填占位符（失效模式 F59）。
+# ⛔ 判据落在**文件**上而不是产物上：渲染层会把非法 href 吃掉——2026-09-22 实测生产索引页
+#    既没有链接、也没有残留占位符，`grep __DAILY_URL__` 查产物两条判据同时失效。
+# ⚠️ 抽成顶层函数**逻辑一字未改**，目的只有一个：让 bin/test/fn-index-daily-link.sh 能用
+#    h_load 抽生产原文来测（h_extract 只认列 0 的函数，同 2026-09-05 那次抽取）。
+_assert_filled() { # $1=文件 → 有残留即返回 1
+  local _left
+  _left="$(grep -oE '__[A-Z_]+__' "$1" 2>/dev/null | sort -u | tr '\n' ' ' || true)"
+  [ -z "$_left" ] && return 0
+  echo "  ❌ 发布中止：${1##*/} 仍有未回填占位符：${_left}" >&2
+  return 1
+}
+
 # 报告归档：日报与周报写同一份 JSONL（{type,day,url,...}），索引页据此渲染归档表。
 # 追加时机固定在卡片发送成功之后——归档的语义是「已投递」，不是「已生成」。
 archive_append() { # $1=文档 URL
@@ -642,16 +655,44 @@ case "$TYPE" in
     fi
 
     # 索引页里的入口 URL 必须在导入前回填——文档一旦建好就只能新建不能覆盖
+    #
+    # ⛔ **回填与发布必须作用在同一个文件上**（失效模式 F59）：这里发布的是 XML 版，
+    #    而 XML 是 crash-daily.sh 在回填**之前**由 markdown 转出来的。原实现只 fill
+    #    markdown，于是 index.xml 里始终是 `<a href="__DAILY_URL__">`——
+    #    ⚠️ 飞书**丢掉非法 href 只留文字**，产物里既没有链接、也没有残留占位符，
+    #    `grep __DAILY_URL__` 查产物查不出来。2026-09-22 读回生产索引页才发现，
+    #    「今日日报」那个入口**每天都是秃的**，而归档表 38 条链接全好。
+    #
+    # ⚠️ 自测闸门与台账那条同构：非群投递默认跳过（索引页是群里那份固定文档），
+    #    但显式指定**另一份**文档时放行——否则索引页这条链路在开发机上永远验不了，
+    #    F59 能活这么久正是因为它不可验。
     URL_INDEX=""
-    if [ -n "$INDEX_FILE" ] && [ "$IS_PROD" != "1" ]; then
+    INDEX_DOC_ID="${CRASH_REPORT_INDEX_DOC_ID:-$(m index_doc.doc_id)}"
+    _index_allowed=0
+    if [ "$IS_PROD" = "1" ]; then
+      _index_allowed=1
+    elif [ -n "${CRASH_REPORT_INDEX_DOC_ID:-}" ]; then
+      if [ "$CRASH_REPORT_INDEX_DOC_ID" = "$(doc_get index)" ]; then
+        echo "  ⛔ 拒绝：CRASH_REPORT_INDEX_DOC_ID 指向的正是生产索引页，自测模式下不放行" >&2
+      else
+        echo "  🧪 自测索引页：目标是显式指定的另一份文档，放行" >&2
+        _index_allowed=1
+      fi
+    fi
+    if [ -n "$INDEX_FILE" ] && [ "$_index_allowed" != "1" ]; then
       echo "  ⏭️ 自测模式，跳过索引页覆盖（它是群里那份固定文档）"
     elif [ -n "$INDEX_FILE" ]; then
-      fill "$INDEX_FILE" "__DAILY_URL__"  "$URL_DAILY"
       INDEX_XML="$(m index_doc.xml_file)"
-      if [ -s "$INDEX_XML" ]; then
-        URL_INDEX="$(publish_doc "$INDEX_XML" "$INDEX_TITLE" "$(m index_doc.doc_id)" "$F_ROOT" index xml "$INDEX_FILE")"
+      # ⛔ 两个文件都要填：markdown 是 XML 失败时的回退源，XML 是实际发布的那个。
+      fill "$INDEX_FILE" "__DAILY_URL__"  "$URL_DAILY"
+      [ -s "$INDEX_XML" ] && fill "$INDEX_XML" "__DAILY_URL__" "$URL_DAILY"
+      # ⛔ 发布前断言（_assert_filled，定义在顶层——见那里的注释）
+      if [ -s "$INDEX_XML" ] && _assert_filled "$INDEX_XML"; then
+        URL_INDEX="$(publish_doc "$INDEX_XML" "$INDEX_TITLE" "$INDEX_DOC_ID" "$F_ROOT" index xml "$INDEX_FILE")"
+      elif [ ! -s "$INDEX_XML" ] && _assert_filled "$INDEX_FILE"; then
+        URL_INDEX="$(publish_doc "$INDEX_FILE" "$INDEX_TITLE" "$INDEX_DOC_ID" "$F_ROOT" index)"
       else
-        URL_INDEX="$(publish_doc "$INDEX_FILE" "$INDEX_TITLE" "$(m index_doc.doc_id)" "$F_ROOT" index)"
+        echo "  ⚠️ 索引页本轮未发布（见上方原因）；日报文档与卡片不受影响" >&2
       fi
     fi
 
