@@ -294,9 +294,21 @@ overwrite_doc() { # $1=本地文件 $2=doc_id（URL 或 token） $3=标题（仅
     echo "  [dry-run] lark-cli docs +update --command overwrite --doc $doc --doc-format $fmt --content @$file" >&2
     printf '%s' "$url"; return 0
   fi
-  if ! (cd "$(dirname "$file")" && "${LK[@]}" docs +update --command overwrite --doc "$doc" --doc-format "$fmt" \
-        --content "@$(basename "$file")" --as "$LARK_AS" --format json >/dev/null); then
+  # ⛔ **退出码 0 还不够，必须判 result**（F41，2026-09-22 实测：身份无权限时
+  #    返回 ok:true / rc=0 / result:"failed"，文档 revision 一动没动）。
+  #    旧写法把输出丢进 /dev/null，于是「调用成功、文档没改」会打出「♻️ 原地覆盖」+ 一个
+  #    指向**陈旧内容**的 URL——读者点进去看到的是昨天那份，而链接与日志都说今天已更新。
+  #    ⚠️ 判失败后走既有的 `return 1` 分支（改为新建一份）：宁可多一份可见的新文档，
+  #    也不要一个说谎的覆盖。
+  local _owout
+  if ! _owout="$(cd "$(dirname "$file")" && "${LK[@]}" docs +update --command overwrite --doc "$doc" --doc-format "$fmt" \
+        --content "@$(basename "$file")" --as "$LARK_AS" --format json 2>&1)"; then
     echo "  ⚠️ 覆盖失败（${name}），改为新建一份" >&2; return 1
+  fi
+  if ! _lark_write_ok "$_owout"; then
+    echo "  ⚠️ 覆盖调用成功但**文档未发生变更**（${name}），改为新建一份" >&2
+    echo "     $(printf '%s' "$_owout" | json_only | jq -rc '.data.warnings // []' 2>/dev/null || true)" >&2
+    return 1
   fi
   echo "  ♻️ $name → ${url}（原地覆盖）" >&2
   printf '%s' "$url"
@@ -549,10 +561,21 @@ sync_ledger() { # $1=doc_id  $2=FATAL现状表文件  $3=表格式(xml|markdown)
     # ── Bootstrap：新结构标题不存在 → append 本地台账全文，旧内容保留在上方 ──
     if [ -n "$full_file" ] && [ -s "$full_file" ]; then
       echo "  ℹ️ 台账首次同步：目标文档暂无「${LEDGER_HEADING_TEXT}」标题，改用 append 建立新结构（旧内容保留，不 overwrite）" >&2
-      if ! (cd "$(dirname "$full_file")" && "${LK[@]}" docs +update --command append \
+      # ⛔ **退出码 0 还不够，必须判 result**（F41）——`>/dev/null` 丢掉输出更是把唯一的判据扔了。
+      #    2026-09-22 实测：bot 对目标文档无权限时返回 `ok:true` / rc=0 / `result:"failed"`，
+      #    旧写法照样打 ✅，而文档 revision 一动没动。⚠️ 下面 append 时间线那段一直是对的，
+      #    **这里是同一目的的第二份实现漏了那一步**（F1）。
+      local _bsout
+      if ! _bsout="$(cd "$(dirname "$full_file")" && "${LK[@]}" docs +update --command append \
             --doc "$doc" --doc-format markdown --content "@$(basename "$full_file")" \
-            --as "$LARK_AS" --format json >/dev/null); then
+            --as "$LARK_AS" --format json 2>&1)"; then
         echo "  ❌ 台账首次同步失败：append 全文出错，中止（不退化为 overwrite）" >&2
+        return 1
+      fi
+      if ! _lark_write_ok "$_bsout"; then
+        echo "  ❌ 台账首次同步失败：append 调用成功但**文档未发生变更**，中止（不退化为 overwrite）" >&2
+        echo "     $(printf '%s' "$_bsout" | json_only | jq -rc '.data.warnings // []' 2>/dev/null || true)" >&2
+        echo "     常见原因：当前身份（--as ${LARK_AS}）对目标文档无编辑权限 · profile 未配置导致写操作降级" >&2
         return 1
       fi
       echo "  ✅ 台账新结构已 append 建立；下一轮起可 block_replace 定点更新两张现状表" >&2
