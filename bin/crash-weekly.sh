@@ -1510,7 +1510,10 @@ REPORT="$STATE/reports/$DAY-weekly.md"
   # 读者不需要、排障才需要——原先摆在文档开头与取数区间并列，权重被读成同一级。
   # ⚠️ 只加在文档侧：NOTE_MD 被卡片与群消息逐字节共用，改它本身会把审计路径塞进卡片（F37）。
   # ⚠️ 只加在文档侧（同下一行的理由）：判据解释是给要动这块的人看的，卡片读者不需要。
-  [ -n "$ANR_LEDGER_LONG" ] && printf '%s' "$ANR_LEDGER_LONG"
+  # ⚠️ 结尾必须补换行：`$(printf …)` **吞掉尾部换行**，不补的话本块最后一行与下面
+  #    「本次运行」那行之间没有空行，md2docx 的「连续 > 合成一个 callout」会把排障信息
+  #    粘进 ANR 判据的 💡 框里（2026-09-22 实发才看出来，本地 markdown 看不出所以然）。
+  [ -n "$ANR_LEDGER_LONG" ] && printf '%s\n' "$ANR_LEDGER_LONG"
   printf '\n> 本次运行 %s · 审计 $STATE/audit/weekly-%s.events.jsonl（排障用，非判读须知）\n' "$RUN_ID" "$RUN_ID"
   # 数据/分析分层的可见化：读者必须能一眼看出「本周没有根因分析」是模型不可用，
   # 而不是「本周没问题」。缺分析和无异常是两件完全不同的事。

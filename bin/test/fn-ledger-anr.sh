@@ -72,5 +72,11 @@ if grep -nE '^\s*--arg.*ANR_LEDGER_LONG|CARD_JSON.*ANR_LEDGER_LONG' "$_w" >/dev/
 else
   echo "  ✅ 长版没有出现在卡片的 jq 参数里"; H_PASS=$((H_PASS+1))
 fi
+# ⛔ 长版结尾必须补换行：$(printf …) 吞尾换行，不补会和「本次运行」那行粘成同一个
+# callout（md2docx「连续 > 合成一个」），排障信息被塞进 ANR 判据的 💡 框里。
+# ⚠️ 2026-09-22 **实发才看出来**——本地 markdown 只是少一个空行，看不出所以然。
+_needle="printf '%s\\n' \"\$ANR_LEDGER_LONG\""
+assert_src bin/crash-weekly.sh "$_needle" \
+  '⛔ 长版输出必须带 \\n，否则与「本次运行」粘成同一个 callout'
 
 h_summary
