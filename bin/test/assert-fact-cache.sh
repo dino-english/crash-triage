@@ -91,7 +91,10 @@ while IFS= read -r id; do
       echo "❌ ${id:0:8} latest_event 倒退：$o → ${c}（必须取 max，窗口内 MAX 非单调）"; rc=1
     fi
   fi
-done < <(jq -r '(.ios // [])[].id, (.android // [])[].id' "$SNAP" 2>/dev/null)
+# ⚠️ ANR 也要断：它们进了事实层（change crash-ledger-anr-tracking），
+#    不断就等于新增了一批「没有任何新鲜度校验」的记录。⛔ 用 `//` 兜住旧快照（无 .anr 键）。
+done < <(jq -r '(.ios // [])[].id, (.android // [])[].id,
+                ((.anr.ios) // [])[].id, ((.anr.android) // [])[].id' "$SNAP" 2>/dev/null)
 
 [ "$n" -gt 0 ] || { echo "❌ 快照里没有 issue，无法断言" >&2; exit 1; }
 # ⛔ 非判定项：不改 rc。观测字段刷新与事件明细落盘是两件事，前者正常**不蕴含**后者正常——

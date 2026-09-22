@@ -1101,10 +1101,23 @@ if [ -n "$IOS_PERF_STALE" ] || [ -n "$AND_PERF_STALE" ]; then
   _ast="正常"; [ -n "$AND_PERF_STALE" ] && _ast="停更 ${AND_PERF_STALE} 天（截至 ${AND_PERF_MAX}）"
   PERF_STALE_NOTE="$(printf '\n🟡 **性能数据源停更** — iOS %s · Android %s；Firebase→BigQuery 导出未产出，非流水线故障，本周性能段不可读作「平稳」。' "$_ist" "$_ast")"
 fi
+# 台账的 ANR 跟踪注解（change crash-ledger-anr-tracking）。
+# ⛔ 这个数**放不进台账表块**——deliver.sh 的 block_replace 替换的是单个 <table>，
+#    塞说明文字会把段落挤进表格位置。⇒ 放在每周重算的周报口径行里。
+# ⚠️ 取数命中安全上界时，未入选数只能说「至少」（spec：不得把被截断的结果当全量）。
+ANR_LEDGER_NOTE=""
+if [ -s "$SNAP_NEW" ]; then
+  _anr_in="$(jq -r '[((.anr.ios)//[])[], ((.anr.android)//[])[]] | length' "$SNAP_NEW" 2>/dev/null || echo 0)"
+  _anr_below="$(jq -r '(((.anr_below.ios)//0) + ((.anr_below.android)//0))' "$SNAP_NEW" 2>/dev/null || echo 0)"
+  _anr_trunc="$(jq -r 'if ((.anr_truncated.ios)//false) or ((.anr_truncated.android)//false) then "至少 " else "" end' "$SNAP_NEW" 2>/dev/null || echo "")"
+  if [ "$_anr_in" != "0" ] || [ "$_anr_below" != "0" ]; then
+    ANR_LEDGER_NOTE="$(printf '\n🟡 **台账 ANR 跟踪** — 本轮 %s 条 ANR 入现状表（判据：受影响安装 ≥ 阈值，⛔ 不是 top N——实测单设备长尾占绝大多数，取 top N 会靠 issue_id 排序决定谁进，制造出并不存在的「消失/回归」），另有 %s%s 条单设备 ANR 未列入。⚠️ ANR 的「首次纳入」是**越过阈值那天**，不是首次发生那天。⛔ ANR 不参与本段的新增/回归/消失/暴涨统计。' "$_anr_in" "$_anr_trunc" "$_anr_below")"
+  fi
+fi
 NOTE_MD="$(printf '变化摘要口径：BigQuery 事件级（含已关闭 issue，全版本），近 %s 天窗，**纯脚本取数不经模型**。\n取数区间 %sd：%s\n主力版本 = 近 %s 天会话量 top2 **∪ 当日会话量 top1**（上限 3，每行标注入选理由）。⚠️ 「当日主力」那一版的窗口累计可能很小——它入选是因为**现在线上跑的是它**，与「盘子里的大头」是两个问题。日报看的是「版本号最新的 2 个版本」，三者互补，不可混比。\n崩溃率 = 事件数/会话数 · 对照分支：iOS %s · Android %s
 Crash-free 会话率 = 1 − 崩溃会话数/会话数，**会话口径**。⚠️ 与控制台首屏的**用户**口径不同、**不可直接对照**（用户率通常更低）；用户率不可得——两个数据源的用户标识不同源。本值为**下界估计**，真实值不低于所示数字。
-ANR 仅 Android（iOS 系统层无此概念）；ANR 率与崩溃率同分母，**与 Play 的用户感知 ANR 率口径不同，不可对照商店门槛**。非致命双端**不可比**（收口点覆盖不同）。\n%s%s%s' \
-  "$WEEK_DAYS" "$WEEK_DAYS" "$WIN_COMPACT" "$WEEK_DAYS" "$IOS_BR" "$AND_BR" "$ANALYSIS_NOTE" "$PERF_STALE_NOTE" "$FACT_CACHE_NOTE")"
+ANR 仅 Android（iOS 系统层无此概念）；ANR 率与崩溃率同分母，**与 Play 的用户感知 ANR 率口径不同，不可对照商店门槛**。非致命双端**不可比**（收口点覆盖不同）。\n%s%s%s%s' \
+  "$WEEK_DAYS" "$WEEK_DAYS" "$WIN_COMPACT" "$WEEK_DAYS" "$IOS_BR" "$AND_BR" "$ANALYSIS_NOTE" "$PERF_STALE_NOTE" "$FACT_CACHE_NOTE" "$ANR_LEDGER_NOTE")"
 
 # 入选理由查找（bash 3.2 无关联数组，用行匹配）。⚠️ 取不到时回落「窗口主力」而不是空——
 # 空单元格会被读成「渲染坏了」，而绝大多数情形本来就是窗口主力。

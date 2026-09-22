@@ -85,15 +85,18 @@ if [ -n "$SEEN_FILE" ] && [ -s "$SEEN_FILE" ]; then
 fi
 
 # ── 逐平台构建现状表行 ──────────────────────────────────
-build_rows() { # $1=平台标签(iOS|Android) $2=snapshot key(ios|android)
-  local label="$1" key="$2"
+build_rows() { # $1=平台标签(iOS|Android) $2=snapshot key(ios|android) $3=类型(FATAL|ANR，缺省 FATAL)
+  # ⚠️ 类型只改**取哪个数组**与「类型」列的取值，处置状态 / 生命周期 / 备注三列的判定
+  # 与 FATAL 逐字相同——ANR 走的就是同一套跟踪机制，这正是本 change 的目的。
+  local label="$1" key="$2" etype="${3:-FATAL}"
   local urlpre; urlpre="$(issue_url_prefix "$key")"
   jq -r --arg label "$label" --arg key "$key" --arg day "$DAY" --arg urlpre "$urlpre" \
+    --arg etype "$etype" \
     --slurpfile fm "$FIXMAP" --argjson prev "$PREV_JSON" \
     --argjson seen "$SEEN_JSON" --arg prevday "$SEEN_PREV_DAY" --argjson lcok "$LIFECYCLE_OK" \
     --argjson states "$STATES_JSON" '
     ($fm[0].mapped // {}) as $mapped |
-    (.[$key] // [])[] |
+    (if $etype == "ANR" then ((.anr[$key]) // []) else (.[$key] // []) end)[] |
     . as $iss |
     ($iss.id[0:8]) as $short |
     ($mapped[$iss.id] // null) as $fix |
@@ -104,7 +107,7 @@ build_rows() { # $1=平台标签(iOS|Android) $2=snapshot key(ios|android)
       short: $short,
       full: $iss.id,
       title: $iss.title,
-      type: "FATAL",
+      type: $etype,
       # 基准的 first 优先：issue 消失后从现状表掉出，$p 随之为空，
       # 只看 $p 会把回归的 issue 记成「今天首次纳入」。
       first_seen: ($s.first // $p.first_seen // $day),
@@ -149,6 +152,11 @@ build_rows() { # $1=平台标签(iOS|Android) $2=snapshot key(ios|android)
   printf '|---|---|---|---|---|---|---|---|---|\n'
   build_rows "iOS" ios
   build_rows "Android" android
+  # ANR 与 FATAL 同表，靠「类型」列区分（spec crash-perf-ledger-ownership）。
+  # ⛔ 不按类型拆表：与 NON_FATAL 分表的理由是**量级**（iOS 14 天 1020 条会淹没 FATAL），
+  #    而 ANR 过影响面阈值后是个位数。⚠️ 哪天过阈值的 ANR 多过 FATAL，拆表前提才成立。
+  build_rows "iOS" ios ANR
+  build_rows "Android" android ANR
 } > /tmp/.render-ledger-table.$$
 TABLE_MD="$(cat /tmp/.render-ledger-table.$$)"
 rm -f /tmp/.render-ledger-table.$$
@@ -236,7 +244,9 @@ done < <(jq -r '.mapped // {} | to_entries[] | [.key, .value.platform, .value.st
 # ⚠️ last 一律刷成本轮日期；超期条目按 SEEN_CUTOFF 清理（缺省则不清理）。
 SEEN_NEXT="$(jq -c --argjson prev "$PREV_JSON" --argjson seen "$SEEN_JSON" \
   --arg day "$DAY" --arg cut "$SEEN_CUTOFF" '
-  [(.ios // [])[], (.android // [])[]]
+  # ⛔ ANR 必须一起进基准：现状表已经在渲染它们，基准里没有就等于每轮 $s 都是 null，
+  #    生命周期列会**永远**判「🆕新增」——一个每周都说自己是新的条目，比不显示更糟。
+  [(.ios // [])[], (.android // [])[], ((.anr.ios) // [])[], ((.anr.android) // [])[]]
   | map({ id: .id, short: (.id[0:8]) })
   | map({ key: .id,
           value: { first: ((($seen[.id] // {}).first) // (($prev[.short] // {}).first_seen) // $day),

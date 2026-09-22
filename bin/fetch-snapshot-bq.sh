@@ -103,6 +103,17 @@ nonfatal_rows() { # $1=平台键 $2=crashlytics表 → JSON 数组
   bq_json "$sql"
 }
 
+# ANR issue 级取数（change crash-ledger-anr-tracking）。⚠️ 常量定义在使用点之前。
+# ⛔ **阈值不下推到 SQL**：那样「未入选有几条」就丢了，而台账的既有纪律是未呈现的数量必须标注。
+# ⚠️ LIMIT 只是安全上界；返回行数等于它时视为可能截断，渲染层把注解改成「至少 N 条」。
+ANR_LIMIT="${CRASH_REPORT_LEDGER_ANR_LIMIT:-50}"
+ANR_MIN_USERS="${CRASH_REPORT_LEDGER_ANR_MIN_USERS:-2}"
+anr_rows() { # $1=平台键 $2=crashlytics表 → JSON 数组（全量，未过阈值）
+  local sql
+  sql="$(q_render crash-anr-issues.sql TABLE="$2" DAYS="$DAYS" LIMIT="$ANR_LIMIT")" || return 0
+  bq_json "$sql"
+}
+
 IOS_TBL="$PROJECT.firebase_crashlytics.com_prime_dino_english_IOS_REALTIME"
 AND_TBL="$PROJECT.firebase_crashlytics.com_prime_dino_english_ANDROID_REALTIME"
 
@@ -111,6 +122,10 @@ IOS_RAW="$(platform_rows ios "$IOS_TBL")"
 AND_RAW="$(platform_rows android "$AND_TBL")"
 IOS_NF="$(nonfatal_rows ios "$IOS_TBL")"
 AND_NF="$(nonfatal_rows android "$AND_TBL")"
+# ⚠️ ANR 仅 Android——iOS 照样跑，同一份 SQL 双端共用、自然返回 0 行
+# （同 crash-rate.sql 的 affected_users：Android 恒 0 也不分叉）。
+IOS_ANR="$(anr_rows ios "$IOS_TBL")"
+AND_ANR="$(anr_rows android "$AND_TBL")"
 
 # 两端都空 = bq 真出了问题（正常情况下至少一端有数据）。这里必须失败，
 # 否则会把「取数挂了」渲染成「本周零崩溃」——那是最坏的一种错误报告。
@@ -132,6 +147,8 @@ fi
 
 jq -n --argjson ios "$IOS_RAW" --argjson android "$AND_RAW" \
       --argjson iosnf "$IOS_NF" --argjson andnf "$AND_NF" \
+      --argjson iosanr "$IOS_ANR" --argjson andanr "$AND_ANR" \
+      --argjson anrmin "$ANR_MIN_USERS" --argjson anrlimit "$ANR_LIMIT" \
       --argjson fixmap "$FIXMAP_JSON" '
   def norm($plat):
     map({
@@ -148,8 +165,17 @@ jq -n --argjson ios "$IOS_RAW" --argjson android "$AND_RAW" \
       fix_commit:   ($fixmap[(.id[0:8])].commit  // null),
       fix_branches: ($fixmap[(.id[0:8])].branches // null)
     });
+  # ANR：过阈值的进台账，未入选的只留计数。⛔ 不静默丢弃（同 NON_FATAL 的截断标注纪律）。
+  # ⚠️ 走同一个 norm：台账渲染读的是 .id/.title/.events，字段形状必须与 FATAL 一致。
+  def anrpass: map(select((.users | tonumber) >= $anrmin));
   {ios: ($ios | norm("ios")), android: ($android | norm("android")),
-   nonfatal: {ios: $iosnf, android: $andnf}}
+   nonfatal: {ios: $iosnf, android: $andnf},
+   anr: {ios:     ($iosanr | anrpass | norm("ios")),
+         android: ($andanr | anrpass | norm("android"))},
+   anr_below: {ios:     (($iosanr | length) - ($iosanr | anrpass | length)),
+               android: (($andanr | length) - ($andanr | anrpass | length))},
+   anr_truncated: {ios:     (($iosanr | length) >= $anrlimit),
+                   android: (($andanr | length) >= $anrlimit)}}
 ' > "$SNAP"
 
 jq -e '.ios and .android' "$SNAP" >/dev/null || { echo "  ❌ snapshot.json 结构异常" >&2; exit 1; }
@@ -217,7 +243,11 @@ while IFS=$'\t' read -r iid plat title events users latest; do
   if [ "$_rc" = 0 ]; then REC_UPDATED=$((REC_UPDATED+1)); else REC_FAILED=$((REC_FAILED+1)); fi
 done < <(jq -r '
   (.ios     | map([.id,"ios",     .title, (.events|tostring), (.users|tostring), (.latest // "")] | @tsv) | .[]),
-  (.android | map([.id,"android", .title, (.events|tostring), (.users|tostring), (.latest // "")] | @tsv) | .[])
+  (.android | map([.id,"android", .title, (.events|tostring), (.users|tostring), (.latest // "")] | @tsv) | .[]),
+  # ⛔ 只有**过阈值**的 ANR 进事实层：它「一次抓永久留、不参与清理」，
+  #    给 32 条单设备长尾建档会让每轮 fetch-issue-states.py 的 MCP 调用数无限增长。
+  ((.anr.ios     // []) | map([.id,"ios",     .title, (.events|tostring), (.users|tostring), (.latest // "")] | @tsv) | .[]),
+  ((.anr.android // []) | map([.id,"android", .title, (.events|tostring), (.users|tostring), (.latest // "")] | @tsv) | .[])
 ' "$SNAP")
 
 # ⛔ 多字节字符不能紧跟 ${var}：bash 会把全角括号的后续字节并进变量名，
