@@ -112,8 +112,14 @@ build_rows() { # $1=平台标签(iOS|Android) $2=snapshot key(ios|android)
       # ⛔ **已关闭优先于反扫结论**（失效模式 R4）：反扫读的是永久保留的事实层缓存，
       #    关掉的 issue 永远留在里面，不加这一层就会把 CLOSED 的标成「已修待验」，
       #    让人去跟进已经关掉的问题。2026-09-11 实测：台账 6 条已修待验中 4 条已 CLOSED。
+      # ⛔ **MUTED 是第三态，不得与 CLOSED 合并也不得落进「未处理」**
+      #    （change crash-issue-state-visibility，2026-09-22 实测存在）：
+      #    CLOSED 是「认为已了结」，MUTED 是「知情并主动不处理」——压成一格
+      #    会让被静音的问题反复被推给人跟进，正是 R4 那个 bug 的镜像。
       disposition: (if $states[$iss.id] == "CLOSED" then
                       (if $fix != null then "✅已关闭（\($fix.commit)）" else "✅已关闭" end)
+                    elif $states[$iss.id] == "MUTED" then
+                      (if $fix != null then "🔕已静音（\($fix.commit)）" else "🔕已静音" end)
                     elif $fix != null then $fix.status
                     elif $p.disposition != null and $p.disposition != "" then $p.disposition
                     else "未处理" end),
@@ -221,6 +227,7 @@ while IFS=$'\t' read -r id plat status commit subject; do
   #    那是给人看的待办信号，而它已经关了。
   _st="$(printf '%s' "$STATES_JSON" | jq -r --arg k "$id" '.[$k] // ""' 2>/dev/null || true)"
   if [ "$_st" = "CLOSED" ]; then status="✅已关闭"; fi
+  if [ "$_st" = "MUTED" ]; then status="🔕已静音"; fi
   add_line "🛠️ [$plat] $status ${subject}（${commit}，issue ${id:0:8}）"
 done < <(jq -r '.mapped // {} | to_entries[] | [.key, .value.platform, .value.status, .value.commit, .value.subject] | @tsv' "$FIXMAP" 2>/dev/null || true)
 

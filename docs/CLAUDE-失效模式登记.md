@@ -815,6 +815,7 @@ L1 摘要行的三态分列（新增 / 回归 / 长期）在生产上**只行使
 | F10 | 核心层出现 `bq` / `$STATE` / `$ROOT` | 第 3 项依赖方向 lint |
 | F11 | `bq query` 直连绕过 `bqq`（会在等价性冻结面上开洞） | 第 5 项 |
 | F12 | 纯函数行为回归 | 第 6 项，51 条断言 |
+| F14b | issue 开关状态三态渲染漂移（CLOSED/MUTED 被并掉、渲染点只接一处） | `bin/test/fn-issue-state-cell.sh` 12 条 + `fn-ledger-closed.sh` 20 条，含 4 条源码断言钉住**四条**渲染路径（明细表 md / 明细表 DocxXML / 台账现状表 / 台账时间线）与两条卡片路径 |
 | F13 | 事实层缓存策略在 prompt 与 bash 中漂移 | `bin/test/assert-fact-cache.sh`（产物断言，跨语言重复没别的办法）。⚠️ **只断刷新时刻，不断内容**——events 空着照样打 ✅，见 F45 |
 
 ⚠️ 这些 lint **只在 `check-scripts.sh` 被运行时生效**。改完必跑——本会话 2 次被它当场拦下（F8、F9），都是我自己引入的。
@@ -822,6 +823,42 @@ L1 摘要行的三态分列（新增 / 回归 / 长期）在生产上**只行使
 ---
 
 ## 三、验证纪律（本会话实测翻过车）
+
+### F55 · ⛔ Firebase 控制台不是真值——它默认只显示 OPEN，报告比它全
+
+2026-09-22 用 `crashlytics_get_report`（控制台同源 API）与 BigQuery 同窗逐条对：
+
+| 段 | Firebase topIssues | BigQuery 同窗 | 差集 |
+| --- | --- | --- | --- |
+| Android FATAL | 4 条 / 16 次 | **12 条 / 51 次** | 7 CLOSED + 1 MUTED |
+| Android ANR | 20 条 / 43 次 | 35 条 / 59 次 | `pageSize=20` **正好截断** |
+| Android 非致命 | 2 条 / 80 次 | 2 条 / 80 次 | 0 |
+| iOS FATAL | 1 条 / 1 次 | 1 条 / 1 次 | 0 |
+| iOS 非致命 | 6 条 / 484 次 | 6 条 / 483 次 | 1（API 自然日窗恒大 0~2） |
+
+**数值没有错**：可比的 5 条 FATAL 逐条 events/users/sessions 全等。差集 100% 由
+「默认只显示 OPEN」解释——逐个 `crashlytics_get_issue` 复核，出现在 topIssues 的
+恰好就是那 4 条 OPEN，一条不差。
+
+⛔ **所以「拿控制台核报告，对不上就是报告错了」这个判据是反的。** 两处咬人：
+
+1. **差集里有当天事件量最大的两条**：`fb6588bb`（11 次 / 8 台）与 `227fc097`（10 次 / 4 台），
+   都已 CLOSED 却都还在现网 1.7.1 上崩。⚠️ 「已关闭但仍在崩」正是最该看见的信号，
+   但**它需要被标出来才读得出来**——在此之前报告一个字没说。
+   已修（change `crash-issue-state-visibility`）：明细表加「开关」列，
+   原「状态」列改名「生命周期」（两者正交，F26 同名不同义）。
+2. **ANR 那一段是我们更全**：`pageSize=20` 当天正好截断，控制台侧只能看到 43/59 事件。
+   ⇒ ⛔ 别把 topIssues 的条数当「issue 总数」。
+
+⚠️ **还没修的两条**（登记在此，不是待办）：
+- **性能表没有任何去重键**（schema 13 字段，无 `event_id` / `session_id`）——F48 扫过
+  sessions 与 crashlytics，唯独漏了 `firebase_performance`，而 P50/P95 是在裸行上算分位数。
+  2026-09-22 用「时间戳+设备+trace+时长」四元组近似测近 5 天 amp ≈ 1.000（干净），
+  ⛔ 但它是三张表里**唯一一张事后也验不出来**的：近似只能证伪不能证实。
+- **台账里一条 ANR 都没有**（实测 grep 0 处）。当天 Android 按受影响安装排第一的是 ANR
+  `4d05f9e7 nativePollOnce`（20 次 / 16 台 / 三个版本），比头号 FATAL（11 次 / 8 台）大一倍。
+  `crash-issues-all.sql` 是 `is_fatal = TRUE`，ANR 只有率与维度表，**无按 issue 跟踪处置的通路**。
+
 
 ### F54 · prompt 文本里的反引号会在跑批时**执行命令**
 

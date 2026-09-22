@@ -443,6 +443,32 @@ CardKit v2 的 `table` 组件字段只有 `rows` / `page_size` / `row_height` / 
   - **修复状态由代码提交驱动**：commit message 约定 `[crash:<8位id>]`，`bin/scan-fix-commits.sh` 反扫两个业务仓库 `git log --all --grep='\[crash:' --since='14 days'` 自动更新「处置状态」列。纯只读、不 checkout / reset、**不在业务仓库装任何 hook**——反扫幂等可补漏，hook 漏一次就永久没记录，且要在团队共用仓库里配飞书凭证。8 位短 id 撞到多个 issue 时不自动更新，标为待人工确认。
   - **性能不进台账**：性能是连续指标、无追踪 ID，只在 L2 周报做趋势与页面定位，且不出根因。
 
+### issue 开关状态：可得，但只能逐个查（2026-09-22，change `crash-issue-state-visibility`）
+
+⛔ **「开关状态不可得」是已订正的过期结论**。原判断（spec `crash-source-bigquery-migration`）
+写的是「唯一通路是 MCP `topIssues`，而它只返回 OPEN」——2026-09-11 起
+`bin/fetch-issue-states.py` 逐个调 `crashlytics_get_issue` 取 state，不受此限；
+2026-09-22 实测 12 个 id 全部取到，且取回了 `topIssues` 结构上给不出的第三态 **MUTED**。
+
+- **三态 + 一个缺失态，⛔ 四者不得合并**：`OPEN` → 开启｜`CLOSED` → ✅已关闭｜
+  `MUTED` → 🔕已静音｜取不到 → ？未取到；其他取值**原样透传**。
+  ⛔ OPEN 不得渲染成空（与「取不到」无法区分）；⛔ 未知不得当成 OPEN（会把已关掉的问题
+  重新推给人跟进）也不得当成 CLOSED（会让 issue 凭空消失，R4 原话）。
+- ⛔ **CLOSED 与 MUTED 不是同义**：前者「认为已了结」，后者「知情并主动不处理」。
+  压成一格会让被静音的问题反复被推给人跟进——R4 那个 bug 的镜像。
+- ⛔ **统计口径一个字不改**：事件计数 / 崩溃率 / 受影响安装继续来自 BigQuery 事件级，
+  **不因 issue 被关闭而排除其事件**。开关状态只是标注列。
+- **六条渲染路径，改一条不够**（F35 / R4 同源）：明细表 markdown、明细表 DocxXML、
+  台账现状表、台账变更时间线、卡片 `_fix_rows`、卡片变化行。
+  ⚠️ DocxXML 那条还藏着一个：`xml_csv_table` 的链接列规格 `1:9:<prefix>` 里的 **9 是
+  完整 32 位 id 的列号**，插列后改漏不报错，只会静默产出指向「最新」列的坏链接。
+- ⚠️ **事实层只有 FATAL**（`crash-issues-all.sql` 是 `is_fatal = TRUE`），且由 L2 周报写入。
+  周中新出现的 issue 缓存里一条没有——L1 因此按**本轮明细表要渲染的 id** 补查
+  （`--extra-ids`，平台键要换成 `ios` / `android`，⛔ 不是 L1 内部的 `ios` / `and`，F43）。
+  ⛔ **不给补查的 id 建事实层文件**：`.source` 由创建者写死、`assert-fact-cache.sh`
+  的断言建立在「记录由 L2 抓取路径创建」之上，桩记录会污染两者。
+- ⚠️ **非致命表不给开关列**：NON_FATAL 不进事实层，全列取不到，加了就是一列「？未取到」。
+
 ## 从 CLAUDE.md 下沉的口径（2026-09-04）
 
 为把仓库常驻记忆压回 8,000 字符预算，CLAUDE.md 的「数据口径」整节下沉到本文档。

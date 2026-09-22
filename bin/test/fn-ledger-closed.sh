@@ -17,6 +17,8 @@ disp() { # $1=state $2=有无反扫命中(1/0) $3=历史结论
     (if $has == 1 then {status:"已修待验", commit:"abc1234"} else null end) as $fix
     | (if $st == "CLOSED" then
          (if $fix != null then "✅已关闭（\($fix.commit)）" else "✅已关闭" end)
+       elif $st == "MUTED" then
+         (if $fix != null then "🔕已静音（\($fix.commit)）" else "🔕已静音" end)
        elif $fix != null then $fix.status
        elif $prev != "" then $prev
        else "未处理" end)'
@@ -27,6 +29,13 @@ h_assert_eq "✅已关闭"            "$(disp CLOSED 0 "")"      "CLOSED 且无�
 h_assert_eq "人工结论"            "$(disp OPEN 0 "人工结论")" "OPEN 无反扫 → 保留历史结论"
 h_assert_eq "未处理"              "$(disp OPEN 0 "")"        "都没有 → 未处理"
 h_assert_eq "已修待验"            "$(disp "" 1 "")"          "⚠️ 状态未知时退回旧行为（⛔ 不把未知当已关闭）"
+
+echo "── MUTED 是第三态（change crash-issue-state-visibility，2026-09-22 实测存在）──"
+# ⛔ CLOSED 是「认为已了结」，MUTED 是「知情并主动不处理」——压成一格会让被静音的
+#    问题反复被推给人跟进，正是 R4 那个 bug 的镜像。
+h_assert_eq "🔕已静音（abc1234）" "$(disp MUTED 1 "")"       "⛔ MUTED + 反扫命中 → 已静音，**不得**是已修待验"
+h_assert_eq "🔕已静音"            "$(disp MUTED 0 "")"       "⛔ MUTED 无反扫 → 已静音，**不得**落进未处理"
+h_assert_eq "🔕已静音"            "$(disp MUTED 0 "人工结论")" "MUTED 优先于历史结论（与 CLOSED 对称）"
 
 echo "── 源码断言：生产脚本确实这么写 ──"
 for pat in 'if $states[$iss.id] == "CLOSED" then' 'CRASH_REPORT_ISSUE_STATES' 'status="✅已关闭"'; do
@@ -46,7 +55,11 @@ echo "── ⛔ 三条渲染路径都要接（2026-09-11 只接了台账那条�
 # 同一个 fixmap 会被三处渲染：台账现状表 / 卡片 _fix_rows / 卡片变化行并入。
 for pat in 'if $states[$iss.id] == "CLOSED" then:render-ledger.sh' \
            '_fr_state" = "CLOSED":crash-weekly.sh' \
-           '_cr_state" = "CLOSED":crash-weekly.sh'; do
+           '_cr_state" = "CLOSED":crash-weekly.sh' \
+           'if $states[$iss.id] == "MUTED" then:render-ledger.sh' \
+           '_fr_state" = "MUTED":crash-weekly.sh' \
+           '_cr_state" = "MUTED":crash-weekly.sh' \
+           '_st" = "MUTED":render-ledger.sh'; do
   needle="${pat%%:*}"; file="${pat##*:}"
   if grep -qF "$needle" "$ROOT/bin/$file"; then
     echo "  ✅ $file 已接：${needle:0:28}"; H_PASS=$((H_PASS+1))

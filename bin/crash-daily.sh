@@ -1303,6 +1303,27 @@ _id_link() { # $1=平台键(ios/android) $2=完整 issue id → markdown 链接�
   if [ -n "$_u" ]; then printf '[%s](%s)' "${2:0:8}" "$_u"; else printf '%s' "${2:0:8}"; fi
 }
 
+# Crashlytics 开关状态映射 {完整id: OPEN|CLOSED|MUTED}（change crash-issue-state-visibility）。
+# 默认空表：状态取不到时明细表渲染「？未取到」，⛔ 不阻塞跑批——它是标注列，不参与任何数字。
+ISSUE_STATES_JSON='{}'
+# ⛔ 与 life_tag **正交**：那是流水线自己的历史快照判定（新增/回归/长期），
+#    这是 Firebase 侧的开关。一个 CLOSED 的 issue 完全可以同时是「长期」。
+# ⛔ 四态一个都不能合并：OPEN 渲染成空就与「取不到」无法区分；把未知当 OPEN 会把
+#    已关掉的问题重新推给人跟进，当 CLOSED 会让 issue 凭空消失（失效模式 R4 原话）。
+# ⚠️ 未知取值**原样透传**——Firebase 日后加新状态时，宁可渲染出一个看不懂的词，
+#    也不要静默吞成已知三态之一。
+issue_state_cell() { # $1=完整 issue id → 开关列单元格
+  local st
+  st="$(printf '%s' "$ISSUE_STATES_JSON" | jq -r --arg i "$1" '.[$i] // ""' 2>/dev/null || echo "")"
+  case "$st" in
+    OPEN)   printf '开启';;
+    CLOSED) printf '✅已关闭';;
+    MUTED)  printf '🔕已静音';;
+    "")     printf '？未取到';;
+    *)      printf '%s' "$st";;
+  esac
+}
+
 life_tag() { # $1=完整 issue id → 🆕新增 / 🔁回归 / 长期 / 空（基线轮）
   [ "$LIFECYCLE_OK" = 1 ] || { printf ''; return 0; }
   local last
@@ -1357,7 +1378,21 @@ if [ "$MCP_OK" = 1 ]; then
   #    其中 6 条被报成「已修待验」。状态由 fetch-issue-states.py 逐个取回（纯确定性，不经模型）。
   # ⚠️ 状态同步失败时**保持缓存里的原值**，⛔ 不把未知当成 CLOSED——那会让 issue 凭空消失。
   if [ -f "$ROOT/bin/fetch-issue-states.py" ]; then
-    python3 "$ROOT/bin/fetch-issue-states.py" "$STATE" >&2 || echo "  ⚠️ issue 状态同步失败，沿用缓存里的既有 state" >&2
+    # 明细表要标开关状态，而它渲染的 issue 未必都在事实层里——事实层由 L2 周报写入，
+    # 周中新出现的 issue 一条没有（2026-09-22 实测：当天事件量最大的两条都不在缓存里）。
+    # ⚠️ 平台键在这里必须换成 ios/android，⛔ 不是 L1 内部用的 ios/and（失效模式 F43）。
+    _st_ids="$CRASH_DIR/issue-state-ids.tsv"
+    : > "$_st_ids"
+    for _st_f in "$TMP"/issues-*.json; do
+      [ -s "$_st_f" ] || continue
+      _st_b="${_st_f##*/issues-}"; _st_p="${_st_b%%-*}"
+      [ "$_st_p" = and ] && _st_p=android
+      jq -r --arg p "$_st_p" '.[]? | select(.issue_id) | "\($p)\t\(.issue_id)"' "$_st_f" 2>/dev/null >> "$_st_ids" || true
+    done
+    sort -u "$_st_ids" -o "$_st_ids" 2>/dev/null || true
+    python3 "$ROOT/bin/fetch-issue-states.py" "$STATE" \
+      --extra-ids "$_st_ids" --emit-map "$CRASH_DIR/issue-states.json" >&2 \
+      || echo "  ⚠️ issue 状态同步失败，沿用缓存里的既有 state" >&2
   fi
   FIXMAP_L1="$CRASH_DIR/fixmap.json"
   if [ -x "$ROOT/bin/scan-fix-commits.sh" ] \
@@ -1378,6 +1413,16 @@ if [ "$MCP_OK" = 1 ]; then
   fi
 
   [ "${FIXED_PENDING:-0}" -gt 0 ] 2>/dev/null && add_alert "🔴 ${FIXED_PENDING} 个 issue 代码已修但未发版（全版本口径）"
+fi
+# 开关状态映射：**缓存态打底**（同步整个失败时仍可用），本轮补查结果覆盖/补充。
+# ⛔ 顺序不可颠倒：emit-map 只含本轮成功取到的，拿它当全集会把同步失败的那几条
+#    从「已关闭」打回「未取到」——那是把已有信息丢掉。
+ISSUE_STATES_JSON="$(jq -sc 'map(select(.id != null and .state != null) | {key: .id, value: .state}) | from_entries' \
+  "$STATE"/issues/*.json 2>/dev/null || echo '{}')"
+if [ -s "$CRASH_DIR/issue-states.json" ]; then
+  ISSUE_STATES_JSON="$(jq -cn --argjson a "$ISSUE_STATES_JSON" \
+    --slurpfile b "$CRASH_DIR/issue-states.json" '$a * ($b[0] // {})' 2>/dev/null \
+    || printf '%s' "$ISSUE_STATES_JSON")"
 fi
 add_alert "$(red_line "崩溃率" "$IOS_RATE_PCT" "$AND_RATE_PCT" "$CRASH_RATE_RED" "$CRASH_RATE_YELLOW" "%")"
 add_alert "$(red_line "慢帧最差页" "$IOS_SLOW_V1" "$AND_SLOW_V1" "$SLOW_FRAME_RED" "$SLOW_FRAME_YELLOW" "%")"
@@ -2091,12 +2136,13 @@ issues_table() { # $1=plat $2=版本
   fi
   # 集中度 = 事件 / 受影响安装：9 次影响 1 台（9.0）与 14 次影响 7 台（2.0）严重度完全不同，
   # 而只看事件数两者长得一样。排序已在 SQL 里改成按 users（change crash-impact-summary D3）。
-  printf '| Issue | 状态 | 标题 | 事件 | 影响安装 | 集中度 | 最新 |\n|---|---|---|---|---|---|---|\n'
-  # 状态列逐行取：life_tag 要完整 id，而表里只显示短 id
+  printf '| Issue | 生命周期 | 开关 | 标题 | 事件 | 影响安装 | 集中度 | 最新 |\n|---|---|---|---|---|---|---|---|\n'
+  # 生命周期与开关两列都逐行取：两者都要完整 id，而表里只显示短 id。
+  # ⛔ 两列**不可合并**：一个是我们自己的历史判定，一个是 Firebase 侧的开关状态
   jq -r '.[] | [.issue_id, (if (.title // "") == "" then "—" else .title end), (.n|tostring), (.users|tostring), (((( .n|tonumber ) / (if (.users|tonumber) == 0 then 1 else (.users|tonumber) end) * 10 | round) / 10)|tostring), .latest] | @tsv' "$f" 2>/dev/null \
   | while IFS=$'\t' read -r fid ti n us cc la; do
       [ -n "$fid" ] || continue
-      printf '| %s | %s | %s | %s | %s | %s | %s |\n' "$(_id_link "$1" "$fid")" "$(life_tag "$fid")" "$ti" "$n" "$us" "$cc" "$la"
+      printf '| %s | %s | %s | %s | %s | %s | %s | %s |\n' "$(_id_link "$1" "$fid")" "$(life_tag "$fid")" "$(issue_state_cell "$fid")" "$ti" "$n" "$us" "$cc" "$la"
     done
   printf '\n'
 }
@@ -2308,10 +2354,12 @@ xml_issues() { # $1=plat $2=版本
   | while IFS=$'\t' read -r fid ti n us cc la; do
       [ -n "$fid" ] || continue
       # 第 8 列是完整 32 位 id：**不显示**，只供渲染器构造链接（⛔ 不能用 8 位短 id 拼回去）
-      printf '"%s","%s","%s","%s","%s","%s","%s","%s"\n' "${fid:0:8}" "$(life_tag "$fid")" "$ti" "$n" "$us" "$cc" "$la" "$fid" \
+      printf '"%s","%s","%s","%s","%s","%s","%s","%s","%s"\n' "${fid:0:8}" "$(life_tag "$fid")" "$(issue_state_cell "$fid")" "$ti" "$n" "$us" "$cc" "$la" "$fid" \
         >> "$TMP/iss-$1-$2.csv"
     done
-  xml_csv_table "$TMP/iss-$1-$2.csv" 'Issue,状态,标题,事件,影响安装,集中度,最新' '1,2,3,4,5,6,7' "1:8:$(issue_url_prefix "$1")"
+  # ⚠️ 链接列规格里的 9 是**完整 32 位 id 的列号**，随开关列插入从 8 变 9——
+  #    改漏不会报错，只会让每条链接指向「最新」列的内容（静默产出坏链接）。
+  xml_csv_table "$TMP/iss-$1-$2.csv" 'Issue,生命周期,开关,标题,事件,影响安装,集中度,最新' '1,2,3,4,5,6,7,8' "1:9:$(issue_url_prefix "$1")"
 }
 xml_nonfatal() { # $1=plat $2=版本
   local f="$TMP/nonfatal-$1-$2.json"
