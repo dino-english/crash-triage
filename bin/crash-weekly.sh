@@ -1105,13 +1105,20 @@ fi
 # ⛔ 这个数**放不进台账表块**——deliver.sh 的 block_replace 替换的是单个 <table>，
 #    塞说明文字会把段落挤进表格位置。⇒ 放在每周重算的周报口径行里。
 # ⚠️ 取数命中安全上界时，未入选数只能说「至少」（spec：不得把被截断的结果当全量）。
-ANR_LEDGER_NOTE=""
+ANR_LEDGER_NOTE=""; ANR_LEDGER_LONG=""
 if [ -s "$SNAP_NEW" ]; then
   _anr_in="$(jq -r '[((.anr.ios)//[])[], ((.anr.android)//[])[]] | length' "$SNAP_NEW" 2>/dev/null || echo 0)"
   _anr_below="$(jq -r '(((.anr_below.ios)//0) + ((.anr_below.android)//0))' "$SNAP_NEW" 2>/dev/null || echo 0)"
   _anr_trunc="$(jq -r 'if ((.anr_truncated.ios)//false) or ((.anr_truncated.android)//false) then "至少 " else "" end' "$SNAP_NEW" 2>/dev/null || echo "")"
   if [ "$_anr_in" != "0" ] || [ "$_anr_below" != "0" ]; then
-    ANR_LEDGER_NOTE="$(printf '\n🟡 **台账 ANR 跟踪** — 本轮 %s 条 ANR 入现状表（判据：受影响安装 ≥ 阈值，⛔ 不是 top N——实测单设备长尾占绝大多数，取 top N 会靠 issue_id 排序决定谁进，制造出并不存在的「消失/回归」），另有 %s%s 条单设备 ANR 未列入。⚠️ ANR 的「首次纳入」是**越过阈值那天**，不是首次发生那天。⛔ ANR 不参与本段的新增/回归/消失/暴涨统计。' "$_anr_in" "$_anr_trunc" "$_anr_below")"
+    # ⛔ **短版**：NOTE_MD 被卡片与群消息**逐字节共用**（本文件 1504 行的注释写着这条，
+    #    F37 同源）。初版在这里塞了 200 多字的判据解释，实测整条糊进了 card.json——
+    #    卡片读者要的是「有没有、几条」，不是为什么这么筛。长版只进文档侧（见下方 ANR_LEDGER_LONG）。
+    ANR_LEDGER_NOTE="$(printf '\n🟡 **台账 ANR 跟踪** — 本轮 %s 条入现状表，另有 %s%s 条单设备 ANR 未列入。' \
+      "$_anr_in" "$_anr_trunc" "$_anr_below")"
+    # 长版：⚠️ **只加在文档侧**，⛔ 不得并进 NOTE_MD。
+    ANR_LEDGER_LONG="$(printf '\n> **台账的 ANR 入选判据**：受影响安装 ≥ 阈值，⛔ **不是 top N**。实测单设备长尾占绝大多数（本轮 %s 条里 %s 条只影响 1 台），在完全并列的取值上取 top N，成员资格由 issue_id 字典序决定——新条目一出现就把旧的挤出榜单，台账随即报「消失」、下轮报「回归」，而这些变化没有任何事实对应。\n> ⚠️ ANR 的「首次纳入」是**越过阈值那天**，不是首次发生那天，与 FATAL 的语义不同。\n> ⛔ ANR **不参与**变化摘要的新增/回归/消失/暴涨统计与复发率；但处置状态变更照常进变更时间线。\n' \
+      "$((_anr_in + _anr_below))" "$_anr_below")"
   fi
 fi
 NOTE_MD="$(printf '变化摘要口径：BigQuery 事件级（含已关闭 issue，全版本），近 %s 天窗，**纯脚本取数不经模型**。\n取数区间 %sd：%s\n主力版本 = 近 %s 天会话量 top2 **∪ 当日会话量 top1**（上限 3，每行标注入选理由）。⚠️ 「当日主力」那一版的窗口累计可能很小——它入选是因为**现在线上跑的是它**，与「盘子里的大头」是两个问题。日报看的是「版本号最新的 2 个版本」，三者互补，不可混比。\n崩溃率 = 事件数/会话数 · 对照分支：iOS %s · Android %s
@@ -1502,6 +1509,8 @@ REPORT="$STATE/reports/$DAY-weekly.md"
   # 排障信息下沉（change crash-report-readability）：run_id 与审计路径不是判读须知，
   # 读者不需要、排障才需要——原先摆在文档开头与取数区间并列，权重被读成同一级。
   # ⚠️ 只加在文档侧：NOTE_MD 被卡片与群消息逐字节共用，改它本身会把审计路径塞进卡片（F37）。
+  # ⚠️ 只加在文档侧（同下一行的理由）：判据解释是给要动这块的人看的，卡片读者不需要。
+  [ -n "$ANR_LEDGER_LONG" ] && printf '%s' "$ANR_LEDGER_LONG"
   printf '\n> 本次运行 %s · 审计 $STATE/audit/weekly-%s.events.jsonl（排障用，非判读须知）\n' "$RUN_ID" "$RUN_ID"
   # 数据/分析分层的可见化：读者必须能一眼看出「本周没有根因分析」是模型不可用，
   # 而不是「本周没问题」。缺分析和无异常是两件完全不同的事。

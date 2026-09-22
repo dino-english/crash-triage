@@ -56,4 +56,21 @@ assert_src bin/sql/crash-anr-issues.sql "error_type = 'ANR'" \
 assert_src bin/sql/crash-issues-all.sql 'WHERE is_fatal = TRUE' \
   '⛔ crash-issues-all.sql 的致命过滤一个字不许改——崩溃口径的 90 天历史依赖它'
 
+echo "── ⛔ 卡片与文档的注解必须分开（NOTE_MD 被卡片逐字节共用）──"
+# 初版把 200 多字的判据解释塞进了 NOTE_MD，实测整条糊进 card.json——
+# 卡片读者要的是「有没有、几条」，不是为什么这么筛（F37 同源：共享变量的消费点没数清）。
+_w="$ROOT/bin/crash-weekly.sh"
+if grep -n 'ANR_LEDGER_NOTE="\$(printf' "$_w" | grep -q 'top N'; then
+  echo "  ❌ 卡片用的短版里出现了长文本——它会整条进 card.json"; H_FAIL=$((H_FAIL+1))
+else
+  echo "  ✅ 卡片短版不含判据长文"; H_PASS=$((H_PASS+1))
+fi
+assert_src bin/crash-weekly.sh '[ -n "$ANR_LEDGER_LONG" ] && printf' \
+  '⛔ 长版必须接在文档侧，否则写了等于没写'
+if grep -nE '^\s*--arg.*ANR_LEDGER_LONG|CARD_JSON.*ANR_LEDGER_LONG' "$_w" >/dev/null 2>&1; then
+  echo "  ❌ 长版被喂给了卡片"; H_FAIL=$((H_FAIL+1))
+else
+  echo "  ✅ 长版没有出现在卡片的 jq 参数里"; H_PASS=$((H_PASS+1))
+fi
+
 h_summary
