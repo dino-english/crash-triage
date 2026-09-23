@@ -174,6 +174,29 @@ _PRIOR_RUNS="$(find "$AUDIT_DIR" -maxdepth 1 -name "weekly-${RUN_ID%%-*}-*.event
 LEDGER_DIR="$STATE/ledger"
 LEDGER_LOCAL="$LEDGER_DIR/LEDGER.md"
 mkdir -p "$LEDGER_DIR"
+
+# ── 处置结论存储（change crash-ledger-disposition-store，design D1/D2/D5）────
+# 人工写、跑批只读。⛔ 本脚本一次都不写它——它是**不可重算的人工资产**，
+# 与 last-snapshot.json 同级纳入备份（docs/CLAUDE-部署与运维.md 的 $STATE 表）。
+# ⚠️ 三态必须分开，⛔ 不能压成「有/没有」：
+#   ok      → 台账两列与周报正文都 join 得到结论
+#   missing → 首次启用或文件丢失：降级渲染 + 显式标注，跑批照常 rc=0
+#   corrupt → 内容损坏：台账本轮不更新（不以空结论覆写），周报数据段照常产出并投递，
+#             **但整跑以非零退出**——静默吞掉等于放任人工资产在下一次写入时被清零。
+# ⚠️ 定义位置必须早于三个使用点（台账渲染 / 周报正文 dd_block / 收尾判定）——
+#    顶层「先用后定」会被 check-scripts 第 7 项拦下，且运行期报错常被 EXIT trap 吞成 0。
+DISPO_FILE="$LEDGER_DIR/dispositions.json"
+DISPO_TSV="$OUT_DIR/dispositions.tsv"   # issue_id \t 处置状态 \t 备注，供周报正文 join
+DISPO_STATE=ok
+: > "$DISPO_TSV"
+if [ ! -s "$DISPO_FILE" ]; then
+  DISPO_STATE=missing
+  echo "  ⚠️ 处置结论存储不可得（${DISPO_FILE}）：台账结论列与周报结论行本轮降级，机器数据不受影响"
+elif ! jq -r 'to_entries[] | [.key, (.value.disposition // ""), (.value.note // "")] | @tsv'        "$DISPO_FILE" > "$DISPO_TSV" 2>"$OUT_DIR/dispositions-parse.log"; then
+  DISPO_STATE=corrupt
+  : > "$DISPO_TSV"
+  echo "  ❌ 处置结论存储损坏（${DISPO_FILE}）：本轮不更新台账，周报数据段照常产出；整跑将以非零退出"
+fi
 FIXMAP_FILE="$OUT_DIR/fixmap.json"
 # ⚠️ 回溯窗口 2026-09-11 从 14 天改为 90 天。同一份仓库同一天实测：
 #    14 天命中 2 条，90 天命中 **8 条**（其中 2 条是「修了仍在」）——
@@ -446,8 +469,12 @@ if [ -x "$ROOT/bin/render-ledger.sh" ]; then
   #    2026-09-07 实测：飞书把它渲染成 `http://__report_url__` 的死链。
   #    本文件 LEDGER_TL_DEDUP 段其实早就写着「会作为死链永久留在台账里（实测已污染 18 行）」，
   #    同一个文件里两句话互相打架。卡片侧的兜底已补在 deliver.sh 的 strip_unfilled_links()。
+  # ⚠️ 第 9 个参数 = 处置结论存储路径。走 **argv** 而不是环境变量：渲染器把它设成必填
+  #    （`${9:?}`），⛔ 漏传当场炸，不会静默把整张表渲成「无结论」——那正是 REPOS_ROOT
+  #    漏 export 那次的失效形态（子进程有自己的默认值，不报错、只出坏数据）。
   RENDER_OUT="$("$ROOT/bin/render-ledger.sh" "$SNAP_NEW" "$FIXMAP_FILE" "$PREV_TABLE_FILE" \
     <(echo "$DIFF") "$DAY" "__REPORT_URL__" "$SEEN_FILE" "$(day_ago "$SEEN_KEEP_DAYS")" \
+    "$DISPO_FILE" \
     2>"$OUT_DIR/render-ledger.log")" \
     && LEDGER_RENDER_OK=1 || echo "  ⚠️ 台账渲染失败，本轮跳过台账更新（详见 render-ledger.log）"
   if [ "$LEDGER_RENDER_OK" = "1" ]; then
@@ -1253,7 +1280,7 @@ dd_block() { # $1=CSV文件 $2=平台名 $3=口径说明 $4=取数是否成功 �
   #  · ⛔ 机型不进表——per-issue 唯一机型数≈安装数，「top 机型」是随机一台设备；
   #    只有「集中」或「单台设备」两种有信号的判定进脚注，「分散」不占版面。
   #  · ⛔ 内存档不进表——mem_tier 无会话侧分母，「low 50%」与装机基准率无法区分。
-  csv2tsv < "$1" | awk -F'\t' -v plat="$2" -v conc="$DD_MODEL_CONC_PCT" '
+  csv2tsv < "$1" | awk -F'\t' -v plat="$2" -v conc="$DD_MODEL_CONC_PCT" -v dispof="$DISPO_TSV" '
     function pct(a, b) { return (b+0 > 0) ? sprintf("%.0f", a/b*100) : "0" }
     function fgcn(x) { if (x=="FOREGROUND") return "前台"; if (x=="BACKGROUND") return "后台"; return x }
     function owner_cn(x) { sub(/^SYSTEM/,"系统",x); sub(/^DEVELOPER/,"自家",x); sub(/^THIRD_PARTY/,"三方",x); sub(/^PLATFORM/,"平台层",x); return x }
@@ -1263,6 +1290,17 @@ dd_block() { # $1=CSV文件 $2=平台名 $3=口径说明 $4=取数是否成功 �
       tail = t; while (index(tail, " - ") > 0) tail = substr(tail, index(tail, " - ") + 3)
       n = split(tail, a, "."); if (n > 2) return a[n-1] "." a[n]
       return tail
+    }
+    BEGIN {
+      # 人工结论（change crash-ledger-disposition-store，design D4）：按**完整 issue_id** join
+      # 台账的处置结论存储。⛔ 只读，本段不产生也不改写任何结论。
+      # ⚠️ 存储不可得 / 损坏时 dispof 是空文件 → 一条结论行都不输出，
+      #    段首那行标注负责告诉读者「是读不到，不是没有」（spec：两者必须可分辨）。
+      if (dispof != "") {
+        while ((getline dl < dispof) > 0)
+          if (split(dl, da, "\t") >= 3) { dsp[da[1]] = da[2]; dnt[da[1]] = da[3] }
+        close(dispof)
+      }
     }
     function flush(   sc, row) {
       if (last == "") return
@@ -1277,6 +1315,10 @@ dd_block() { # $1=CSV文件 $2=平台名 $3=口径说明 $4=取数是否成功 �
         fn = fn "> `" substr(last,1,8) "` 机型：单台设备（" tev " 次）——⛔ 样本仅 1 台判不了机型特异性，需复现\n"
       else if (p["model"]+0 >= conc+0 && nd["model"]+0 <= tus/2)
         fn = fn "> `" substr(last,1,8) "` 机型：⚠️ 集中于 " val["model"] "（" p["model"] "%；共 " nd["model"] " 种机型 / " tus " 台设备）\n"
+      # ⛔ 只在**确有结论时**输出这一行。给无结论的 issue 渲染一个空结论块，
+      #    等于用空白暗示「已复核、没问题」——spec 明文禁止（MUST NOT 以空白暗示无问题）。
+      if (last in dsp && dsp[last] != "")
+        fn = fn "> `" substr(last,1,8) "` 人工结论（**人工沉淀，非当期数据推导**）：" dsp[last] " — " dnt[last] "\n"
       delete val; delete p; delete nd
     }
     $1 != last { flush(); last = $1; title = $2; sub2 = $3; tev = $9; tus = $10 }
@@ -1493,6 +1535,16 @@ REPORT="$STATE/reports/$DAY-weekly.md"
   # 去重（change crash-report-readability）：owner 的完整读法在三段「归因」注解里已经写过一遍，
   # 此处只留交叉引用 + 本段特有的「未经人工复核」。⛔ 不是删掉，是不在同一份文档里说两遍。
   printf '%s\n' '> ⚠️ 责任帧 `owner` 的读法同三段「归因」注解（**不是谁触发了崩溃**）。⚠️ 本段结论**未经人工复核**。'
+  # 处置结论的可见性（change crash-ledger-disposition-store，design D4：L2 呈现、L1 不呈现）。
+  # ⚠️ 这行必须与上下的 `>` 行连续，中间不能空行——md2docx 把连续 `>` 合成一个 callout，
+  #    断开会多出一个孤立的灰框（F58 同源）。
+  if [ "$DISPO_STATE" = "ok" ]; then
+    printf '%s\n' '> 📌 条目下方的「人工结论」行取自台账的处置结论存储，是**人工沉淀、非当期数据推导**；⛔ 没有该行只表示**尚无人工结论**，不表示已确认无问题。'
+  elif [ "$DISPO_STATE" = "missing" ]; then
+    printf '%s\n' '> ⚠️ **处置结论存储不可得**，本段只呈现当期数据——⛔ 缺少「人工结论」行是读不到，不是这些 issue 没有结论。'
+  else
+    printf '%s\n' '> ⚠️ **处置结论存储损坏**，本段只呈现当期数据，台账本轮未更新——⛔ 缺少「人工结论」行是读不到，不是这些 issue 没有结论。'
+  fi
   printf '%s\n\n' '> ⛔ 机型**不给 top 值当结论**：实测 per-issue 的唯一机型数≈影响安装数（一设备一机型），此时「top 机型」只是随机一台设备。只在真正集中时才点名，样本仅 1 台时明说判不了。'
   dd_block "$DD_AND_CSV" "Android" "FATAL + ANR" "${DD_AND_OK:-1}"
   dd_block "$DD_IOS_CSV" "iOS" "NON_FATAL" "${DD_IOS_OK:-1}"
@@ -1697,4 +1749,15 @@ find "$STATE/logs" -type f -mtime +60 -delete 2>/dev/null || true
 find "$STATE" -maxdepth 1 -name 'snapshot-*.json' -mtime +60 -delete 2>/dev/null || true
 cleanup_old_runs "$STATE"
 echo "=== 完成，报告：$REPORT ==="
+
+# ⛔ 结论存储损坏 → 整跑非零退出（change crash-ledger-disposition-store，task 2.5）。
+# ⚠️ 位置在投递**之后**是刻意的：spec 要求「周报照常产出、MUST NOT 中止投递」，
+#    同时要求损坏不得被静默当作空存储。两者只能这样兼顾——先把报告发出去，再报失败。
+# ⚠️ 必须先置完成哨兵再 exit，否则 EXIT trap 会再判一次（结果相同，但判据就不是这里了）。
+if [ "$DISPO_STATE" = "corrupt" ]; then
+  echo "❌ 处置结论存储损坏（${DISPO_FILE}）：台账本轮未更新，人工结论未呈现。" >&2
+  echo "   ⛔ 该文件是不可重算的人工资产，跑批未改动它；修好 JSON 后重跑即可恢复。" >&2
+  RUN_COMPLETED=1
+  exit 1
+fi
 RUN_COMPLETED=1

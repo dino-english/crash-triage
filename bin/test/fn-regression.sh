@@ -21,6 +21,11 @@ h_assert_absent  "$out" '"Apple iPad7'    '不产生嵌套引号残片'
 echo "── dd_block（下钻表 + 机型三分支）──"
 h_load "$ROOT/bin/crash-weekly.sh" dd_block
 DD_MODEL_CONC_PCT=60
+# ⚠️ dd_block 自 change crash-ledger-disposition-store 起读 ${DISPO_TSV}（人工结论 join）。
+#    夹具必须照抄生产接线：它在生产里是**必接**的，⛔ 不能靠 ${VAR:-} 兜——那样漏接线
+#    只会静默丢掉全部结论行。这里给一个空文件，代表「存储不可得」那一态。
+#    结论呈现本身由 bin/test/fn-ledger-disposition.sh 覆盖。
+DISPO_TSV="$T/dispo-empty.tsv"; : > "$DISPO_TSV"
 printf 'aaaa000011112222,T,sub,screen,ChatActivity,6,1,1,6,1\naaaa000011112222,T,sub,model,Pixel 8 Pro,6,1,1,6,1\n' > "$T/one.csv"
 out="$(h_run dd_block "$T/one.csv" Android '口径' 1)"
 h_assert_contains "$out" '| Issue | 场景 |' '渲染为表格而非列表'

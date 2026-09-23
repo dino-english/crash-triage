@@ -4,7 +4,8 @@
 # 并生成本轮变更时间线条目（只含真正变化：新增/消失/暴涨/状态变更）。
 # 纯函数：只读输入、只写 stdout，不碰任何持久文件——持久化由调用方负责。
 #
-# 用法：render-ledger.sh <snapshot.json> <fixmap.json> <prev_table.md或空> <diff.json> <day> <report_url> [issue-seen.json]
+# 用法：render-ledger.sh <snapshot.json> <fixmap.json> <prev_table.md或空> <diff.json> <day> <report_url>
+#       [issue-seen.json] [seen-cutoff] <dispositions.json>
 # 输出：**三段**用 \x1e（record separator）分隔写到 stdout：
 #   ① FATAL 现状表 markdown  ② 变更时间线 markdown  ③ NON_FATAL 现状表 markdown
 #   ④ 更新后的生命周期基准 JSON —— **必须由本脚本产出**：first_seen 的取值优先级只在这里
@@ -12,7 +13,7 @@
 #      播种，下一轮 $s.first 反过来覆盖了台账里真实的历史首次纳入日期）。
 set -euo pipefail
 
-SNAPSHOT="${1:?用法：render-ledger.sh <snapshot.json> <fixmap.json> <prev_table.md或空> <diff.json> <day> <report_url> [issue-seen.json]}"
+SNAPSHOT="${1:?用法：render-ledger.sh <snapshot.json> <fixmap.json> <prev_table.md或空> <diff.json> <day> <report_url> [issue-seen.json] [seen-cutoff] <dispositions.json>}"
 FIXMAP="${2:?缺少 fixmap.json}"
 PREV_TABLE="${3:-}"   # 可以是空字符串或不存在的路径 → 视为无历史
 DIFF_FILE="${4:?缺少 diff.json}"
@@ -27,6 +28,36 @@ STATES_FILE="${CRASH_REPORT_ISSUE_STATES:-}"
 STATES_JSON='{}'
 if [ -n "$STATES_FILE" ] && [ -s "$STATES_FILE" ]; then
   STATES_JSON="$(jq -c . "$STATES_FILE" 2>/dev/null || echo '{}')"
+fi
+
+# ── 处置结论存储（change crash-ledger-disposition-store，design D1/D2/D5）────
+# 人工结论的**唯一**存续途径。⛔ 不从上一版表格解析——NON_FATAL 表是按受影响安装取头部的
+# 滚动榜单，行一掉榜结论就随表消失，回榜时是白纸（design D1）。
+# ⛔ **本脚本对该文件只读**：一次都不写（D2 写入权属归人工）。跑批前后须逐字节一致。
+#
+# ⚠️ 入参缺失与文件缺失是两件事，处理方式相反：
+#   · **调用点漏传路径** → 立刻炸（`:?`）。漏传会让每一行都渲染成「无结论」，
+#     和「这些 issue 确实还没结论」**长得一模一样**，是最典型的静默降级
+#     （`REPORT_URL` 那类可选参数可以留空，结论存储不行）。
+#   · **路径给了但文件不在** → 降级：机器列照渲、结论列写明「不可得」、跑批继续（D5 前半）。
+DISPO_FILE="${9:?缺少处置结论存储路径（dispositions.json）——⛔ 漏传会把全部行静默渲染成「无结论」，与「尚无结论」不可分辨}"
+DISPO_JSON='{}'
+DISPO_OK=1
+if [ ! -s "$DISPO_FILE" ]; then
+  # 首次启用 / 文件丢失 / 零字节：不可得，降级但不中止（D5 前半）。
+  DISPO_OK=0
+  # ⛔ 变量必须写成 ${VAR}：紧邻全角字符时 bash 3.2 会把多字节首字节并进变量名
+  #    （报 `DISPO_FILE?: unbound variable`）——check-scripts 第 2 项守的就是这个
+  echo "⚠️ 处置结论存储不可得（${DISPO_FILE}）：本轮结论列渲染为「不可得」，机器列不受影响" >&2
+elif ! DISPO_JSON="$(jq -ce 'if type == "object" then . else error("顶层必须是 issue_id → {first_seen,disposition,note} 的对象") end' "$DISPO_FILE" 2>&1)"; then
+  # ⛔ 损坏**必须中止**，不得静默当作空存储（D5 后半）——静默降级会让台账渲出一张
+  #    结论全空的表并同步上去，而人工资产不可重算，这一步就是永久丢失。
+  #    与 deliver.sh「block_replace 定位失败不退化为 overwrite」是同一条纪律。
+  # ⛔ 中止不等于覆写：本脚本从头到尾不写 ${DISPO_FILE}，文件内容原样留在盘上待人工修。
+  echo "❌ 处置结论存储损坏，无法解析：$DISPO_FILE" >&2
+  echo "   jq: $DISPO_JSON" >&2
+  echo "   ⛔ 本轮不渲染台账（不以空结论覆写现状表）；该文件未被改动，请人工修复后重跑" >&2
+  exit 1
 fi
 
 [ -s "$SNAPSHOT" ] || { echo "snapshot.json 为空：$SNAPSHOT" >&2; exit 1; }
@@ -169,18 +200,31 @@ NF_TABLE=""
 nf_rows() { # $1=平台标签 $2=snapshot key
   # 空标题必须渲染成「—」：iOS 存在 issue_title 为空的记录（实测 a7cb1856），
   # 空单元格会被读成「渲染坏了」。`// "—"` 挡不住空字符串，必须显式判空。
+  #
+  # 末两列是**人工结论**（按 issue_id join ${DISPO_FILE}，change crash-ledger-disposition-store）：
+  #   · 存储可读、该 id 无记录 → 两列留空（含义：这条尚无人工结论）
+  #   · 存储整体不可得         → 处置状态列写明「结论存储不可得」
+  # ⛔ 这两种情况**必须可分辨**：都渲成空白等于把「读不到」伪装成「看过了没问题」（design D5）。
+  # ⛔ 结论只读不写：掉榜的 issue 其结论留在存储里，回榜时这行 join 自然把它接回来（D1）。
   local urlpre; urlpre="$(issue_url_prefix "$2")"
-  jq -r --arg label "$1" --arg key "$2" --arg urlpre "$urlpre" '
+  jq -r --arg label "$1" --arg key "$2" --arg urlpre "$urlpre" \
+    --argjson dispo "$DISPO_JSON" --arg dispook "$DISPO_OK" '
+    # 单元格里的裸 | 会把一行切成两列且无任何告警——与 csv2tsv 防的是同一类错
+    # （结论是人写的自由文本，写进一个 | 就能悄悄毁掉整张表的列对齐）。
+    def cell(s): (s // "") | gsub("\\|"; "\\|");
     ((.nonfatal[$key]) // [])[] |
-    "| \($label) | \(if $urlpre == "" then .issue_id[0:8] else "[\(.issue_id[0:8])](\($urlpre)\(.issue_id))" end) | \(if (.title // "") == "" then "—" else .title end) | \(if (.subtitle // "") == "" then "—" else .subtitle end) | \(.n) | \(.users) | \(.latest) |"
+    ($dispo[.issue_id] // null) as $d |
+    (if $dispook == "0" then "⚠️结论存储不可得" else cell($d.disposition) end) as $dcell |
+    (if $dispook == "0" then "" else cell($d.note) end) as $ncell |
+    "| \($label) | \(if $urlpre == "" then .issue_id[0:8] else "[\(.issue_id[0:8])](\($urlpre)\(.issue_id))" end) | \(if (.title // "") == "" then "—" else .title end) | \(if (.subtitle // "") == "" then "—" else .subtitle end) | \(.n) | \(.users) | \(.latest) | \($dcell) | \($ncell) |"
   ' "$SNAPSHOT" 2>/dev/null || true
 }
 NF_N_IOS="$(jq -r '((.nonfatal.ios) // []) | length' "$SNAPSHOT" 2>/dev/null || echo 0)"
 NF_N_AND="$(jq -r '((.nonfatal.android) // []) | length' "$SNAPSHOT" 2>/dev/null || echo 0)"
 if [ "$NF_N_IOS" != "0" ] || [ "$NF_N_AND" != "0" ]; then
   NF_TABLE="$({
-    printf '| 平台 | Issue ID | 位置 | 异常 | 事件 | 影响安装 | 最新 |\n'
-    printf '|---|---|---|---|---|---|---|\n'
+    printf '| 平台 | Issue ID | 位置 | 异常 | 事件 | 影响安装 | 最新 | 处置状态 | 备注 |\n'
+    printf '|---|---|---|---|---|---|---|---|---|\n'
     nf_rows "iOS" ios
     nf_rows "Android" android
     # ⛔ **只输出表格本身，不带说明文字**：deliver.sh 的 block_replace 替换的是飞书文档里的

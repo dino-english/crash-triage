@@ -88,6 +88,7 @@ STATE="${CRASH_REPORT_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/crash-tri
 $STATE/                          # ${XDG_STATE_HOME:-~/.local/state}/crash-triage
 ├── issues/<32位id>.json         事实层：崩溃事件详情，一次抓永久留，不参与清理
 ├── ledger/LEDGER.md             台账本地源（L2 产出，同步飞书）
+│   ├── dispositions.json        ⛔ **人工资产**：issue 处置结论，人工独占写入、跑批只读
 │   └── snapshots/               历史专项快照 md（从仓库移入）
 ├── runs/<日期>/{L1,L2}/<时刻>/  跑批产物（物证），保留 30 天，附 latest 软链
 ├── reports/<日期>-{daily,weekly}.md  报告 markdown 本地副本，保留 90 天
@@ -115,6 +116,7 @@ $STATE/                          # ${XDG_STATE_HOME:-~/.local/state}/crash-triag
 | `report-index.jsonl` | 历次日报/周报的飞书文档 URL，索引页据此渲染归档表；**不可再生**（飞书端无法枚举本 bot 文档），2026-08-20 从仓库移入 |
 | `last-snapshot.json` | L2 变化检测基准；**首跑无基准时只建基线不报新增**（否则刷一屏「新增」）。⚠️ **提升在 `NO_DELIVER` 闸门之前**（`crash-weekly.sh:624`），所以「跑两次对比产物」这个验收方法在 L2 上不成立——第二次会看到零变化。测试前先备份它 |
 | `health-daily.json` / `health.json` | L1 / L2 的健康状态 |
+| `ledger/dispositions.json` | issue 处置结论（`issue_id` → `{first_seen, disposition, note}`，键跨 `error_type` 统一）。⛔ **不可重算的人工资产**：人工独占写入，跑批只读、前后逐字节一致。⚠️ 它是 NON_FATAL 现状表人工结论的**唯一**存续途径——那张表是按受影响安装取头部的滚动榜单，旧做法「从上一版表格解析再写回」在行掉榜时就把结论丢了。⛔ 不在 `$STATE` 里就等于永久丢失，**必须与 `last-snapshot.json` 同级纳入备份**（`git clean -xfd` / 换机都会抹掉）。文件缺失 → 降级渲染 + 标注；⛔ 内容损坏 → 台账本轮不更新且整跑非零退出，绝不以空结论覆写 |
 
 旧口径周报归档 `ledger/weekly-index.jsonl` 由 `build_index()` 读时与 `report-index.jsonl` 合并，避免历史断链。
 
@@ -125,6 +127,16 @@ scp dino911@dino911s-mac-mini:.local/state/crash-triage/report-index.jsonl repor
 ```
 
 生产机推不了 git，所以不能指望它自己备份；这条命令在有凭证的机器上跑。
+
+⛔ **`ledger/dispositions.json` 与 `report-index.jsonl` 同属「丢了就没了」那一档**，且它比归档更贵——
+归档至少还能从飞书文档里一条条抄回来，处置结论是人看了钻取报告之后的判断，**没有任何地方能重算**。
+换机 / 重装 / `$STATE` 重建时必须一起带走：
+
+```bash
+scp dino911@dino911s-mac-mini:.local/state/crash-triage/ledger/dispositions.json "$STATE/ledger/"
+```
+
+⚠️ 清理派生数据（缓存、快照、`runs/`）时 ⛔ 不得连带它——它不是派生产物。
 
 ## 部署实例：飞书侧固定资源
 
