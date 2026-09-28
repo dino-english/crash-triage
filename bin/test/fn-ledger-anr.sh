@@ -79,4 +79,44 @@ _needle="printf '%s\\n' \"\$ANR_LEDGER_LONG\""
 assert_src bin/crash-weekly.sh "$_needle" \
   '⛔ 长版输出必须带 \\n，否则与「本次运行」粘成同一个 callout'
 
+echo "── ⛔ ANR 带修复提交的处置状态（6.5：生产至今无样本，改用夹具喂）──"
+# 起因：6.5 挂着「ANR 带修复提交的处置状态」未验，而它要等一个**真实样本**——
+# 2026-09-28 生产首轮 fixmap 命中 9 条全是 FATAL/非致命，唯一的 ANR 是「未处理」。
+# ⛔ 「等样本」等于永远不验。build_rows() 对 FATAL 与 ANR 的处置状态判定是**同一段 jq**
+#    （只有「取哪个数组」和「类型」列取值随 etype 变），所以喂一个带 fixmap 命中的 ANR
+#    就能把那条路径走完，不必等线上。
+_T="$(mktemp -d)"; trap 'rm -rf "$_T"' EXIT
+h_load "$ROOT/bin/render-ledger.sh" build_rows
+issue_url_prefix() { printf ''; }
+issue_url() { printf ''; }
+DAY=2026-09-28
+PREV_JSON='{}'; SEEN_JSON='{}'; SEEN_PREV_DAY=""; LIFECYCLE_OK=0; STATES_JSON='{}'
+jq -n '{anr:{android:[{id:"4d05f9e74e77520b418eac3a355108f1",title:"nativePollOnce",events:20}]}}' > "$_T/snap.json"
+SNAPSHOT="$_T/snap.json"
+
+jq -n '{mapped:{"4d05f9e74e77520b418eac3a355108f1":{platform:"Android",status:"⚠️修了仍在",commit:"abc12345",subject:"fix(anr): 收敛主线程等待"}}}' > "$_T/fixmap.json"
+FIXMAP="$_T/fixmap.json"
+out="$(h_run build_rows Android android ANR)"
+h_assert_contains "$out" '| ANR |'        '⛔ 类型列必须是 ANR（喂的是 anr 数组）'
+h_assert_contains "$out" '⚠️修了仍在'      '⛔ 反扫命中时处置状态取 fixmap 的 status，ANR 与 FATAL 同一套'
+h_assert_contains "$out" 'abc12345 fix(anr): 收敛主线程等待' '备注写 commit + subject'
+
+# ⛔ 已关闭优先于反扫（失效模式 R4）——这条对 ANR 同样必须成立
+STATES_JSON='{"4d05f9e74e77520b418eac3a355108f1":"CLOSED"}'
+out="$(h_run build_rows Android android ANR)"
+h_assert_contains "$out" '✅已关闭（abc12345）' '⛔ CLOSED 压过反扫结论，否则把关掉的 ANR 标成待跟进'
+h_assert_absent  "$out" '修了仍在'          '⛔ 已关闭时不得再渲染反扫的待办文案'
+
+# ⛔ MUTED 是第三态，不得并进 CLOSED 也不得落回「未处理」
+STATES_JSON='{"4d05f9e74e77520b418eac3a355108f1":"MUTED"}'
+out="$(h_run build_rows Android android ANR)"
+h_assert_contains "$out" '🔕已静音（abc12345）' '⛔ MUTED 单独成态，ANR 侧同样适用'
+
+# 负向：无反扫命中时回落「未处理」，⛔ 不得凭空出现修复文案
+STATES_JSON='{}'
+echo '{"mapped":{}}' > "$_T/fixmap.json"
+out="$(h_run build_rows Android android ANR)"
+h_assert_contains "$out" '| 未处理 |' '无命中 → 未处理'
+h_assert_absent  "$out" 'abc12345'   '⛔ 不得残留上一次的修复信息'
+
 h_summary
