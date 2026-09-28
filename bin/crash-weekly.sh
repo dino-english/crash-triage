@@ -1750,6 +1750,37 @@ find "$STATE" -maxdepth 1 -name 'snapshot-*.json' -mtime +60 -delete 2>/dev/null
 cleanup_old_runs "$STATE"
 echo "=== 完成，报告：$REPORT ==="
 
+# ── 结论存储备份（change crash-disposition-backup）──────────────────
+# ⛔ 它是**不可重算的人工资产**：丢了就是人看完钻取报告得出的判断永久消失
+#    （`last-snapshot.json` 丢了顶多误报一屏「新增」，下一轮自愈；这个没有下一轮）。
+# ⛔ **只在 DISPO_STATE=ok 时备份**：把损坏的内容落进去，等于用坏数据把好副本挤到后面，
+#    而恢复的人只会看最新那一份——备份反倒成了数据丢失的帮凶。
+# D1 内容未变则不落：每周一份相同副本，一年 52 份，会把「哪一份是变更点」这个
+#    唯一有用的信息淹掉；回滚时人要的是「上次改动之前长什么样」。
+# D2 落盘后必须 `cmp`：⛔ 判据不是「文件存在」——本 change 要修的正是那种答非所问
+#    （原 task 1.3 的 verify 写「备份脚本/文档中出现该路径」，写一句文档就绿了）。
+# D3 失败只告警：⛔ 不改退出码、不走会触发 ERR trap 的路径——备份是保护措施，
+#    ⛔ 不该为了防数据丢失而制造一次投递失败 + 一张告警卡。
+if [ "$DISPO_STATE" = "ok" ] && [ -s "$DISPO_FILE" ]; then
+  DISPO_BAK_DIR="$STATE/backup/dispositions"
+  if mkdir -p "$DISPO_BAK_DIR" 2>/dev/null; then
+    # ⛔ `|| true` 不可省：无匹配时 ls 返回非零，而「还没有任何副本」是首次启用的正常路径（F31）。
+    _dbk_last="$(ls -1 "$DISPO_BAK_DIR"/dispositions-*.json 2>/dev/null | tail -1 || true)"
+    if [ -n "$_dbk_last" ] && cmp -s "$_dbk_last" "$DISPO_FILE"; then
+      echo "  ℹ️ 结论存储未变化，沿用既有备份 $(basename "$_dbk_last")"
+    else
+      _dbk_new="$DISPO_BAK_DIR/dispositions-${TS}.json"
+      if cp "$DISPO_FILE" "$_dbk_new" 2>/dev/null && cmp -s "$_dbk_new" "$DISPO_FILE"; then
+        echo "  ✅ 结论存储已备份 $(basename "$_dbk_new")（与现役逐字节一致）"
+      else
+        echo "  ⚠️ 结论存储备份失败或副本与现役不一致（${_dbk_new}）——本轮无新副本，请人工检查" >&2
+      fi
+    fi
+  else
+    echo "  ⚠️ 结论存储备份目录不可写（${DISPO_BAK_DIR}），本轮跳过备份" >&2
+  fi
+fi
+
 # ⛔ 结论存储损坏 → 整跑非零退出（change crash-ledger-disposition-store，task 2.5）。
 # ⚠️ 位置在投递**之后**是刻意的：spec 要求「周报照常产出、MUST NOT 中止投递」，
 #    同时要求损坏不得被静默当作空存储。两者只能这样兼顾——先把报告发出去，再报失败。

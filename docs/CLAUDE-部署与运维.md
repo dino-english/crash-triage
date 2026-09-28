@@ -92,7 +92,9 @@ $STATE/                          # ${XDG_STATE_HOME:-~/.local/state}/crash-triag
 │   └── snapshots/               历史专项快照 md（从仓库移入）
 ├── runs/<日期>/{L1,L2}/<时刻>/  跑批产物（物证），保留 30 天，附 latest 软链
 ├── reports/<日期>-{daily,weekly}.md  报告 markdown 本地副本，保留 90 天
-├── backup/                      台账等不可再生内容的**手工**备份，无写入者也不自动清理
+├── backup/                      不可再生内容的备份，⛔ 不自动清理
+│   └── dispositions/            ⚠️ 唯一有自动写入者的子目录：L2 收尾落结论存储副本
+│                                （其余仍是人手放的：corrupt-issues-* 是隔离区不是备份）
 ├── logs/                        保留 60 天，**整目录按 mtime 清**（含 bq-stderr-<TS>.log）
 ├── publish/                     每次运行 rm -rf 重建的投递目录
 ├── path.env                     setup.sh 探测生成（只有 PATH），install.sh / update.sh 每次覆写
@@ -116,7 +118,7 @@ $STATE/                          # ${XDG_STATE_HOME:-~/.local/state}/crash-triag
 | `report-index.jsonl` | 历次日报/周报的飞书文档 URL，索引页据此渲染归档表；**不可再生**（飞书端无法枚举本 bot 文档），2026-08-20 从仓库移入 |
 | `last-snapshot.json` | L2 变化检测基准；**首跑无基准时只建基线不报新增**（否则刷一屏「新增」）。⚠️ **提升在 `NO_DELIVER` 闸门之前**（`crash-weekly.sh:624`），所以「跑两次对比产物」这个验收方法在 L2 上不成立——第二次会看到零变化。测试前先备份它 |
 | `health-daily.json` / `health.json` | L1 / L2 的健康状态 |
-| `ledger/dispositions.json` | issue 处置结论（`issue_id` → `{first_seen, disposition, note}`，键跨 `error_type` 统一）。⛔ **不可重算的人工资产**：人工独占写入，跑批只读、前后逐字节一致。⚠️ 它是 NON_FATAL 现状表人工结论的**唯一**存续途径——那张表是按受影响安装取头部的滚动榜单，旧做法「从上一版表格解析再写回」在行掉榜时就把结论丢了。⛔ 不在 `$STATE` 里就等于永久丢失，**必须与 `last-snapshot.json` 同级纳入备份**（`git clean -xfd` / 换机都会抹掉）。文件缺失 → 降级渲染 + 标注；⛔ 内容损坏 → 台账本轮不更新且整跑非零退出，绝不以空结论覆写 |
+| `ledger/dispositions.json` | issue 处置结论（`issue_id` → `{first_seen, disposition, note}`，键跨 `error_type` 统一）。⛔ **不可重算的人工资产**：人工独占写入，跑批只读、前后逐字节一致。**L2 收尾自动落副本到 `backup/dispositions/`**（内容变化时才落，落后 `cmp` 校验；失败只告警不中止跑批）。⚠️ 它防的是误覆写 / 误删 / 损坏，⛔ **防不住整台机器丢失**——异地那一层仍靠人工 scp。⚠️ 它是 NON_FATAL 现状表人工结论的**唯一**存续途径——那张表是按受影响安装取头部的滚动榜单，旧做法「从上一版表格解析再写回」在行掉榜时就把结论丢了。⛔ 不在 `$STATE` 里就等于永久丢失，**必须与 `last-snapshot.json` 同级纳入备份**（`git clean -xfd` / 换机都会抹掉）。文件缺失 → 降级渲染 + 标注；⛔ 内容损坏 → 台账本轮不更新且整跑非零退出，绝不以空结论覆写 |
 
 旧口径周报归档 `ledger/weekly-index.jsonl` 由 `build_index()` 读时与 `report-index.jsonl` 合并，避免历史断链。
 
@@ -127,6 +129,10 @@ scp dino911@dino911s-mac-mini:.local/state/crash-triage/report-index.jsonl repor
 ```
 
 生产机推不了 git，所以不能指望它自己备份；这条命令在有凭证的机器上跑。
+
+⚠️ **2026-09-28 补**：`dispositions.json` 的**本机**副本已由 L2 跑批自动维护
+（`backup/dispositions/`，内容变化才落 + `cmp` 校验）。⛔ 但那只解决误覆写与误删——
+下面这条异地拷贝**仍然必须人工做**，机器整台丢了本机副本跟着一起没。
 
 ⛔ **`ledger/dispositions.json` 与 `report-index.jsonl` 同属「丢了就没了」那一档**，且它比归档更贵——
 归档至少还能从飞书文档里一条条抄回来，处置结论是人看了钻取报告之后的判断，**没有任何地方能重算**。

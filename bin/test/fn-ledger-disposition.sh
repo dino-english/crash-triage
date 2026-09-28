@@ -17,6 +17,13 @@ SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; ROOT="$(cd "$SELF/../.." &
 . "$ROOT/bin/lib/csv.sh"
 T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
 
+# ⚠️ 备份段（末尾）要用的生产接线，**必须在这里提前声明**：本文件的 assert_src 模式串里
+#    含字面量 `$DISPO_STATE` / `$DISPO_FILE`，而 check-scripts 第 7 项「先用后定」是
+#    正则匹配、⛔ 分辨不出那是被单引号护住的字面量。赋值晚于那些行就会被判违规。
+#    ⛔ 不要为此弱化那条 lint——它守的是真问题（常量定义晚于使用，报错常被 EXIT trap 吞成 0）。
+DISPO_STATE=ok
+DISPO_FILE=""
+
 ID_A=359fadbc8e8167b952a39604ec72c578   # 有结论
 ID_B=09ffca3100000000000000000000beef   # 无结论（不在存储里）
 
@@ -109,5 +116,44 @@ if grep -qE 'DISPO|dispositions' "$ROOT/bin/crash-daily.sh"; then
 else
   echo "  ✅ ⛔ crash-daily.sh 不碰结论存储（L1 只呈现当期数据）"; H_PASS=$((H_PASS+1))
 fi
+
+echo "── 结论存储备份（change crash-disposition-backup）──"
+# ⛔ 起因：`crash-ledger-disposition-store` 的 spec 写着「MUST 纳入备份范围」，而 2026-09-28
+#    实测生产 **0 份备份、无任何写入者**——task 1.3 的 verify 写的是「备份脚本/文档中出现
+#    该路径」，往文档写一句话就绿了。判据问「有没有人写下这件事」，要求问「这件事有没有发生」。
+# ⛔ 所以这里的断言一律看**产物**：副本在盘上、且与现役 `cmp` 逐字节一致。
+_bk() { # 把 crash-weekly.sh 的备份段抽出来跑（它不是函数，按行抽）
+  awk '/^# ── 结论存储备份/{i=1} i{print} i&&/^fi$/{exit}' "$ROOT/bin/crash-weekly.sh"
+}
+h_assert_eq "1" "$(_bk | grep -c 'cmp -s "\$_dbk_new" "\$DISPO_FILE"')" \
+  "⛔ 落盘后必须 cmp 副本与现役——判据不是「文件存在」"
+h_assert_eq "1" "$(_bk | grep -c '\[ "\$DISPO_STATE" = "ok" \]')" \
+  "⛔ 只在 ok 时备份：把损坏内容落进去会把好副本挤到后面，恢复的人只看最新那份"
+h_assert_eq "0" "$(_bk | grep -c 'exit 1')" \
+  "⛔ 备份失败不得中止跑批（D3：保护措施不该成为新的故障源）"
+h_assert_contains "$(_bk)" '|| true' "⛔ ls 无匹配返回 1，首次启用是正常路径，必须兜住（F31）"
+
+# 行为验证：在生产 shell 设置下跑真逻辑
+DISPO_STATE=ok; DISPO_FILE="$T/live.json"; STATE="$T"; TS=20260928-100000
+cp "$T/dispo.json" "$DISPO_FILE"
+_runbk() { eval "$(_bk)"; }
+h_run _runbk >/dev/null
+h_assert_eq "1" "$(ls -1 "$T/backup/dispositions"/dispositions-*.json 2>/dev/null | wc -l | tr -d ' ')" \
+  "首轮落下 1 份副本"
+h_assert_eq "0" "$(cmp -s "$(ls -1 "$T/backup/dispositions"/*.json | tail -1)" "$DISPO_FILE"; echo $?)" \
+  "⛔ 副本与现役逐字节一致（这条才是「备份有效」的判据）"
+
+TS=20260928-110000; h_run _runbk >/dev/null
+h_assert_eq "1" "$(ls -1 "$T/backup/dispositions"/dispositions-*.json | wc -l | tr -d ' ')" \
+  "⛔ 内容未变不重复落副本（D1：52 份相同副本会把「哪一份是变更点」淹掉）"
+
+jq '.["ffffffffffffffffffffffffffffffff"]={first_seen:"2026-09-28",disposition:"x",note:"y"}' "$DISPO_FILE" > "$T/n.json" && mv "$T/n.json" "$DISPO_FILE"
+TS=20260928-120000; h_run _runbk >/dev/null
+h_assert_eq "2" "$(ls -1 "$T/backup/dispositions"/dispositions-*.json | wc -l | tr -d ' ')" \
+  "内容变化后落新副本"
+
+DISPO_STATE=corrupt; TS=20260928-130000; h_run _runbk >/dev/null
+h_assert_eq "2" "$(ls -1 "$T/backup/dispositions"/dispositions-*.json | wc -l | tr -d ' ')" \
+  "⛔ 损坏时一份都不落——备份不得成为数据丢失的帮凶"
 
 h_summary
