@@ -1,6 +1,11 @@
+## RENAMED Requirements
+
+- FROM: `### Requirement: 台账采用四段式结构`
+- TO: `### Requirement: 台账采用五段式结构`
+
 ## MODIFIED Requirements
 
-### Requirement: 台账采用四段式结构
+### Requirement: 台账采用五段式结构
 
 台账 MUST 包含五个段落，顺序固定：项目常量、崩溃收口点登记、Issue 现状表、NON_FATAL 现状表、变更时间线。
 
