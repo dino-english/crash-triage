@@ -847,7 +847,7 @@ URL_INDEX="$(publish_doc "$INDEX_XML" … xml "$INDEX_FILE")"   # 发布 XML 版
 **防复发**：⚠️ `fill` 之后必须问一句「我发布的是不是我刚填的那个文件」；
 ⛔ 判据不能是「产物里还有没有占位符」——渲染层会把非法值吃掉。
 
-### F62 · ⚠️ 未修：标题定位读取失败 = 「标题不存在」→ 整份台账再 append 一遍
+### F62 · 标题定位读取失败 = 「标题不存在」→ 整份台账再 append 一遍（2026-10-02 已修）
 
 `deliver.sh` 的 `_ledger_heading_id()` 先读 outline、找不到再按 keyword 读；两次 `docs +fetch`
 **失败时都返回空**，与「文档里确实没有这个标题」不可区分。`sync_ledger` 拿到空 id 就走
@@ -857,6 +857,15 @@ bootstrap，而生产调用总带本地台账全文（`ledger_sync.local_file`�
 2026-10-02 量过：outline 读取对测试文档连读 20/20 成功，未观测到触发条件；当天唯一一次
 读取失败发生在全文 `docs +fetch`（不带 scope），不是这条路径。⚠️ 但两者同一 API、同一时段。
 修法方向：读取失败（非零 / 无 `.data.document`）与「读到了但没有标题」分开，前者中止同步而非 bootstrap。
+
+**已修**：`_ledger_heading_id` 改三态返回（0 找到 / 1 读到了但没有 / 2 读取失败），判据实测得来——
+读到了 = rc 0 且 `.data.document.content` 是字符串（关键词不存在时是空串，⛔ 不是 null）。
+FATAL 标题读取失败 → 中止同步不 bootstrap；NF 标题读取失败 → 只跳过那张表。
+⚠️ 两处调用都用 `|| _rc=$?` 接住——`deliver.sh` 是 `set -e`，裸赋值会让投递中途退出。
+夹具 `fn-ledger-heading-read-fail.sh`（旧代码 ⑥ 复现「读取失败 → 整份 append」；首次建台账 ⑧⑨ 新旧皆绿）。
+真 lark-cli 实发三态：不存在的文档 → 中止、零 append；空白文档 → bootstrap、五个标题各 1 次；
+再投同一文档 → 正常路径、标题仍各 1 次。
+⚠️ 中止后投递整体仍 rc=0、只留一行 ⚠️（与其他台账同步失败一致，未改）——这周少同步一次，下周重试。
 
 ### F61 · verify 写成「文档/脚本里出现该路径」时，写一句文档就能让它变绿
 

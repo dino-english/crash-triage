@@ -488,21 +488,32 @@ LEDGER_NF_HEADING_TEXT="${CRASH_REPORT_LEDGER_NF_HEADING:-NON_FATAL 现状表}"
 # keyword 检索会命中正文里**提到**同名文字的引用块（2026-08-20 实测因此误判「标题不存在」，
 # 退回 bootstrap 把四段结构重复 append 了两遍）。同名标题多个时取**最后一个**：
 # 旧结构（历史遗留）在上、本流水线建的新结构在下。
-_ledger_heading_id() { # $1=doc $2=标题文本 → stdout: block id（找不到则空）
-  local doc="$1" text="$2" outline hid
-  outline="$("${LK[@]}" docs +fetch --doc "$doc" --scope outline --max-depth 6 \
-              --as "$LARK_AS" --format json 2>&1)" || outline=""
-  hid="$(printf '%s' "$outline" | json_only | jq -r '.data.document.content // ""' 2>/dev/null \
-    | grep -oE "<h[1-6] id=\"[^\"]*\">${text}<" \
-    | sed -E 's/^<h[1-6] id="([^"]*)">.*/\1/' | tail -1 || true)"
-  if [ -z "$hid" ]; then
-    outline="$("${LK[@]}" docs +fetch --doc "$doc" --scope keyword --keyword "$text" \
-                --detail with-ids --as "$LARK_AS" --format json 2>&1)" || outline=""
-    hid="$(printf '%s' "$outline" | json_only | jq -r '.data.document.content // ""' 2>/dev/null \
+# ⛔ **「读取失败」与「读到了但没有」必须分开**（F62，夹具 fn-ledger-heading-read-fail.sh）：
+#    旧实现两次读取失败都返回空，调用方据此走 bootstrap——一次短暂的读取故障就会把整份本地台账
+#    再 append 进生产文档，日志还打 ✅。2026-10-02 实测 lark-cli 两种返回可区分：
+#    读到了（含「没有」）= rc 0 且 `.data.document.content` 是字符串（可为空串）；
+#    读取失败 = rc 非零 / ok:false / content 为 null。
+# ⚠️ 返回非零是本函数的语义：调用方 ⛔ 必须 `|| _rc=$?` 接住——set -e 下裸赋值会让投递中途退出。
+_ledger_heading_id() { # $1=doc $2=标题文本 → stdout: block id；rc 0=找到 1=读到了但确实没有 2=读取失败
+  local doc="$1" text="$2" outline content hid scope
+  for scope in outline keyword; do
+    outline=""
+    if [ "$scope" = outline ]; then
+      outline="$("${LK[@]}" docs +fetch --doc "$doc" --scope outline --max-depth 6 \
+                  --as "$LARK_AS" --format json 2>&1)" || return 2
+    else
+      outline="$("${LK[@]}" docs +fetch --doc "$doc" --scope keyword --keyword "$text" \
+                  --detail with-ids --as "$LARK_AS" --format json 2>&1)" || return 2
+    fi
+    content="$(printf '%s' "$outline" | json_only \
+      | jq -er '.data.document.content | if type == "string" then . else error("no content") end' 2>/dev/null)" \
+      || return 2
+    hid="$(printf '%s' "$content" \
       | grep -oE "<h[1-6] id=\"[^\"]*\">${text}<" \
       | sed -E 's/^<h[1-6] id="([^"]*)">.*/\1/' | tail -1 || true)"
-  fi
-  printf '%s' "$hid"
+    if [ -n "$hid" ]; then printf '%s' "$hid"; return 0; fi
+  done
+  return 1
 }
 
 # 在标题块之下定位表格并 block_replace。
@@ -607,8 +618,13 @@ sync_ledger() { # $1=doc_id  $2=FATAL现状表文件  $3=表格式(xml|markdown)
     return 0
   fi
 
-  local heading_id nf_heading_id
-  heading_id="$(_ledger_heading_id "$doc" "$LEDGER_HEADING_TEXT")"
+  local heading_id nf_heading_id _hrc=0 _nfrc=0
+  heading_id="$(_ledger_heading_id "$doc" "$LEDGER_HEADING_TEXT")" || _hrc=$?
+  if [ "$_hrc" -eq 2 ]; then
+    # ⛔ 读取失败 ≠ 标题不存在：不得退回 bootstrap（F62），中止本轮，下次跑批重试
+    echo "  ❌ 台账同步中止：定位「${LEDGER_HEADING_TEXT}」时文档读取失败（不是标题不存在），不走 bootstrap，以免整份台账重复 append" >&2
+    return 1
+  fi
 
   if [ -z "$heading_id" ]; then
     # ── Bootstrap：新结构标题不存在 → append 本地台账全文，旧内容保留在上方 ──
@@ -644,8 +660,10 @@ sync_ledger() { # $1=doc_id  $2=FATAL现状表文件  $3=表格式(xml|markdown)
   # 读者无法一眼看出「有几个致命问题」，而那是台账最主要的用途。
   # ⚠️ 标题不存在时**只警告不中止**：FATAL 表已同步成功，因一张新表让整个同步失败会连带丢掉已成功的那半。
   if [ -n "$nf_file" ] && [ -s "$nf_file" ]; then
-    nf_heading_id="$(_ledger_heading_id "$doc" "$LEDGER_NF_HEADING_TEXT")"
-    if [ -z "$nf_heading_id" ]; then
+    nf_heading_id="$(_ledger_heading_id "$doc" "$LEDGER_NF_HEADING_TEXT")" || _nfrc=$?
+    if [ "$_nfrc" -eq 2 ]; then
+      echo "  ⚠️ 台账「${LEDGER_NF_HEADING_TEXT}」标题读取失败，本轮跳过这张表（FATAL 现状表已同步，下次跑批重试）" >&2
+    elif [ -z "$nf_heading_id" ]; then
       echo "  ⚠️ 台账「${LEDGER_NF_HEADING_TEXT}」标题尚不存在，本轮跳过（FATAL 现状表已同步）。首次需在台账文档中加入该标题与一张占位表格。" >&2
     else
       _ledger_replace_table "$doc" "$nf_heading_id" "$nf_file" markdown "$LEDGER_NF_HEADING_TEXT" \
