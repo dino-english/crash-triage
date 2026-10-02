@@ -522,6 +522,36 @@ _lark_write_ok() { # $1=lark-cli 的 JSON 输出 → 0=真生效 / 1=未生效
   [ "$_r" = "success" ]
 }
 
+# 现状表「内容与线上一致」的指纹（夹具 fn-ledger-fingerprint.sh）。
+# ⛔ **只收往返一字不差的部分**：逐字比会被往返噪声误判（分隔行 |-| vs |---|、标题里 <init> 被剥）。
+#    2026-10-02 两张表逐列实测：表头、处置状态、本次状态往返一字不差；标题 / 位置 / 异常有噪声。
+# ⛔ 旧指纹只有「行数 + 8 位 id 集合」，处置状态与表头全不在里面——测试文档里只改 3 行状态，
+#    投递打「✅ 一致，跳过替换」，**状态更正被静默丢弃**；改表结构同理（F60）。
+# ⚠️ 状态列按**表头名**定位（两张表列序不同，NON_FATAL 没有「本次状态」）；`\|` 先换占位再切，防列错位。
+_ledger_fingerprint() { # stdin → "<数据行数>:<8 位 id 集合>:<表头>:<id=状态列… 集合>"
+  local _t; _t="$(cat)"
+  printf '%s:%s:%s:%s' \
+    "$(printf '%s\n' "$_t" | grep -c '^| ' 2>/dev/null || true)" \
+    "$(printf '%s\n' "$_t" | grep -oE '\b[0-9a-f]{8}\b' 2>/dev/null | sort -u | tr '\n' ',' || true)" \
+    "$(printf '%s\n' "$_t" | awk '
+        /^\| / { line=$0; gsub(/\\\|/, "\001", line); n=split(line, c, "|"); h=""
+                 for (i=2; i<n; i++) { gsub(/^[ \t]+|[ \t]+$/, "", c[i]); h=h c[i] "|" }
+                 print h; exit }' || true)" \
+    "$(printf '%s\n' "$_t" | awk '
+        /^\| / { line=$0; gsub(/\\\|/, "\001", line); n=split(line, c, "|")
+                 for (i=2; i<n; i++) gsub(/^[ \t]+|[ \t]+$/, "", c[i])
+                 if (!hdr) { hdr=1
+                   for (i=2; i<n; i++) {
+                     if (c[i] == "处置状态" || c[i] == "本次状态") want[i]=1
+                     if (c[i] == "Issue ID") idc=i }
+                   next }
+                 id=""
+                 if (idc && match(c[idc], /[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/))
+                   id=substr(c[idc], RSTART, 8)
+                 s=id; for (i=2; i<n; i++) if (want[i]) s=s "=" c[i]
+                 print s }' | sort | tr '\n' ',' || true)"
+}
+
 _ledger_replace_table() { # $1=doc $2=heading_id $3=内容文件 $4=格式 $5=日志标签 → 0成功/1失败
   local doc="$1" hid="$2" f="$3" fmt="${4:-markdown}" label="$5" section tid
   section="$("${LK[@]}" docs +fetch --doc "$doc" --scope section --start-block-id "$hid" \
@@ -540,14 +570,8 @@ _ledger_replace_table() { # $1=doc $2=heading_id $3=内容文件 $4=格式 $5=�
   _cur="$("${LK[@]}" docs +fetch --doc "$doc" --scope range --start-block-id "$tid" --end-block-id "$tid" \
           --doc-format markdown --as "$LARK_AS" --format json 2>/dev/null \
           | json_only | jq -r '.data.document.content // ""' 2>/dev/null || true)"
-  _fingerprint() { # stdin → "<数据行数>:<排序去重的 8 位 id 列表>"
-    local _t; _t="$(cat)"
-    printf '%s:%s' \
-      "$(printf '%s\n' "$_t" | grep -c '^| ' 2>/dev/null || echo 0)" \
-      "$(printf '%s\n' "$_t" | grep -oE '\b[0-9a-f]{8}\b' 2>/dev/null | sort -u | tr '\n' ',' || true)"
-  }
-  _fp_cur="$(printf '%s' "$_cur" | _fingerprint)"
-  _fp_want="$(_fingerprint < "$f")"
+  _fp_cur="$(printf '%s' "$_cur" | _ledger_fingerprint)"
+  _fp_want="$(_ledger_fingerprint < "$f")"
   if [ -n "$_cur" ] && [ "$_fp_cur" = "$_fp_want" ]; then
     echo "  ✅ 台账「${label}」内容与线上一致，跳过替换（平稳周常态，非故障）" >&2
     return 0
