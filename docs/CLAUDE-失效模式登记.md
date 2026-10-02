@@ -847,6 +847,17 @@ URL_INDEX="$(publish_doc "$INDEX_XML" … xml "$INDEX_FILE")"   # 发布 XML 版
 **防复发**：⚠️ `fill` 之后必须问一句「我发布的是不是我刚填的那个文件」；
 ⛔ 判据不能是「产物里还有没有占位符」——渲染层会把非法值吃掉。
 
+### F62 · ⚠️ 未修：标题定位读取失败 = 「标题不存在」→ 整份台账再 append 一遍
+
+`deliver.sh` 的 `_ledger_heading_id()` 先读 outline、找不到再按 keyword 读；两次 `docs +fetch`
+**失败时都返回空**，与「文档里确实没有这个标题」不可区分。`sync_ledger` 拿到空 id 就走
+bootstrap，而生产调用总带本地台账全文（`ledger_sync.local_file`）——于是**一次短暂的读取故障
+会让生产台账的五段结构整份重复一遍**，日志打的还是「✅ 台账新结构已 append 建立」。
+
+2026-10-02 量过：outline 读取对测试文档连读 20/20 成功，未观测到触发条件；当天唯一一次
+读取失败发生在全文 `docs +fetch`（不带 scope），不是这条路径。⚠️ 但两者同一 API、同一时段。
+修法方向：读取失败（非零 / 无 `.data.document`）与「读到了但没有标题」分开，前者中止同步而非 bootstrap。
+
 ### F61 · verify 写成「文档/脚本里出现该路径」时，写一句文档就能让它变绿
 
 2026-09-28 发现，⚠️ **是我自己五天前造的**。`crash-ledger-disposition-store` 的正典条文写着：
