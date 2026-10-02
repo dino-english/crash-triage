@@ -22,13 +22,16 @@ iss() { printf '%s\n' "$2" > "$ST/issues/$1.json"; }
 A=aaaaaaaa111122223333444455556666; B=bbbbbbbb111122223333444455556666
 C=cccccccc111122223333444455556666; D=dddddddd111122223333444455556666
 E=eeeeeeee111122223333444455556666; F=ffffffff111122223333444455556666
-mk "a" $A; mk "b" $B; mk "c" $C; mk "d" $D; mk "e" $E; mk "f" $F
+G=99999999111122223333444455556666
+mk "a" $A; mk "b" $B; mk "c" $C; mk "d" $D; mk "e" $E; mk "f" $F; mk "g" $G
 iss $A "{\"id\":\"$A\",\"platform\":\"android\",\"events\":[],\"latest_event\":\"2026-09-30 21:49 UTC\"}"
 iss $B "{\"id\":\"$B\",\"platform\":\"android\",\"events\":[{\"eventTime\":\"'2026-09-20T23:47:01Z'\"}],\"latest_event\":\"2026-09-15 00:00 UTC\"}"
 iss $C "{\"id\":\"$C\",\"platform\":\"android\",\"events\":[{\"eventTime\":\"2026-09-10T00:00:00Z\"}],\"latest_event\":\"2026-09-15 08:00 UTC\"}"
 iss $D "{\"id\":\"$D\",\"platform\":\"android\"}"
 iss $E "{\"id\":\"$E\",\"platform\":\"android\",\"events\":[{\"eventTime\":\"2026-09-16T05:00:00Z\"}]}"
 iss $F "{\"id\":\"$F\",\"platform\":\"android\",\"events\":[],\"latest_event\":\"2026-09-16 01:30 UTC\"}"
+# ⛔ 生产实测（2026-10-02）45 条里 2 条 latest_event 是 ISO 格式，开发机 0 条——本地数据测不到
+iss $G "{\"id\":\"$G\",\"platform\":\"android\",\"events\":[],\"latest_event\":\"2026-09-20T08:27:02Z\"}"
 
 out="$(bash "$ROOT/bin/scan-fix-commits.sh" "$ST" "$R" "$R/nonexistent" 3650 2>&1)"; rc=$?
 st() { printf '%s' "$out" | jq -r --arg id "$1" '.mapped[$id].status // "（未映射）"' 2>/dev/null; }
@@ -40,5 +43,6 @@ h_assert_eq "已修待验" "$(st $C)" "③ 两个来源都早于提交 → 已�
 h_assert_eq "状态未知" "$(st $D)" "④ 两个来源都没有 → 状态未知（⛔ 不得默认已修待验）"
 h_assert_eq "修了仍在" "$(st $E)" "⑤ 时区：05:00Z 晚于 10:00+08:00(=02:00Z) → 修了仍在（⛔ 旧字符串比较判反）"
 h_assert_eq "已修待验" "$(st $F)" "⑥ 时区：01:30 UTC 早于 02:00Z → 已修待验"
+h_assert_eq "修了仍在" "$(st $G)" "⑦ latest_event 为 ISO 格式也要能解析（⛔ 拼成 …Z:00Z 会落进状态未知）"
 rm -rf "$R" "$ST"
 h_summary

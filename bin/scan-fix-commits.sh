@@ -124,13 +124,16 @@ while IFS=$'\t' read -r short hash date epoch label subject; do
     #      同一轮 17 条里 5 条被说反——提交后仍在崩，`latest_event`（每轮无条件刷新）早已写明。
     #    · eventTime 实测有带引号的脏值（`'2026-…Z'`），字符串比较恒小于提交时间。
     #    · 提交时间带 +08:00、事件是 UTC，字符串比较差 8 小时——故提交侧用 git 给的 epoch。
+    #    · latest_event 有两种格式：`2026-09-16 01:30 UTC`（bq 路径）与 ISO `…T…Z`
+    #      （生产实测 45 条里 2 条，开发机 0 条），两种都要收，否则空明细时落进「状态未知」。
     # ⛔ 两个来源都没有 → 「状态未知」，**不得默认已修待验**：那是把「没证据」报成好消息。
     ev_file="$ISSUES_DIR/$full.json"
     last_ts=""
     if [ -s "$ev_file" ]; then
       last_ts="$(jq -r '
         def ev_ts: try (gsub("^[^0-9]+|[^0-9Z]+$"; "") | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601) catch null;
-        def le_ts: try (sub(" UTC$"; "") | sub(" "; "T") + ":00Z" | fromdateiso8601) catch null;
+        def le_ts: if test("^[0-9-]+T") then ev_ts
+                   else try (sub(" UTC$"; "") | sub(" "; "T") + ":00Z" | fromdateiso8601) catch null end;
         [ (.events[]?.eventTime // empty | ev_ts), (.latest_event // empty | le_ts) ]
         | map(select(. != null)) | max // empty
       ' "$ev_file" 2>/dev/null || true)"
