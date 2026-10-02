@@ -93,7 +93,7 @@ lark-cli → **lark-cli勘误**。动手改这四块前，按下表读对应那�
 
 ## 规格与台账
 
-OpenSpec 驱动（`openspec/`，schema `spec-driven`）。**动手改脚本前先看对应 change 的 design/tasks**——阈值、卡片结构、staleness 兜底都有记录的理由与取舍。台账由 **L2 独占产出**（change `crash-ledger-l2-ownership`），修复状态由反扫两个业务仓库的 commit message 驱动：⚠️ **两种形式都认**（`[crash:<8位id>]` 与事实上正在用的 `Crashlytics[ issue]: <32位id>`），⚠️ 且要扫**整条 message 不是 subject**。⛔ 「Android 无此约定故 `fix_commit` 恒 null」是**已订正的过期结论**——原委见 docs/CLAUDE-架构与数据口径.md。
+OpenSpec 驱动（`openspec/`，schema `spec-driven`）。**动手改脚本前先看对应 change 的 design/tasks**——阈值、卡片结构、staleness 兜底都有记录的理由与取舍。台账由 **L2 独占产出**（change `crash-ledger-l2-ownership`），修复状态由反扫两个业务仓库的 commit message 驱动：⚠️ **两种形式都认**（`[crash:<8位id>]` 与事实上正在用的 `Crashlytics[ issue|-Issue]: <32位id>`，后者含 Android 09-14 起的 trailer 写法，见 F39），⚠️ 且要扫**整条 message 不是 subject**。⛔ 「Android 无此约定故 `fix_commit` 恒 null」是**已订正的过期结论**——原委见 docs/CLAUDE-架构与数据口径.md。
 
 ## 按任务继续阅读
 

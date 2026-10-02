@@ -66,6 +66,23 @@ DIFF='{"ios":{"total":1,"events":3,"new":[{"id":"470ed3ef00001111222233334444555
 h_assert_contains "$(h_run _chg_rows ios new "🆕 新增" 1 0)" "（⚠️ 修了仍在 · e3834661）" \
   "⑱ 新增行命中 fixmap 时用「修了仍在」图标（该 issue 提交后仍在崩）"
 
+# 「状态未知」第三态（2026-10-02）：两条渲染路径都要认，⛔ 不得落进 else 被说成「修了仍在」
+_UNK="$(mktemp)"
+printf '{"mapped":{"4d05f9e74e77520b418eac3a355108f1":{"platform":"android","commit":"328af7a9","commit_date":"2026-09-16T10:00:00+08:00","subject":"fix(account): x","status":"状态未知"}}}\n' > "$_UNK"
+# ⚠️ _fix_rows 会跳过已被变化行吸收的条目（⑯），故两条路径用两份 DIFF——共用一份时
+#    _fix_rows 输出为空，「不得出现修了仍在」那条会假绿（实测踩过）
+DIFF='{"ios":{"total":0,"events":0,"new":[],"regressed":[],"spiked":[],"resolved":[]},
+ "android":{"total":0,"events":0,"new":[],"regressed":[],"spiked":[],"resolved":[]}}'
+_unk_fix="$(FIXMAP_FILE="$_UNK" h_run _fix_rows android 0)"
+DIFF='{"ios":{"total":0,"events":0,"new":[],"regressed":[],"spiked":[],"resolved":[]},
+ "android":{"total":1,"events":2,"new":[{"id":"4d05f9e74e77520b418eac3a355108f1","title":"ANR","events":2,"versions":null}],"regressed":[],"spiked":[],"resolved":[]}}'
+_unk_chg="$(FIXMAP_FILE="$_UNK" h_run _chg_rows android new "🆕 新增" 1 0)"
+h_assert_contains "$_unk_fix" "❔ 已修·状态未知"           "⑳ _fix_rows 渲染第三态"
+h_assert_absent   "$_unk_fix" "修了仍在"                  "㉑ ⛔ _fix_rows 未知不得说成修了仍在"
+h_assert_contains "$_unk_chg" "（❔ 已修·状态未知 · 328af7a9）" "㉒ _chg_rows 渲染第三态"
+h_assert_absent   "$_unk_chg" "修了仍在"                  "㉓ ⛔ _chg_rows 未知不得说成修了仍在"
+rm -f "$_UNK"
+
 # ⛔ 没有 fixmap 时变化行一个字节都不许变
 # ⚠️ 用子 shell 隔离这次改写：直接改全局 FIXMAP_FILE 会让后面那段 `: > "$FIXMAP_FILE"`
 #    去创建 /nonexistent/…，夹具照样全绿却在 stderr 漏一条错误（实测踩过）。

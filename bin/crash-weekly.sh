@@ -981,6 +981,8 @@ _chg_rows() { # $1=平台key $2=桶名 $3=图标与词 $4=是否带事件数(1/0
       if [ "$_cr_state" = "CLOSED" ]; then fixtxt="（✅ 已关闭 · ${fixcommit}）"
       elif [ "$_cr_state" = "MUTED" ]; then fixtxt="（🔕 已静音 · ${fixcommit}）"
       elif [ "$fixstatus" = "已修待验" ]; then fixtxt="（🛠️ 代码已修待验 · ${fixcommit}）"
+      # ⛔ 第三态（2026-10-02）：反扫两个时间来源都没有。落进 else 会被说成「修了仍在」
+      elif [ "$fixstatus" = "状态未知" ]; then fixtxt="（❔ 已修·状态未知 · ${fixcommit}）"
       else fixtxt="（⚠️ 修了仍在 · ${fixcommit}）"; fi
     fi
     printf -- '- %s %s %s%s%s%s\n' "$mark" "$idtok" "$title" "$suffix" "$vtxt" "$fixtxt"
@@ -1018,6 +1020,7 @@ _fix_rows() { # $1=平台key $2=是否带链接(1/0)
     if [ "$_fr_state" = "CLOSED" ]; then mark="✅ 已关闭"
     elif [ "$_fr_state" = "MUTED" ]; then mark="🔕 已静音"
     elif [ "$status" = "已修待验" ]; then mark="🛠️ 代码已修待验"
+    elif [ "$status" = "状态未知" ]; then mark="❔ 已修·状态未知"   # 同 _chg_rows 的第三态
     else mark="⚠️ 修了仍在"; fi
     # ⛔ 与 _chg_rows 同一条约定：链接版不加反引号（md2docx.py 的链接正则不处理嵌套行内代码）。
     idtok="\`${id:0:8}\`"
