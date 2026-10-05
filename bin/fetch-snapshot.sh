@@ -286,6 +286,11 @@ agent_text() {
   return 0
 }
 
+# git 规则同样不得前缀通配到写操作：`git -C:*` / `git branch:*` 会放行 `git -C <仓库> tag`、
+# `git branch -D`（cwd 就是 iOS 仓库）。2026-10-05 在生产 claude 2.1.235 上实测：
+# 中间通配 `git -C * log:*` **不生效**（读命令也全拒），只能按字面仓库路径逐个列子命令。
+# --disallowedTools：Agent 工具不受 --allowedTools 约束，模型曾派子 agent 开 worktree 隔离，
+# 在业务仓库里建 git worktree（09-11 起，10-05 一次三个）——违反「只读业务仓库」。
 run_agent() { # $1=尝试序号；输出同时进 stdout（跑批日志）与 agent-<N>.log（事后排查）
   "${AGENT_CMD:-claude}" -p "$PROMPT" \
     --add-dir "$AND_REPO" \
@@ -297,7 +302,13 @@ run_agent() { # $1=尝试序号；输出同时进 stdout（跑批日志）与 ag
       "mcp__firebase__crashlytics_batch_get_events" \
       "mcp__firebase__firebase_read_resources" \
       "Read" "Write" "Grep" "Glob" \
-      "Bash(git log:*)" "Bash(git -C:*)" "Bash(git branch:*)" "Bash(git show:*)" \
+      "Bash(git log:*)" "Bash(git show:*)" \
+      "Bash(git branch -a:*)" "Bash(git branch --show-current)" "Bash(git branch --contains:*)" \
+      "Bash(git -C $IOS_REPO log:*)" "Bash(git -C $IOS_REPO show:*)" "Bash(git -C $IOS_REPO status:*)" \
+      "Bash(git -C $IOS_REPO branch -a:*)" "Bash(git -C $IOS_REPO branch --show-current)" \
+      "Bash(git -C $AND_REPO log:*)" "Bash(git -C $AND_REPO show:*)" "Bash(git -C $AND_REPO status:*)" \
+      "Bash(git -C $AND_REPO branch -a:*)" "Bash(git -C $AND_REPO branch --show-current)" \
+    --disallowedTools "Agent" "Task" "EnterWorktree" "ExitWorktree" \
     --mcp-config "$ROOT/bin/mcp.json" \
     --output-format stream-json --verbose \
     < /dev/null 2>&1 | tee "${AGENT_LOG_BASE}-$1.jsonl" | agent_text
