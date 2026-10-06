@@ -7,13 +7,15 @@
 ROOT="${CRASH_REPORT_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}"
 . "$ROOT/bin/test/harness.sh"
 . "$ROOT/bin/lib/common.sh"   # issue_url
+# 状态 → 文案的唯一定义（change crash-fix-release-status）：两个渲染函数都调它，抽函数测时必须一起加载
+. "$ROOT/bin/lib/core/fixrelease.sh"
 
 FIXMAP_FILE="$(mktemp)"
 cat > "$FIXMAP_FILE" <<'JSON'
 {"mapped":{
-  "2a800b339e12b94bc2d4555c63859df8":{"platform":"ios","commit":"29a20dc5","commit_date":"2026-08-31T16:23:36+08:00","subject":"fix(paywall): 修复 Winback 方向冲突","status":"已修待验"},
-  "470ed3ef000011112222333344445555":{"platform":"ios","commit":"e3834661","commit_date":"2026-08-24T16:26:38+08:00","subject":"fix(welcome-gift): PAG 释放竞态","status":"修了仍在"},
-  "85c581edcdb39b941df627e7b1324a71":{"platform":"android","commit":"9bbe8b15","commit_date":"2026-08-19T13:04:14+08:00","subject":"fix(ai): MicroTTSHelper teardown","status":"已修待验"}
+  "2a800b339e12b94bc2d4555c63859df8":{"platform":"ios","commit":"29a20dc5","commit_date":"2026-08-31T16:23:36+08:00","subject":"fix(paywall): 修复 Winback 方向冲突","status":"已发版待验","release_check":"ok","old_build_events":0},
+  "470ed3ef000011112222333344445555":{"platform":"ios","commit":"e3834661","commit_date":"2026-08-24T16:26:38+08:00","subject":"fix(welcome-gift): PAG 释放竞态","status":"修了仍在","release_check":"ok","old_build_events":0},
+  "85c581edcdb39b941df627e7b1324a71":{"platform":"android","commit":"9bbe8b15","commit_date":"2026-08-19T13:04:14+08:00","subject":"fix(ai): MicroTTSHelper teardown","status":"已修未发版","release_check":"ok","old_build_events":1}
 },"ambiguous":[],"platform_unavailable":[]}
 JSON
 
@@ -31,8 +33,10 @@ ios1="$(h_run _fix_rows ios 1)"
 and0="$(h_run _fix_rows android 0)"
 
 h_assert_contains "$ios0" "2a800b33"        "① 快照为空也要渲染（⛔ 这条就是 09-07 漏报的根因）"
-h_assert_contains "$ios0" "🛠️ 代码已修待验"  "② 已修待验用 🛠️"
-h_assert_contains "$ios0" "⚠️ 修了仍在"      "③ 修了仍在**不得**被写成已修待验（状态取 fixmap 的 status）"
+h_assert_contains "$ios0" "📦 已发版待验"    "② 已发版待验用 📦（四态，change crash-fix-release-status）"
+h_assert_contains "$ios0" "⚠️ 修了仍在"      "③ 修了仍在**不得**被写成别的态（状态取 fixmap 的 status）"
+h_assert_contains "$and0" "🛠️ 已修未发版"    "③b 已修未发版用 🛠️"
+h_assert_absent   "$and0" "修了仍在"         "③c ⛔ 已修未发版不得落进兜底被说成修了仍在（双向测试锚点，tasks 7.2）"
 h_assert_contains "$ios0" "29a20dc5"        "④ 带出提交短 hash"
 h_assert_absent   "$ios0" "85c581ed"        "⑤ ⛔ 不得串平台：ios 调用不出 android 条目"
 h_assert_contains "$and0" "85c581ed"        "⑥ Android 照样渲染（e15bbcd 的 ios-only 过滤不得复活）"
@@ -54,7 +58,7 @@ merged="$(h_run _chg_rows ios resolved "✅ 消失" 0 0)"
 left="$(h_run _fix_rows ios 0)"
 
 h_assert_contains "$merged" "✅ 消失"                 "⑫ 命中 fixmap 的消失行仍是消失行"
-h_assert_contains "$merged" "（🛠️ 代码已修待验 · 29a20dc5）" "⑬ 修复状态并进本行，括注带短 hash"
+h_assert_contains "$merged" "（📦 已发版待验 · 29a20dc5）" "⑬ 修复状态并进本行，括注带短 hash"
 h_assert_contains "$merged" "[CoreFoundation] CFRelease"  "⑭ ⛔ 标题用 issue 标题，不是 commit subject"
 h_assert_absent   "$merged" "fix(paywall)"            "⑮ ⛔ 括注里不放 commit subject（卡片列宽装不下）"
 h_assert_absent   "$left"   "2a800b33"                "⑯ ⛔ 已被变化行吸收的不得再单独成行（恰好一次）"
@@ -82,6 +86,28 @@ h_assert_absent   "$_unk_fix" "修了仍在"                  "㉑ ⛔ _fix_rows
 h_assert_contains "$_unk_chg" "（❔ 已修·状态未知 · 328af7a9）" "㉒ _chg_rows 渲染第三态"
 h_assert_absent   "$_unk_chg" "修了仍在"                  "㉓ ⛔ _chg_rows 未知不得说成修了仍在"
 rm -f "$_UNK"
+
+# ── 四态的附注：旧包次数 / 发版判定不可得 / 未知状态（change crash-fix-release-status）──
+_X="$(mktemp)"
+printf '%s\n' '{"mapped":{
+ "aaaa0000111122223333444455556666":{"platform":"android","commit":"a1a1a1a1","subject":"s1","status":"已发版待验","release_check":"ok","old_build_events":2},
+ "bbbb0000111122223333444455556666":{"platform":"android","commit":"b2b2b2b2","subject":"s2","status":"已修待验","release_check":"unavailable"},
+ "cccc0000111122223333444455556666":{"platform":"android","commit":"c3c3c3c3","subject":"s3","status":"奇怪的新状态","release_check":"ok"}}}' > "$_X"
+DIFF='{"ios":{"total":0,"events":0,"new":[],"regressed":[],"spiked":[],"resolved":[]},
+ "android":{"total":0,"events":0,"new":[],"regressed":[],"spiked":[],"resolved":[]}}'
+_x="$(FIXMAP_FILE="$_X" h_run _fix_rows android 0)"
+h_assert_contains "$_x" "📦 已发版待验·旧包仍崩 2 次"   "㉔ 旧包仍崩的次数要看得见（处置同已发版待验，但量级不同）"
+h_assert_contains "$_x" "❔ 已修待验·发版判定不可得"     "㉕ ⛔ 取数失败时沿用的是时间规则结果，必须明说（design D6）"
+h_assert_contains "$_x" "❓ 奇怪的新状态"               "㉖ 未列出的状态原样透出"
+h_assert_absent   "$_x" "c3c3c3c3 · ⚠️"                "㉗ ⛔ 未知状态不得被兜底归为修了仍在"
+# ⛔ 已关闭 / 已静音优先（R4）：映射收进 fix_mark 后，必须确认开关状态真的传进去了
+ISSUE_STATES_JSON='{"470ed3ef000011112222333344445555":"CLOSED","2a800b339e12b94bc2d4555c63859df8":"MUTED"}'
+_cl="$(h_run _fix_rows ios 0)"
+h_assert_contains "$_cl" "✅ 已关闭"  "㉘ CLOSED 压过「修了仍在」（_fix_rows 把开关状态传给了 fix_mark）"
+h_assert_contains "$_cl" "🔕 已静音"  "㉙ MUTED 单独成态"
+h_assert_absent   "$_cl" "修了仍在"   "㉚ ⛔ 关掉的 issue 不得再推给人跟进"
+ISSUE_STATES_JSON='{}'
+rm -f "$_X"
 
 # ⛔ 没有 fixmap 时变化行一个字节都不许变
 # ⚠️ 用子 shell 隔离这次改写：直接改全局 FIXMAP_FILE 会让后面那段 `: > "$FIXMAP_FILE"`

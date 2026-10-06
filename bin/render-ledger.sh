@@ -157,12 +157,21 @@ build_rows() { # $1=平台标签(iOS|Android) $2=snapshot key(ios|android) $3=�
                       (if $fix != null then "✅已关闭（\($fix.commit)）" else "✅已关闭" end)
                     elif $states[$iss.id] == "MUTED" then
                       (if $fix != null then "🔕已静音（\($fix.commit)）" else "🔕已静音" end)
-                    elif $fix != null then $fix.status
+                    # 四态（change crash-fix-release-status）：取数失败时 status 是只比时间的回退值，必须明说；
+                    # 「已发版待验」带旧包次数——处置相同（等升级），但量级要看得见。
+                    # ⚠️ 无 release_check 字段（旧 fixmap / 夹具）按 ok 处理，原样透传。
+                    elif $fix != null then
+                      (if ($fix.release_check // "ok") != "ok" then "\($fix.status)·发版判定不可得"
+                       elif $fix.status == "已发版待验" and (($fix.old_build_events // 0) > 0)
+                         then "已发版待验·旧包仍崩 \($fix.old_build_events) 次"
+                       else $fix.status end)
                     # ⛔ 开关状态派生的值（✅已关闭 / 🔕已静音）**不沿用**：它们每轮按 $states 重算，
                     #    走到这里说明本轮已不是 CLOSED / MUTED——沿用就是把重新打开的 issue 显示成已了结
                     #    （R4 的镜像）。2026-09-28 实测 8101c07c：09-21 CLOSED → 09-28 OPEN（F63）。
                     elif $p.disposition != null and $p.disposition != ""
-                         and ($p.disposition | test("^(✅已关闭|🔕已静音)") | not) then $p.disposition
+                         and ($p.disposition | test("^(✅已关闭|🔕已静音)") | not) then
+                      # 旧两态的「已修待验」在四态下有歧义（可能未发版，也可能已发版）——沿用时标明是旧口径
+                      ($p.disposition | if . == "已修待验" then "已修待验（旧口径）" else . end)
                     else "未处理" end),
       # 三态（spec crash-perf-issue-lifecycle）。⚠️ $s.last 是**上一轮**的值——
       # 基准提升发生在渲染之后，此处读到的还没被刷成今天。
@@ -288,7 +297,10 @@ while IFS=$'\t' read -r id plat status commit subject; do
   if [ "$_st" = "CLOSED" ]; then status="✅已关闭"; fi
   if [ "$_st" = "MUTED" ]; then status="🔕已静音"; fi
   add_line "🛠️ [$plat] $status ${subject}（${commit}，issue ${id:0:8}）"
-done < <(jq -r '.mapped // {} | to_entries[] | [.key, .value.platform, .value.status, .value.commit, .value.subject] | @tsv' "$FIXMAP" 2>/dev/null || true)
+# ⛔ 发版判定不可得的条目**不进时间线**（change crash-fix-release-status，design D6）：它的 status 是只比时间的
+#    回退值，写进去就是一条永久的「事实」，下一轮判定恢复后又写一条相反的——时间线只追加、不修改。
+done < <(jq -r '.mapped // {} | to_entries[] | select((.value.release_check // "ok") == "ok")
+                | [.key, .value.platform, .value.status, .value.commit, .value.subject] | @tsv' "$FIXMAP" 2>/dev/null || true)
 
 # ── ④ 更新后的生命周期基准 ─────────────────────────────
 # first 的取值与表格行逐字相同（基准的 first 优先，其次上一版表格的首次纳入，最后本轮日期）。

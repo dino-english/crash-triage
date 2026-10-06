@@ -53,12 +53,16 @@ fi
 
 echo "── ⛔ 三条渲染路径都要接（2026-09-11 只接了台账那条，卡片仍报 6 条错的）──"
 # 同一个 fixmap 会被三处渲染：台账现状表 / 卡片 _fix_rows / 卡片变化行并入。
+# ⚠️ 自 change crash-fix-release-status 起，卡片两条路径（及 L1 索引页）的 CLOSED/MUTED 优先
+#    收进 fix_mark（core/fixrelease.sh，全仓唯一定义）——这里改为断言：①各路径都把开关状态传给它
+#    ②它自己按 CLOSED/MUTED 优先。行为断言在 fn-fixed-pending.sh ㉘㉙。
 for pat in 'if $states[$iss.id] == "CLOSED" then:render-ledger.sh' \
-           '_fr_state" = "CLOSED":crash-weekly.sh' \
-           '_cr_state" = "CLOSED":crash-weekly.sh' \
+           'fix_mark "$status" "$rc" "$old" "$_fr_state":crash-weekly.sh' \
+           'fix_mark "$fixstatus" "$fixrc" "$fixold" "$_cr_state":crash-weekly.sh' \
+           'fix_mark "$_ix_st" "$_ix_rc" "$_ix_old" "$_ix_state":crash-daily.sh' \
+           'if [ "$state" = "CLOSED" ]; then:lib/core/fixrelease.sh' \
+           'if [ "$state" = "MUTED" ]; then:lib/core/fixrelease.sh' \
            'if $states[$iss.id] == "MUTED" then:render-ledger.sh' \
-           '_fr_state" = "MUTED":crash-weekly.sh' \
-           '_cr_state" = "MUTED":crash-weekly.sh' \
            '_st" = "MUTED":render-ledger.sh'; do
   needle="${pat%%:*}"; file="${pat##*:}"
   if grep -qF "$needle" "$ROOT/bin/$file"; then

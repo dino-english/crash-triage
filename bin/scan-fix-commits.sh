@@ -15,7 +15,11 @@
 #   "platform_unavailable": ["android", ...],   // 仓库不可读时该平台整体跳过
 #   "mapped": {
 #     "<32位id>": {"platform":"ios","commit":"<短hash>","commit_date":"<ISO8601>",
-#                  "subject":"...","status":"已修待验"|"修了仍在"}
+#                  "subject":"...","status":"已修待验"|"修了仍在"|"状态未知",
+#                  "commit_epoch":<提交时间epoch>,
+#                  "release_ref":"V1.8.2"|"main"|null, "fixed_in_version":"1.8.2"|null}
+#     ⚠️ 这里的 status 只比时间（取数失败时的回退）；四态由 fix-release-status.sh 改判，
+#        release_ref / fixed_in_version 仅 Android 有值（change crash-fix-release-status）
 #   },
 #   "ambiguous": [{"short_id":"5ac87850","candidates":["<id1>","<id2>",...],"commit":"<短hash>"}]
 # }
@@ -59,8 +63,10 @@ scan_repo() { # $1=仓库路径 $2=平台标签
   # --all 覆盖所有分支（含未合并的修复分支）；只读 log，不 checkout / reset。
   # 多个 --grep 之间是 OR；⛔ 别写成单个带 \| 的模式，git 默认 BRE，正则风味容易踩空。
   # %at = 作者时间的 epoch 秒，给第 3 步做状态判定用（⛔ 不拿 %aI 字符串比：带 +08:00，事件是 UTC）
+  # %ct = 提交时间，给发版判定用（change crash-fix-release-status）：cherry-pick 保留作者时间、
+  #       刷新提交时间，「修复何时进了这条分支」看的是后者——用作者时间会把不含修复的包算成含修复。
   git -C "$repo" log --all --grep='\[crash:' --grep='[Cc]rashlytics' --since="${WINDOW} days ago" \
-    --format='%H%x09%aI%x09%at%x09%s' 2>/dev/null | while IFS=$'\t' read -r hash date epoch subject; do
+    --format='%H%x09%aI%x09%at%x09%ct%x09%s' 2>/dev/null | while IFS=$'\t' read -r hash date epoch cepoch subject; do
     [ -n "$hash" ] || continue
     _msg="$(git -C "$repo" show -s --format=%B "$hash" 2>/dev/null || true)"
     # ⛔ 每个 grep 都要 `|| true`：无匹配返回 1，而 set -o pipefail 下会让整条管道失败（F31）。
@@ -80,7 +86,7 @@ scan_repo() { # $1=仓库路径 $2=平台标签
         | grep -oE '[0-9a-fA-F]{8,32}' | cut -c1-8 || true
     } | tr 'A-Z' 'a-z' | sort -u | while read -r short; do
       [ -n "$short" ] || continue
-      printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$short" "${hash:0:8}" "$date" "$epoch" "$label" "$subject"
+      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$short" "${hash:0:8}" "$date" "$epoch" "$cepoch" "$label" "$subject"
     done
   done >> "$TMP_HITS" || true
 }
@@ -108,7 +114,7 @@ DEDUP="$(mktemp)"
 trap 'rm -f "$TMP_HITS" "$TMP_UNAVAIL" "$TMP_SHORT2FULL" "$DEDUP"' EXIT
 awk -F'\t' '!seen[$1]++' "$TMP_HITS" > "$DEDUP"
 
-while IFS=$'\t' read -r short hash date epoch label subject; do
+while IFS=$'\t' read -r short hash date epoch cepoch label subject; do
   [ -n "$short" ] || continue
   entry="$(jq -c --arg s "$short" '.[$s] // {ids:[],platform:null}' "$TMP_SHORT2FULL")"
   n="$(jq -r '.ids | length' <<<"$entry")"
@@ -141,9 +147,28 @@ while IFS=$'\t' read -r short hash date epoch label subject; do
     if [ -z "$last_ts" ] || [ -z "$epoch" ]; then status="状态未知"
     elif [ "$last_ts" -gt "$epoch" ]; then status="修了仍在"
     else status="已修待验"; fi
+    # 发版事实（change crash-fix-release-status，design D2）：Android 用 main / V* tag 判「已上线」，
+    # 最早包含提交的 tag 即 fixed_in_version。iOS 不用 tag（缺 v1.8.1/v1.8.2、修复多为 cherry-pick），
+    # 两字段恒 null，由 fix-release-status.sh 按 build 首现 + 上架特征判。纯只读：tag --contains / branch -r --contains。
+    # ⛔ 「进 main」认**任一远端**的 main：生产 Android 的 origin 指向 prime-future，开发机是 super——写死 origin 会两头各错一边。
+    # ⛔ 先落变量再 grep，不写 `git … | grep -q`：-q 提前退出让 git 吃 SIGPIPE，pipefail 下判反。
+    rel_ref=""; fixed_in=""
+    if [ "$plat" = "android" ] && [ -d "$AND_REPO/.git" ]; then
+      _tag="$(git -C "$AND_REPO" tag --contains "$hash" --list 'V[0-9]*' 2>/dev/null | sort -V | head -1 || true)"
+      if [ -n "$_tag" ]; then
+        rel_ref="$_tag"; fixed_in="${_tag#V}"
+      else
+        _br="$(git -C "$AND_REPO" branch -r --contains "$hash" 2>/dev/null || true)"
+        if printf '%s\n' "$_br" | grep -E '/main$' >/dev/null; then rel_ref="main"; fi
+      fi
+    fi
     MAPPED="$(jq -c --arg id "$full" --arg plat "$plat" --arg commit "$hash" \
                     --arg date "$date" --arg subj "$subject" --arg status "$status" \
-      '. + {($id): {platform:$plat, commit:$commit, commit_date:$date, subject:$subj, status:$status}}' \
+                    --arg cepoch "$cepoch" --arg rel "$rel_ref" --arg fin "$fixed_in" \
+      '. + {($id): {platform:$plat, commit:$commit, commit_date:$date, subject:$subj, status:$status,
+                    commit_epoch: ($cepoch | tonumber? // null),
+                    release_ref: (if $rel == "" then null else $rel end),
+                    fixed_in_version: (if $fin == "" then null else $fin end)}}' \
       <<<"$MAPPED")"
   else
     cands="$(jq -c '.ids' <<<"$entry")"

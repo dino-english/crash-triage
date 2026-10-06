@@ -148,7 +148,7 @@ mkdir -p "$OUT_DIR"
 . "$ROOT/bin/lib/query.sh" # SQL 占位符替换唯一入口（q_render），漏传占位符当场失败
 # 核心层（纯函数），与 L1 共用同一份实现——此前 _fmt / _until_epoch / win_* / stale_days
 # 在两个脚本里各存了一份，其中 stale_days 逐字节相同。
-for _c in format verdict version cache; do
+for _c in format verdict version cache fixrelease; do
   # shellcheck disable=SC1090
   . "$ROOT/bin/lib/core/${_c}.sh" || { echo "❌ 核心层缺失：bin/lib/core/${_c}.sh" >&2; exit 1; }
 done
@@ -226,6 +226,18 @@ else
   echo '{"mapped":{},"ambiguous":[],"platform_unavailable":["ios","android"]}' > "$FIXMAP_FILE"
 fi
 [ -s "$FIXMAP_FILE" ] || echo '{"mapped":{},"ambiguous":[],"platform_unavailable":["ios","android"]}' > "$FIXMAP_FILE"
+# 发版判定（change crash-fix-release-status）：反扫只比时间，看不见事件在哪个包上——
+# 修复没发版、或旧包用户还在崩，都会被报成「修了仍在」。这里按 build 改判四态，覆盖 ${FIXMAP_FILE}；
+# 反扫原样留在 fixmap-scan.json 供对照。⛔ 失败（rc≠0）不中断周报，但每条都要带 release_check，
+# 呈现处据此标「发版判定不可得」（design D6）——⛔ 不得静默退回两态。
+cp "$FIXMAP_FILE" "$OUT_DIR/fixmap-scan.json"
+_frs_rc=0
+"$ROOT/bin/fix-release-status.sh" "$OUT_DIR/fixmap-scan.json" "$FIXMAP_FILE" || _frs_rc=$?
+if [ "$_frs_rc" -ne 0 ] && [ "$_frs_rc" -ne 2 ]; then
+  # rc=2 是「有一端取数失败、文件照写」；其他非零是子脚本自己崩了，产物不可信，从反扫结果重建
+  jq '.mapped |= map_values(. + {release_check: "unavailable"})' "$OUT_DIR/fixmap-scan.json" > "$FIXMAP_FILE"
+  echo "  ⚠️ 发版判定失败（rc=${_frs_rc}），修复状态沿用只比时间的结果并逐条标注「发版判定不可得」"
+fi
 AMBIG_N="$(jq '.ambiguous | length' "$FIXMAP_FILE" 2>/dev/null || echo 0)"
 [ "$AMBIG_N" -gt 0 ] 2>/dev/null && echo "  ⚠️ 反扫发现 $AMBIG_N 个歧义短标识，未自动更新，详见 fixmap.json"
 
@@ -947,14 +959,14 @@ echo "  取数区间 ${WEEK_DAYS}d：$WIN_COMPACT"
 #    定义点，改一处就让预览与实发不一致）。改为**一个定义点、两次调用**，靠参数区分。
 _chg_rows() { # $1=平台key $2=桶名 $3=图标与词 $4=是否带事件数(1/0) $5=是否带链接(1/0)
   local k="$1" bucket="$2" mark="$3" with_events="$4" want_link="$5"
-  local id title events vers vtxt suffix idtok u fixstatus fixcommit fixtxt
+  local id title events vers vtxt suffix idtok u fixstatus fixcommit fixrc fixold fixtxt
   # ⚠️ 与 fixmap 左连接：命中的行把修复状态**并进本行**，而不是让 _fix_rows 再单独出一行。
   #    2026-09-07 实测：`470ed3ef` 同时满足「消失」（本周窗口无事件）与「已修待验」
   #    （有修复提交、且提交后无更晚事件）——两者不矛盾，是同一件事的观察与解释，
   #    但分成两行、各带一个不同的描述（issue 标题 vs commit subject）会被读成两条打架的记录。
   # ⛔ 括注只放短 hash，不放 commit subject：卡片列宽装不下，subject 留给周报文档。
   local fmap="${FIXMAP_FILE:-}"; [ -s "$fmap" ] || fmap=/dev/null
-  while IFS=$'\t' read -r id title events vers fixstatus fixcommit; do
+  while IFS=$'\t' read -r id title events vers fixrc fixold fixstatus fixcommit; do
     [ -n "$id" ] || continue
     # 版本构成：⚠️ **只在跨版本时出括注**——单版本时它与主数字重复，只增噪音。
     # ⛔ 全角括号先条件赋值再拼接，禁 ${var:+（...）}：bash 会把全角字节并进变量名。
@@ -978,12 +990,10 @@ _chg_rows() { # $1=平台key $2=桶名 $3=图标与词 $4=是否带事件数(1/0
     if [ -n "$fixcommit" ]; then
       # ⛔ 同 _fix_rows：已关闭优先（R4）。⚠️ 这是第三条渲染路径——改一处不够。
       _cr_state="$(printf '%s' "$ISSUE_STATES_JSON" | jq -r --arg k "$id" '.[$k] // ""' 2>/dev/null || true)"
-      if [ "$_cr_state" = "CLOSED" ]; then fixtxt="（✅ 已关闭 · ${fixcommit}）"
-      elif [ "$_cr_state" = "MUTED" ]; then fixtxt="（🔕 已静音 · ${fixcommit}）"
-      elif [ "$fixstatus" = "已修待验" ]; then fixtxt="（🛠️ 代码已修待验 · ${fixcommit}）"
-      # ⛔ 第三态（2026-10-02）：反扫两个时间来源都没有。落进 else 会被说成「修了仍在」
-      elif [ "$fixstatus" = "状态未知" ]; then fixtxt="（❔ 已修·状态未知 · ${fixcommit}）"
-      else fixtxt="（⚠️ 修了仍在 · ${fixcommit}）"; fi
+      # ⛔ 状态 → 文案只走 fix_mark（core/fixrelease.sh，全仓唯一定义）：这里曾自写 if/elif 且以
+      #    「其余一律修了仍在」兜底，与 _fix_rows 各一份——新状态一进来就被说成修复无效（change crash-fix-release-status）。
+      _cr_mark="$(fix_mark "$fixstatus" "$fixrc" "$fixold" "$_cr_state")"
+      fixtxt="（${_cr_mark} · ${fixcommit}）"
     fi
     printf -- '- %s %s %s%s%s%s\n' "$mark" "$idtok" "$title" "$suffix" "$vtxt" "$fixtxt"
   done < <(echo "$DIFF" | jq -r --slurpfile fm "$fmap" --arg k "$k" --arg b "$bucket" '
@@ -991,6 +1001,9 @@ _chg_rows() { # $1=平台key $2=桶名 $3=图标与词 $4=是否带事件数(1/0
       | .[$k][$b][]?
       | [ .id, .title, (.events // ""),
           (if .versions == null then "null" else (.versions|tojson) end),
+          # ⛔ IFS=制表符属空白类，**连续空字段会被合并、后续字段左移**（实测：缺 release_check 的条目
+          #    被读成「发版判定不可得」）。新字段从源头给非空缺省，且排在可能为空的 status/commit 之前。
+          ((($m[.id] // {}).release_check // "ok")), ((($m[.id] // {}).old_build_events // 0) | tostring),
           (($m[.id] // {}).status // ""), (($m[.id] // {}).commit // "") ] | @tsv' 2>/dev/null || true)
   # ⛔ 必须显式 return 0：末尾的条件判断为假会让函数返回 1，而调用方在 set -e 下会整脚本退出。
   return 0
@@ -1008,20 +1021,16 @@ _chg_rows() { # $1=平台key $2=桶名 $3=图标与词 $4=是否带事件数(1/0
 # ⚠️ 标题用提交 subject 而非 issue title：这些 issue 通常**不在**当周快照里，拿不到 title。
 _fix_rows() { # $1=平台key $2=是否带链接(1/0)
   local k="$1" want_link="${2:-0}"
-  local id plat status commit subject mark idtok u
+  local id plat status commit rc old subject mark idtok u
   [ -s "$FIXMAP_FILE" ] || return 0
-  while IFS=$'\t' read -r id plat status commit subject; do
+  while IFS=$'\t' read -r id plat status commit rc old subject; do
     [ -n "$id" ] || continue
     # ⛔ **已关闭优先**（失效模式 R4）：fixmap 来自「永久保留不清理」的事实层缓存，
     #    2026-09-11 实测卡片上 6 条「已修待验」中 4 条在 Crashlytics 已是 CLOSED。
     #    ⚠️ 台账那侧（render-ledger.sh）已先接上，卡片这条路径**当时漏了**——
     #    同一个数据源两条渲染路径，只堵一条等于没堵。
     _fr_state="$(printf '%s' "$ISSUE_STATES_JSON" | jq -r --arg k "$id" '.[$k] // ""' 2>/dev/null || true)"
-    if [ "$_fr_state" = "CLOSED" ]; then mark="✅ 已关闭"
-    elif [ "$_fr_state" = "MUTED" ]; then mark="🔕 已静音"
-    elif [ "$status" = "已修待验" ]; then mark="🛠️ 代码已修待验"
-    elif [ "$status" = "状态未知" ]; then mark="❔ 已修·状态未知"   # 同 _chg_rows 的第三态
-    else mark="⚠️ 修了仍在"; fi
+    mark="$(fix_mark "$status" "$rc" "$old" "$_fr_state")"   # 唯一定义，见 _chg_rows 同处注释
     # ⛔ 与 _chg_rows 同一条约定：链接版不加反引号（md2docx.py 的链接正则不处理嵌套行内代码）。
     idtok="\`${id:0:8}\`"
     if [ "$want_link" = "1" ]; then
@@ -1036,7 +1045,11 @@ _fix_rows() { # $1=平台key $2=是否带链接(1/0)
              | ($fm[0].mapped // {}) | to_entries[]
              | select(.value.platform == $k)
              | select(.key as $i | $shown | index($i) | not)
-             | [.key, .value.platform, .value.status, .value.commit, .value.subject] | @tsv' \
+             # ⚠️ subject 放最后：它是自由文本，放中间时 read 会把后续字段错位（含制表符时）
+             | [.key, .value.platform, .value.status, .value.commit,
+                # ⛔ 不得输出空字段：IFS=制表符会合并连续空字段、让后续字段左移（同 _chg_rows）
+                (.value.release_check // "ok"), ((.value.old_build_events // 0) | tostring),
+                .value.subject] | @tsv' \
            2>/dev/null || true)
   # ⛔ 同 _chg_rows：必须显式 return 0。
   return 0

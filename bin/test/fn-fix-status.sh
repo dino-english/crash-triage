@@ -45,4 +45,28 @@ h_assert_eq "修了仍在" "$(st $E)" "⑤ 时区：05:00Z 晚于 10:00+08:00(=0
 h_assert_eq "已修待验" "$(st $F)" "⑥ 时区：01:30 UTC 早于 02:00Z → 已修待验"
 h_assert_eq "修了仍在" "$(st $G)" "⑦ latest_event 为 ISO 格式也要能解析（⛔ 拼成 …Z:00Z 会落进状态未知）"
 rm -rf "$R" "$ST"
+
+echo "── 发版事实：release_ref / fixed_in_version / commit_epoch（change crash-fix-release-status）──"
+R2="$(mktemp -d)"; ST2="$(mktemp -d)"; mkdir -p "$ST2/issues"
+git -C "$R2" init -q 2>/dev/null; git -C "$R2" config user.email t@t; git -C "$R2" config user.name t
+# ⚠️ 作者时间与提交时间刻意不同：cherry-pick 保留作者时间、刷新提交时间——发版判定要的是后者
+mk2() { echo "$RANDOM" > "$R2/f"; git -C "$R2" add -A
+        GIT_AUTHOR_DATE="2026-09-01T00:00:00Z" GIT_COMMITTER_DATE="$3" \
+          git -C "$R2" commit -q -m "fix: $1"$'\n\n'"Crashlytics-Issue: $2"; }
+H=12121212111122223333444455556666; J=34343434111122223333444455556666; K=56565656111122223333444455556666
+mk2 h $H "2026-09-10T00:00:00Z"
+git -C "$R2" tag V1.10.0; git -C "$R2" tag V1.2.0          # 两个 tag 都含 H：⛔ 字符串排序会选 V1.10.0
+mk2 j $J "2026-09-20T00:00:00Z"
+git -C "$R2" update-ref refs/remotes/upstream/main HEAD    # ⛔ 远端名不是 origin（生产 / 开发机各不相同）
+git -C "$R2" checkout -q -b side
+mk2 k $K "2026-09-25T00:00:00Z"                            # 只在旁支：既无 tag 也不在 main
+for x in $H $J $K; do printf '{"id":"%s","platform":"android","events":[],"latest_event":"2026-09-01 00:00 UTC"}\n' "$x" > "$ST2/issues/$x.json"; done
+out2="$(bash "$ROOT/bin/scan-fix-commits.sh" "$ST2" "$R2/nonexistent" "$R2" 3650 2>&1)"; rc2=$?
+f2() { printf '%s' "$out2" | jq -r --arg id "$1" ".mapped[\$id] | $2" 2>/dev/null; }
+h_assert_eq "0" "$rc2" "⑧ 整脚本 rc=0"
+h_assert_eq "V1.2.0|1.2.0" "$(f2 $H '"\(.release_ref)|\(.fixed_in_version)"')" "⑨ 取**最早**包含它的 tag，按版本号排序（⛔ 不是字典序）"
+h_assert_eq "main|null"    "$(f2 $J '"\(.release_ref)|\(.fixed_in_version)"')" "⑩ 进了任一远端的 main、无 tag → main"
+h_assert_eq "null|null"    "$(f2 $K '"\(.release_ref)|\(.fixed_in_version)"')" "⑪ 只在旁支 → 未上线"
+h_assert_eq "1788998400"   "$(f2 $H '.commit_epoch')" "⑫ commit_epoch 是**提交时间** 09-10（=1788998400），⛔ 不是作者时间 09-01（=1788220800）"
+rm -rf "$R2" "$ST2"
 h_summary

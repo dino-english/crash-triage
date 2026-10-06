@@ -239,7 +239,7 @@ else
 fi
 # 核心层（纯函数）。不依赖任何全局，加载顺序任意；缺失则整跑失败——
 # 这些是阈值判定与格式化的唯一实现，退化版本会静默产出错误数字，比直接失败危险得多。
-for _c in format verdict version cache; do
+for _c in format verdict version cache fixrelease; do
   # shellcheck disable=SC1090
   . "$ROOT/bin/lib/core/${_c}.sh" || { echo "❌ 核心层缺失：bin/lib/core/${_c}.sh" >&2; exit 1; }
 done
@@ -1399,21 +1399,51 @@ if [ "$MCP_OK" = 1 ]; then
       || echo "  ⚠️ issue 状态同步失败，沿用缓存里的既有 state" >&2
   fi
   FIXMAP_L1="$CRASH_DIR/fixmap.json"
+  # 发版判定要看 Android 的 main / V* tag，而 L1 原本从不 fetch（只有 L2 周一 fetch）——
+  # 周二合进 main 的修复，日报会连报 6 天「未发版」（change crash-fix-release-status，design D5）。
+  # 照抄 L2 同一条命令：只 fetch，⛔ 不 checkout / reset（REPOS_ROOT 可能是有人正在用的工作仓库）。
+  # ⚠️ 失败不中断日报，但判定基于旧 refs，必须在卡片上说出来。
+  REPOS_SYNCED=1
+  for _fr_r in dino-english-ios dino-english-android; do
+    run_with_timeout 120 git -C "$REPOS_ROOT/$_fr_r" fetch --all --tags --prune --quiet >/dev/null 2>&1 \
+      || { REPOS_SYNCED=0; echo "  ⚠️ ${_fr_r} fetch 失败，发版判定基于上次同步的提交与标签" >&2; }
+  done
+  FIXED_PENDING=0
   if [ -x "$ROOT/bin/scan-fix-commits.sh" ] \
      && "$ROOT/bin/scan-fix-commits.sh" "$STATE" "$REPOS_ROOT/dino-english-ios" \
         "$REPOS_ROOT/dino-english-android" "${CRASH_REPORT_FIX_SCAN_DAYS:-90}" \
-        > "$FIXMAP_L1" 2>"$CRASH_DIR/fixmap-scan.log"; then
-    # 只数「有修复提交 且 当前仍 OPEN」的。⚠️ 缓存里没有 state 字段的（同步失败/首轮）
-    # 按**保守**处理：不计入——宁可少报，也不要让人去处理已经关掉的问题。
-    FIXED_PENDING=0
+        > "$CRASH_DIR/fixmap-scan.json" 2>"$CRASH_DIR/fixmap-scan.log"; then
+    _frs_rc=0
+    # ⚠️ AUDIT_FILE / RUN_ID 只对这个子进程传：L1 不全局 export 它们（L2 export 了），
+    #    不传则子脚本的 bq 调用不进 L1 审计时间线（tasks 4.4）；全局 export 会改变其他子进程的行为。
+    AUDIT_FILE="$AUDIT_FILE" RUN_ID="$RUN_ID" CRASH_REPORT_REPOS_SYNCED="$REPOS_SYNCED" \
+      "$ROOT/bin/fix-release-status.sh" \
+      "$CRASH_DIR/fixmap-scan.json" "$FIXMAP_L1" || _frs_rc=$?
+    if [ "$_frs_rc" -ne 0 ] && [ "$_frs_rc" -ne 2 ]; then
+      jq '.mapped |= map_values(. + {release_check: "unavailable"})' "$CRASH_DIR/fixmap-scan.json" > "$FIXMAP_L1"
+    fi
+    # 只数「已修未发版 且 发版判定可得 且 当前仍 OPEN」的。
+    # ⛔ 原判据是「已修待验」（提交后无新事件）——它包含**已发版且生效**的修复，把好消息报成了告警
+    #    （spec crash-perf-daily-weekly-report「已修未发版」场景早已写明「含修复的版本尚未上线」）。
+    # ⛔ 判定不可得的不计：那是只比时间的回退值，正是本 change 要消除的错（design D6）。
+    # ⚠️ 缓存里没有 state 字段的（同步失败/首轮）按**保守**处理：不计入——宁可少报，也不要让人去处理已经关掉的问题。
     while IFS= read -r _fp_id; do
       [ -n "$_fp_id" ] || continue
       _fp_state="$(jq -r '.state // ""' "$STATE/issues/$_fp_id.json" 2>/dev/null || true)"
       if [ "$_fp_state" = "OPEN" ]; then FIXED_PENDING=$((FIXED_PENDING + 1)); fi
-    done < <(jq -r '(.mapped // {}) | to_entries[] | select(.value.status == "已修待验") | .key' "$FIXMAP_L1" 2>/dev/null || true)
+    done < <(jq -r '(.mapped // {}) | to_entries[]
+                    | select(.value.status == "已修未发版" and .value.release_check == "ok") | .key' "$FIXMAP_L1" 2>/dev/null || true)
+    _fr_un="$(jq '[(.mapped // {})[] | select(.release_check != "ok")] | length' "$FIXMAP_L1" 2>/dev/null || echo 0)"
+    if [ "${_fr_un:-0}" -gt 0 ] 2>/dev/null; then
+      FIX_RELEASE_NOTE="⚠️ 修复发版判定不可得（${_fr_un} 条），本轮「代码已修但未发版」未计入这些条目"
+    elif [ "$REPOS_SYNCED" = 0 ]; then
+      FIX_RELEASE_NOTE="⚠️ 业务仓库未同步，修复发版判定基于上次同步的提交与标签，可能滞后"
+    fi
   else
-    echo "  ⚠️ 修复状态反扫失败，回落模型反查值（详见 fixmap-scan.log）" >&2
-    FIXED_PENDING="$(jq -r '[((.ios // []) + (.android // []))[] | select(.fix_commit != null)] | length' "$CRASH_JSON" 2>/dev/null || echo 0)"
+    # ⛔ 原先回落到模型给的 fix_commit 计数——那正是「找到修复提交就报未发版」，不判发版。
+    #    反扫失败时宁可不报，并在卡片上说出来（spec「发版判定不可得」场景）。
+    echo "  ⚠️ 修复状态反扫失败，本轮不判「代码已修但未发版」（详见 fixmap-scan.log）" >&2
+    FIX_RELEASE_NOTE="⚠️ 修复状态反扫失败，本轮未判定「代码已修但未发版」"
   fi
 
   [ "${FIXED_PENDING:-0}" -gt 0 ] 2>/dev/null && add_alert "🔴 ${FIXED_PENDING} 个 issue 代码已修但未发版（全版本口径）"
@@ -1455,6 +1485,8 @@ add_alert "$FACT_CACHE_MSG"
 SUMMARY_MD="$ALERTS"
 add_summary() { [ -n "$1" ] && SUMMARY_MD="${SUMMARY_MD:+$SUMMARY_MD
 }$1"; return 0; }
+# 发版判定的降级说明（change crash-fix-release-status，design D5/D6）：不是线上问题，只进摘要行（黄）
+add_summary "${FIX_RELEASE_NOTE:-}"
 add_summary "$(yellow_line "崩溃率" "$IOS_RATE_PCT" "$AND_RATE_PCT" "$CRASH_RATE_RED" "$CRASH_RATE_YELLOW" "%")"
 add_summary "$(yellow_line "慢帧最差页" "$IOS_SLOW_V1" "$AND_SLOW_V1" "$SLOW_FRAME_RED" "$SLOW_FRAME_YELLOW" "%")"
 add_summary "$(yellow_line "冻结率" "$IOS_FROZEN_V1" "$AND_FROZEN_V1" "$FROZEN_RED" "$FROZEN_YELLOW" "%")"
@@ -2645,11 +2677,26 @@ build_index() {
     #    所以 null 在两端含义不同：iOS null ⇒ 未修；Android null ⇒ **提交信息里没找到**，
     #    既可能未修、也可能修了没写 id。⛔ 因此 Android 不渲染「🔴 未修」——那是过度断言；
     #    但**找到时必须显示出来**，写死 — 会把真实的修复记录一并丢掉（本次修的就是这个）。
-    jq -r --arg ipre "$(issue_url_prefix ios)" --arg apre "$(issue_url_prefix android)" \
+    # 修复状态（change crash-fix-release-status）：反扫 + 发版判定命中的 issue 显示「commit · 状态」，
+    # 状态文案只走 fix_mark（全仓唯一定义）；未命中的保持模型反查的 commit / 两端各自的空值写法。
+    # ⚠️ 图例早就写着「代码已修·未发版 / 已发版·观察中」，此前却没有任何代码产出它们——图例描述的东西表里看不到。
+    local _ix_fm='{}' _ix_id _ix_c _ix_st _ix_rc _ix_old _ix_state
+    if [ -s "${FIXMAP_L1:-}" ]; then
+      while IFS=$'\t' read -r _ix_id _ix_c _ix_st _ix_rc _ix_old; do
+        [ -n "$_ix_id" ] || continue
+        _ix_state="$(jq -r '.state // ""' "$STATE/issues/$_ix_id.json" 2>/dev/null || true)"
+        _ix_fm="$(jq -c --arg id "$_ix_id" --arg v "$_ix_c · $(fix_mark "$_ix_st" "$_ix_rc" "$_ix_old" "$_ix_state")" \
+                  '. + {($id): $v}' <<<"$_ix_fm")"
+      # ⛔ 不得输出空字段：IFS=制表符会合并连续空字段、让后续字段左移
+      done < <(jq -r '(.mapped // {}) | to_entries[] | [.key, .value.commit, .value.status,
+                       (.value.release_check // "ok"), ((.value.old_build_events // 0) | tostring)] | @tsv' \
+                 "$FIXMAP_L1" 2>/dev/null || true)
+    fi
+    jq -r --arg ipre "$(issue_url_prefix ios)" --arg apre "$(issue_url_prefix android)" --argjson fm "$_ix_fm" \
        '"### iOS\n\n| Issue | 标题 | 事件 | 修复提交 |\n|---|---|---|---|\n" +
-           ((.ios // []) | map("| [\(.id[0:8])](\($ipre)\(.id)) | \(.title) | \(.events) | \(.fix_commit // "🔴 未修") |") | join("\n")) +
+           ((.ios // []) | map("| [\(.id[0:8])](\($ipre)\(.id)) | \(.title) | \(.events) | \($fm[.id] // .fix_commit // "🔴 未修") |") | join("\n")) +
            "\n\n### Android\n\n| Issue | 标题 | 事件 | 修复提交 |\n|---|---|---|---|\n" +
-           ((.android // []) | map("| [\(.id[0:8])](\($apre)\(.id)) | \(.title) | \(.events) | \(.fix_commit // "—") |") | join("\n"))' \
+           ((.android // []) | map("| [\(.id[0:8])](\($apre)\(.id)) | \(.title) | \(.events) | \($fm[.id] // .fix_commit // "—") |") | join("\n"))' \
       "$CRASH_JSON" 2>/dev/null || printf '（本次崩溃数据抓取失败）'
     printf '\n\n> **两端的「—」/「🔴 未修」含义不同**：iOS 有「提交必须带 Crashlytics issue ID」的硬规则，\n'
     printf '> 找不到即判「未修」；Android 采用同一约定但**非强制**（近 90 天 4 条），故 null 只渲染为「—」，\n'
@@ -2674,10 +2721,11 @@ build_index() {
       printf '（暂无归档，L2 首次运行后出现）\n'
     fi
     printf '\n## 📖 修复状态图例\n\n| 标记 | 含义 | 判据（自动推导） |\n|---|---|---|\n'
-    printf '| 🔴 未修 | 代码里找不到修复 | `git log --grep=<issueId>` 无结果 |\n'
-    printf '| 🛠️ 代码已修·未发版 | 修复已提交，含该修复的版本未上线 | 找到 commit，线上无该版本事件 |\n'
-    printf '| 📦 已发版·观察中 | 含修复的版本已上线 | 线上出现该版本事件 |\n'
-    printf '| ✅ 已消失 | 发版后无新事件 | 该版本后事件归零 |\n'
+    printf '| 🔴 未修 | 代码里找不到修复（仅 iOS，见上方说明） | `git log --grep=<issueId>` 无结果 |\n'
+    printf '| ⚠️ 修了仍在 | 含修复的包上仍有新事件——修复可能无效 | 修复提交之后，含修复的包上有事件 |\n'
+    printf '| 📦 已发版待验 | 含修复的包已上线，其上无新事件；「旧包仍崩 N 次」是未升级用户 | iOS：修复后首次出现的上架包；Android：修复进了 main 或 V* 发版标签 |\n'
+    printf '| 🛠️ 已修未发版 | 修复已提交，含修复的包尚未上线 | 上一行的「已上线」判据不成立 |\n'
+    printf '| ❔ 发版判定不可得 | 本轮取数失败，沿用只比时间的结果 | 取数恢复后自动改判 |\n'
     printf '\n---\n数据源：BigQuery Crashlytics（事件级·版本过滤）+ Firebase Crashlytics（OPEN 对照·全版本）+ BigQuery Performance · 由 crash-daily.sh 自动生成\n'
   } > "$f"
   echo "$f"

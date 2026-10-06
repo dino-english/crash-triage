@@ -38,7 +38,8 @@ h_assert_eq "0" "$rc" "整脚本跑通"
 row() { printf '%s\n' "$out" | grep -F "$1"; }
 
 echo "── 带链接的上一版表格必须查得到（F63 本体）──"
-h_assert_contains "$(row 4d05f9e7)" '| 已修待验 |'       '⛔ 反扫未命中时沿用上一轮处置状态——修前这里是「未处理」'
+# ⚠️ 沿用旧两态的「已修待验」时标「（旧口径）」（change crash-fix-release-status：它在四态下有歧义）
+h_assert_contains "$(row 4d05f9e7)" '| 已修待验（旧口径） |' '⛔ 反扫未命中时沿用上一轮处置状态——修前这里是「未处理」'
 h_assert_contains "$(row 4d05f9e7)" 'abc1234 fix: x'     '⛔ 沿用上一轮备注'
 h_assert_contains "$(row 4d05f9e7)" '| 2026-09-15 |'     '⛔ 首次纳入沿用上一轮（基准缺省时）'
 
