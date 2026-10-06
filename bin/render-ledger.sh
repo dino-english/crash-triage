@@ -93,6 +93,9 @@ if [ -n "$PREV_TABLE" ] && [ -s "$PREV_TABLE" ]; then
     /^\|---/ {next}
     NF >= 10 {
       gsub(/^ +| +$/, "", $3); gsub(/^ +| +$/, "", $6); gsub(/^ +| +$/, "", $7); gsub(/^ +| +$/, "", $10)
+      # ⛔ Issue ID 列自 2026-09-10 起渲染为 `[短id](控制台url)`（见下方 build_rows 输出行），
+      #    原样当键会让下面 `$prev[$short]` **永远查不到**——「沿用上一轮」静默失效（F63）。剥成短 id。
+      sub(/^\[/, "", $3); sub(/\].*$/, "", $3)
       # 列序：$1=(空) $2=平台 $3=Issue ID(短id) $4=标题 $5=类型 $6=首次纳入 $7=处置状态 $8=本次状态 $9=事件量趋势 $10=备注
       print $3 "\t" $6 "\t" $7 "\t" $10
     }
@@ -155,7 +158,11 @@ build_rows() { # $1=平台标签(iOS|Android) $2=snapshot key(ios|android) $3=�
                     elif $states[$iss.id] == "MUTED" then
                       (if $fix != null then "🔕已静音（\($fix.commit)）" else "🔕已静音" end)
                     elif $fix != null then $fix.status
-                    elif $p.disposition != null and $p.disposition != "" then $p.disposition
+                    # ⛔ 开关状态派生的值（✅已关闭 / 🔕已静音）**不沿用**：它们每轮按 $states 重算，
+                    #    走到这里说明本轮已不是 CLOSED / MUTED——沿用就是把重新打开的 issue 显示成已了结
+                    #    （R4 的镜像）。2026-09-28 实测 8101c07c：09-21 CLOSED → 09-28 OPEN（F63）。
+                    elif $p.disposition != null and $p.disposition != ""
+                         and ($p.disposition | test("^(✅已关闭|🔕已静音)") | not) then $p.disposition
                     else "未处理" end),
       # 三态（spec crash-perf-issue-lifecycle）。⚠️ $s.last 是**上一轮**的值——
       # 基准提升发生在渲染之后，此处读到的还没被刷成今天。
