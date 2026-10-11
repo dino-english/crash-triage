@@ -141,8 +141,7 @@ CARD_VERSION_COLS="${CRASH_REPORT_CARD_VERSION_COLS:-3}"
 # 红档 = 已拍板；黄/绿 = explore 建议值落地，全部显式标注「待对齐」。
 # 判定统一走 traffic_light()（>红=🔴；>黄=🟡；否则🟢），命中红档才出告警，黄档仅注释待对齐。
 # 判定对象 = **最新版**（上一版与主力补充列只展示不告警，design D8）。
-CRASH_RATE_RED=1.0        # 崩溃率 红 >1%（拍板）；黄 0.5–1%、绿 <0.5%（待对齐）
-CRASH_RATE_YELLOW=0.5
+# CRASH_RATE_RED / CRASH_RATE_YELLOW 已上移到 bin/lib/common.sh（L1 / L2 共用，⛔ 只定义一处）
 # ANR 率（仅 Android；iOS 系统层无此概念，数据源不产出该 error_type）。
 # ⚠️ 0.47 参考 Google Play 的 Bad Behaviour 门槛，但**口径不同**：
 #    Play 用「用户感知 ANR 率」（日活用户分母），我们用「ANR 事件数 / 会话数」。
@@ -163,6 +162,14 @@ FROZEN_RED=1.0            # 冻结率 红 >1%（拍板）；黄 0.5–1%、绿 <
 FROZEN_YELLOW=0.5
 START_P95_RED=2000        # 启动 P95 红 >2000ms（拍板）；黄 1500–2000、绿 ≤1500（待对齐）
 START_P95_YELLOW=1500
+# 三档分档阈值 TIER_NEW_MIN / TIER_LONG_MIN 在 bin/lib/common.sh（L1 / L2 共用）。
+# 性能版本退化进 🚨 的门槛（design Q3）：判定版本比上一版差 ≥ 此百分比，且判定版本已达黄档、两版样本过闸门。
+# ⛔ 慢性超标（每天都红）不进 🚨——那不是今天要开发动手的事，进健康度面板着红 + 下钻。
+PERF_REGRESS_PCT="${CRASH_REPORT_PERF_REGRESS_PCT:-20}"
+# 慢帧 / 冻结的平台整体值样本下限（SCREEN_TRACE 条数）。与 perf-screens.sql 的单页 HAVING 20 同量级，
+# 平台整体动辄上万条，这条只挡「新版刚放量只有几条」的情形。
+PERF_FRAMES_SAMPLE_MIN="${CRASH_REPORT_PERF_FRAMES_SAMPLE_MIN:-20}"
+CARD_DRILL_MAX=2          # 卡片上下钻图上限（spec：MUST NOT 超过 2 张）
 # 小样本会话数阈值：**版本级**会话数低于此值 → 单元格追加「⚠️」，
 # 且**告警判定回退到会话量最大的版本**（change crash-alert-sample-fallback）。
 # 改为可配是为了能验证「稳态等价性」——调低它即可模拟「最新版样本充足」的常态。
@@ -239,7 +246,7 @@ else
 fi
 # 核心层（纯函数）。不依赖任何全局，加载顺序任意；缺失则整跑失败——
 # 这些是阈值判定与格式化的唯一实现，退化版本会静默产出错误数字，比直接失败危险得多。
-for _c in format verdict version cache fixrelease; do
+for _c in format verdict version cache fixrelease tier; do
   # shellcheck disable=SC1090
   . "$ROOT/bin/lib/core/${_c}.sh" || { echo "❌ 核心层缺失：bin/lib/core/${_c}.sh" >&2; exit 1; }
 done
@@ -484,42 +491,32 @@ alert_side() { # $1=平台名 $2=版本 $3=值 $4=单位 → "iOS 1.5.4 425ms" �
   [ -n "$3" ] && [ "$3" != "无法计算" ] || { printf ''; return 0; }
   printf '%s %s %s%s' "$1" "${2:-—}" "$3" "$4"
 }
-# 缺数端的括注：说明为什么没有值，而不是甩一个「—」
-alert_missing() { # $1=平台名 $2=版本 $3=值 → "iOS 1.5.4 无数据" 或 ""
-  [ -n "$3" ] && [ "$3" != "无法计算" ] && { printf ''; return 0; }
-  printf '%s %s %s' "$1" "${2:-—}" "$([ "$3" = "无法计算" ] && echo '无法计算' || echo '无数据')"
-}
-_alert_body() { # $1=指标名 $2=iOS版本 $3=iOS值 $4=And版本 $5=And值 $6=单位
-  local si sa miss="" vals note="" sep
-  si="$(alert_side iOS "$2" "$3" "$6")"; sa="$(alert_side Android "$4" "$5" "$6")"
-  for m in "$(alert_missing iOS "$2" "$3")" "$(alert_missing Android "$4" "$5")"; do
-    [ -n "$m" ] || continue
-    if [ -n "$miss" ]; then miss="$miss · $m"; else miss="$m"; fi
-  done
-  sep=""; { [ -n "$si" ] && [ -n "$sa" ]; } && sep=" · "
-  vals="${si}${sep}${sa}"
-  # 全角括号与 · 一律用条件赋值拼接，不写 ${var:+（...）}：
-  # 多字节字符紧跟变量展开时，bash 在 set -u 下会把后续字节并进变量名（实测 "miss?: unbound variable"）
-  [ -n "$miss" ] && note="（${miss}）"
-  printf '%s %s%s' "$1" "$vals" "$note"
+# 灯按平台分判（change crash-report-attention-tiers D3）：**只列出各自超阈值的那一端**。
+# ⛔ 原写法一端红就把两端都写进同一条 🔴——实测 2026-10-11「🔴 慢帧最差页 iOS 1.8.2 45.1% · Android 87.8%」，
+#    iOS 45.1% 只是黄档却被陪着标红。没值的端不出现（没有数据不告警）。
+# ⛔ 全角 / `·` 一律先条件赋值再拼接，不写 ${var:+…}（CLAUDE.md 硬约束）。
+_lit_sides() { # $1=要的档(red|yellow) $2=iOS值 $3=And值 $4=红 $5=黄 $6=单位 → "iOS 1.8.2 809ms · Android …" 或空
+  local out="" s="" sep=""
+  if [ "$(traffic_light "$2" "$4" "$5")" = "$1" ]; then out="$(alert_side iOS "${IOS_ALERT_VER:-—}" "$2" "$6")"; fi
+  if [ "$(traffic_light "$3" "$4" "$5")" = "$1" ]; then
+    s="$(alert_side Android "${AND_ALERT_VER:-—}" "$3" "$6")"
+    [ -n "$out" ] && sep=" · "
+    out="${out}${sep}${s}"
+  fi
+  printf '%s' "$out"
 }
 red_line() {
-  local li la
-  li="$(traffic_light "$2" "$4" "$5")"; la="$(traffic_light "$3" "$4" "$5")"
-  if [ "$li" = "red" ] || [ "$la" = "red" ]; then
-    printf '🔴 %s' "$(_alert_body "$1" "${IOS_ALERT_VER:-—}" "$2" "${AND_ALERT_VER:-—}" "$3" "$6")"
-  fi
+  local b; b="$(_lit_sides red "$2" "$3" "$4" "$5" "$6")"
+  [ -n "$b" ] && printf '🔴 %s %s' "$1" "$b"
+  return 0
 }
 yellow_line() {
-  local li la
-  li="$(traffic_light "$2" "$4" "$5")"; la="$(traffic_light "$3" "$4" "$5")"
-  { [ "$li" = "red" ] || [ "$la" = "red" ]; } && return 0
-  if [ "$li" = "yellow" ] || [ "$la" = "yellow" ]; then
-    printf '🟡 %s' "$(_alert_body "$1" "${IOS_ALERT_VER:-—}" "$2" "${AND_ALERT_VER:-—}" "$3" "$6")"
-  fi
+  local b; b="$(_lit_sides yellow "$2" "$3" "$4" "$5" "$6")"
+  [ -n "$b" ] && printf '🟡 %s %s' "$1" "$b"
+  return 0
 }
 # 单端摘要行：某指标只在一端存在时用它，**不给另一端补占位值**。
-# ANR 属于这种：iOS 系统层无此概念，走 _alert_body 会渲染成「（iOS 1.5.4 无数据）」——
+# ANR 属于这种：iOS 系统层无此概念，旧的双端摘要会渲染成「（iOS 1.5.4 无数据）」——
 # 而「无数据」的语义是「该取到却没取到」，与「这类事件不存在」是两回事，混用会误导。
 red_line_one() { # $1=指标名 $2=平台名 $3=版本 $4=值 $5=红 $6=黄 $7=单位
   [ "$(traffic_light "$4" "$5" "$6")" = "red" ] || return 0
@@ -721,6 +718,7 @@ collect_window() { # $1=plat键 $2=版本 $3=crash表 $4=sess表 $5=perf表 $6=c
   local traces="$TMP/traces-$key.csv" screens="$TMP/screens-$key.csv" net="$TMP/net-$key.csv"
   local p50="" p95="" p_n="" wscreen="" wslow="" frozen="" neterr="" pstate prows=0
   local wsamples="" wnet="" wnet_pct=""
+  local frames="$TMP/frames-$key.csv" slow_all="" frozen_all="" frames_n=""
   local vsess vdev
   # ANR 与 NON_FATAL：两者的 is_fatal 均为 FALSE，**不能复用上面的崩溃查询**
   local etypes='[]' nf='[]' anr_ev="" anr_inst="" nf_ev="" nf_inst="" anr_rp="" anr_rfrac=""
@@ -778,11 +776,14 @@ collect_window() { # $1=plat键 $2=版本 $3=crash表 $4=sess表 $5=perf表 $6=c
   fi
 
   # 性能
-  : > "$traces"; : > "$screens"; : > "$net"
+  : > "$traces"; : > "$screens"; : > "$net"; : > "$frames"
   if [ -n "$5" ]; then
     q perf-traces.sql  "$5" "$PERF_WIN_START" "$PERF_LCD" "$v" > "$traces"  || true
     q perf-screens.sql "$5" "$PERF_WIN_START" "$PERF_LCD" "$v" > "$screens" || true
     q perf-network.sql "$5" "$PERF_WIN_START" "$PERF_LCD" "$v" > "$net"     || true
+    # 慢帧 / 冻结的平台整体窗口值（判灯用，change crash-report-attention-tiers D3）。
+    # ⛔ 不计入 prows：它与 screens 同源（SCREEN_TRACE），screens 为空时它也为空，计两次会掩盖缺数三态。
+    q perf-platform-frames.sql "$5" "$PERF_WIN_START" "$PERF_LCD" "$v" > "$frames" || true
   fi
   prows=$(( $(wc -l < "$traces") + $(wc -l < "$screens") + $(wc -l < "$net") ))
   # `|| true` 不是防御性冗余：性能表停更时 traces 为空，grep 无匹配返回 1，pipefail 把整条
@@ -807,6 +808,12 @@ collect_window() { # $1=plat键 $2=版本 $3=crash表 $4=sess表 $5=perf表 $6=c
     wnet_pct="$(pct "$(csv2tsv < "$net" | awk -F'\t' 'NF>=6 && $6+0 > mx {mx=$6+0} END{if(mx>0) print mx}')")"
   fi
   pstate="$(data_state "$5" "$prows" "$7" "${9:-}")"
+  frames_n="$(csv "$frames" 1)"
+  # 样本不足不给值（空 → 「— 样本不足」、不判灯），与启动 P95 的样本闸门同一纪律
+  if [ -n "$frames_n" ] && [ "$(awk -v a="$frames_n" -v b="$PERF_FRAMES_SAMPLE_MIN" 'BEGIN{print (a>=b)}')" = "1" ]; then
+    # ⛔ 冻结不走 pct()：它格式化到 1 位小数，0.51 → 0.5 正好压在黄线上被判绿（2026-10-11 实算 Android 1.8.2 = 0.51）
+    slow_all="$(pct "$(csv "$frames" 2)")"; frozen_all="$(csv "$frames" 3)"
+  fi
 
   vsess="$(ver_field "$8" "$v" 2)"
   vdev="$(ver_field "$8" "$v" 3)"
@@ -824,6 +831,7 @@ collect_window() { # $1=plat键 $2=版本 $3=crash表 $4=sess表 $5=perf表 $6=c
     --arg nffg "$nf_fg" --arg nfbg "$nf_bg" --arg nfunk "$nf_unk" \
     --arg cfree "$cfree" --arg cfreebad "$cfree_bad" --arg cfreefrac "$cfree_frac" \
     --arg affu "$aff_users" \
+    --arg slowall "$slow_all" --arg frozenall "$frozen_all" --arg framesn "$frames_n" \
     '{version:$v,
       crash:{state:$cstate, n:$n, events:$ev, latest:$latest, affected:$aff,
              crash_events:$cev, sessions:$csess, rate_pct:$rp, rate_frac:$rfrac,
@@ -831,7 +839,8 @@ collect_window() { # $1=plat键 $2=版本 $3=crash表 $4=sess表 $5=perf表 $6=c
              affected_users:$affu},
       perf:{state:$pstate, p50:$p50, p95:$p95, start_samples:$pn, worst_screen:$wscreen, worst_slow:$wslow,
             frozen:$frozen, net_err:$neterr,
-            worst_samples:$wsamp, worst_net:$wnet, worst_net_pct:$wnetp},
+            worst_samples:$wsamp, worst_net:$wnet, worst_net_pct:$wnetp,
+            slow_all:$slowall, frozen_all:$frozenall, frames_n:$framesn},
       errtype:{anr_events:$anrev, anr_installs:$anrinst, anr_rate_pct:$anrrp, anr_rate_frac:$anrfrac,
                nonfatal_events:$nfev, nonfatal_installs:$nfinst,
                fatal_fg:$fatfg, fatal_bg:$fatbg, fatal_unknown:$fatunk,
@@ -1338,8 +1347,10 @@ life_tag() { # $1=完整 issue id → 🆕新增 / 🔁回归 / 长期 / 空（�
 }
 
 IOS_RATE_PCT="$(mv_ ios "$IOS_ALERT_VER" crash.rate_pct)"; AND_RATE_PCT="$(mv_ and "$AND_ALERT_VER" crash.rate_pct)"
-IOS_SLOW_V1="$(mv_ ios "$IOS_ALERT_VER" perf.worst_slow)"; AND_SLOW_V1="$(mv_ and "$AND_ALERT_VER" perf.worst_slow)"
-IOS_FROZEN_V1="$(mv_ ios "$IOS_ALERT_VER" perf.frozen)";   AND_FROZEN_V1="$(mv_ and "$AND_ALERT_VER" perf.frozen)"
+# ⛔ 慢帧 / 冻结判灯用**平台整体值**，不再用最差页（change crash-report-attention-tiers D3）：
+#    单页长期超标会让灯天天红——2026-10-11 Android Splash 87.8% / 冻结 5.2%，平台整体 43.6% / 0.51%。
+IOS_SLOW_V1="$(mv_ ios "$IOS_ALERT_VER" perf.slow_all)";     AND_SLOW_V1="$(mv_ and "$AND_ALERT_VER" perf.slow_all)"
+IOS_FROZEN_V1="$(mv_ ios "$IOS_ALERT_VER" perf.frozen_all)"; AND_FROZEN_V1="$(mv_ and "$AND_ALERT_VER" perf.frozen_all)"
 IOS_P95_V1="$(mv_ ios "$IOS_ALERT_VER" perf.p95)";         AND_P95_V1="$(mv_ and "$AND_ALERT_VER" perf.p95)"
 IOS_NETERR_V1="$(mv_ ios "$IOS_ALERT_VER" perf.net_err)";  AND_NETERR_V1="$(mv_ and "$AND_ALERT_VER" perf.net_err)"
 AND_ANR_RATE="$(mv_ and "$AND_ALERT_VER" errtype.anr_rate_pct)"   # iOS 无 ANR，故无对应变量
@@ -1446,7 +1457,9 @@ if [ "$MCP_OK" = 1 ]; then
     FIX_RELEASE_NOTE="⚠️ 修复状态反扫失败，本轮未判定「代码已修但未发版」"
   fi
 
-  [ "${FIXED_PENDING:-0}" -gt 0 ] 2>/dev/null && add_alert "🔴 ${FIXED_PENDING} 个 issue 代码已修但未发版（全版本口径）"
+  # ⛔ 「代码已修但未发版」不再进 🔴 摘要行（change crash-report-attention-tiers）：它进 ⏳ 档并**逐条列 id**。
+  #    原来只给一个计数——2026-10-11 本周第一的崩溃 8bc4b97e 就在这 7 个里，卡片上却没有它的名字。
+  :
 fi
 # 开关状态映射：**缓存态打底**（同步整个失败时仍可用），本轮补查结果覆盖/补充。
 # ⛔ 顺序不可颠倒：emit-map 只含本轮成功取到的，拿它当全集会把同步失败的那几条
@@ -1459,7 +1472,7 @@ if [ -s "$CRASH_DIR/issue-states.json" ]; then
     || printf '%s' "$ISSUE_STATES_JSON")"
 fi
 add_alert "$(red_line "崩溃率" "$IOS_RATE_PCT" "$AND_RATE_PCT" "$CRASH_RATE_RED" "$CRASH_RATE_YELLOW" "%")"
-add_alert "$(red_line "慢帧最差页" "$IOS_SLOW_V1" "$AND_SLOW_V1" "$SLOW_FRAME_RED" "$SLOW_FRAME_YELLOW" "%")"
+add_alert "$(red_line "慢帧" "$IOS_SLOW_V1" "$AND_SLOW_V1" "$SLOW_FRAME_RED" "$SLOW_FRAME_YELLOW" "%")"
 add_alert "$(red_line "冻结率" "$IOS_FROZEN_V1" "$AND_FROZEN_V1" "$FROZEN_RED" "$FROZEN_YELLOW" "%")"
 add_alert "$(red_line "启动 P95" "$IOS_P95_V1" "$AND_P95_V1" "$START_P95_RED" "$START_P95_YELLOW" "ms")"
 add_alert "$(red_line "接口错误率" "$IOS_NETERR_V1" "$AND_NETERR_V1" "$NET_ERR_RED" "$NET_ERR_YELLOW" "%")"
@@ -1482,13 +1495,89 @@ add_alert "$(internal_note)"
 add_alert "$MCP_EMPTY_MSG"
 add_alert "$FACT_CACHE_MSG"
 
+# ── 三档分档（change crash-report-attention-tiers，design D1）──────────────────
+# 🚨 开发要修 / ⏳ 代码已修等发版 / 👀 今天不用动。判定全部确定性、不调模型（spec：日报分档为确定性规则）。
+# 报告版本集 = 最新 N 版 ∪ 告警判定版本。⛔ 不含「性能兜底」列——那是旧版本，只为性能段而来。
+tier_versions() { # $1=plat键 → 一行一个版本（新→旧）
+  if [ "$1" = ios ]; then printf '%s\n%s\n' "$IOS_NEWEST" "$IOS_ALERT_VER"
+  else printf '%s\n%s\n' "$AND_NEWEST" "$AND_ALERT_VER"; fi | tr ' ' '\n' | grep -v '^$' | sort -rV -u || true
+}
+# issue 输入：报告版本集内有 FATAL 事件的 issue，台数跨版本相加（同一台设备升级前后各崩一次会计两次——上界，
+# 判阈值时偏严是安全方向）；by_ver 逐版写明，读者能看到台数从哪来。
+TIER_ISS_IN="$( {
+  for _tp in ios:ios and:android; do
+    for _tv in $(tier_versions "${_tp%%:*}"); do
+      _tf="$TMP/issues-${_tp%%:*}-$_tv.json"
+      [ -s "$_tf" ] || continue
+      jq -c --arg p "${_tp#*:}" --arg v "$_tv" \
+        '.[]? | select(.issue_id) | {plat:$p, id:.issue_id, title:(.title // ""), v:$v, u:((.users // 0) | tonumber)}' "$_tf" 2>/dev/null || true
+    done
+  done
+} | jq -cs 'group_by(.id) | map({plat:.[0].plat, id:.[0].id,
+      title:([.[].title | select(. != "")][0] // ""), users:(map(.u) | add),
+      by_ver:(map("\(.v) \(.u) 台") | join(" · "))})' 2>/dev/null || echo '[]')"
+# 生命周期复用 life_tag()（⛔ 不在 jq 里另写一份：两份判据会漂）
+_tier_life='{}'
+while IFS= read -r _tid; do
+  [ -n "$_tid" ] || continue
+  _tier_life="$(printf '%s' "$_tier_life" | jq -c --arg i "$_tid" --arg l "$(life_tag "$_tid")" '. + {($i): $l}')"
+done < <(printf '%s' "$TIER_ISS_IN" | jq -r '.[].id' 2>/dev/null || true)
+TIER_ISS_IN="$(printf '%s' "$TIER_ISS_IN" | jq -c --argjson l "$_tier_life" 'map(. + {life:($l[.id] // "")})')"
+# fixmap 不可用（MCP 失败 / 反扫失败）时传 {}：此时 ⏳ 为空、修复状态不参与判档，卡片另有 FIX_RELEASE_NOTE 说明
+_tier_fm='{}'
+[ -n "${FIXMAP_L1:-}" ] && [ -s "${FIXMAP_L1:-/dev/null}" ] && _tier_fm="$(jq -c '.' "$FIXMAP_L1" 2>/dev/null || echo '{}')"
+TIERS_JSON="$(tier_classify "$TIER_ISS_IN" "$_tier_fm" "$ISSUE_STATES_JSON" "$TIER_NEW_MIN" "$TIER_LONG_MIN" 2>/dev/null || echo '[]')"
+[ -n "$TIERS_JSON" ] || TIERS_JSON='[]'
+
+# 指标级紧急项（design D1 ④⑤）：{plat, title, tag, why}
+TIER_METRIC='[]'
+_tier_metric_add() { # $1=plat(ios|android) $2=标题 $3=标签 $4=理由
+  TIER_METRIC="$(printf '%s' "$TIER_METRIC" | jq -c --arg p "$1" --arg t "$2" --arg g "$3" --arg w "$4" '. + [{plat:$p, title:$t, tag:$g, why:$w}]')"
+}
+# ④ 判定版本崩溃率 / ANR 率红档（与摘要行同一判据；crash-free 不单列——被崩溃率覆盖，口径文档有记录）
+[ "$(traffic_light "$IOS_RATE_PCT" "$CRASH_RATE_RED" "$CRASH_RATE_YELLOW")" = red ] \
+  && _tier_metric_add ios "iOS ${IOS_ALERT_VER} 崩溃率 ${IOS_RATE_PCT}%" "崩溃率超标" "超红线 ${CRASH_RATE_RED}%（近 ${CRASH_DAYS} 天）"
+[ "$(traffic_light "$AND_RATE_PCT" "$CRASH_RATE_RED" "$CRASH_RATE_YELLOW")" = red ] \
+  && _tier_metric_add android "Android ${AND_ALERT_VER} 崩溃率 ${AND_RATE_PCT}%" "崩溃率超标" "超红线 ${CRASH_RATE_RED}%（近 ${CRASH_DAYS} 天）"
+[ "$(traffic_light "$AND_ANR_RATE" "$ANR_RATE_RED" "$ANR_RATE_YELLOW")" = red ] \
+  && _tier_metric_add android "Android ${AND_ALERT_VER} ANR 率 ${AND_ANR_RATE}%" "ANR 超标" "超红线 ${ANR_RATE_RED}%（近 ${CRASH_DAYS} 天 · ⛔ 与 Play 口径不同）"
+# ⑤ 性能版本退化：判定版本 vs 报告列里比它旧的最近一版。⛔ 慢性超标不进这里（见 PERF_REGRESS_PCT 注释）。
+prev_ver_of() { # $1=plat键 $2=版本 → 列集合里比它旧的最近一版（无则空）
+  local cols; [ "$1" = ios ] && cols="$IOS_COLS" || cols="$AND_COLS"
+  printf '%s\n' $cols | grep -v '^$' | sort -rV -u | awk -v v="$2" 'f{print; exit} $0==v{f=1}' || true
+}
+_tier_regress() { # $1=plat键 $2=平台名 $3=判定版本
+  local pv c p n1 n2 lbl
+  [ -n "$3" ] || return 0
+  pv="$(prev_ver_of "$1" "$3")"; [ -n "$pv" ] || return 0
+  # 启动 P95：两版样本都过 P95 闸门才比（P95 在 n<20 时退化成最大值）
+  n1="$(mv_ "$1" "$3" perf.start_samples)"; n2="$(mv_ "$1" "$pv" perf.start_samples)"
+  if [ "${n1:-0}" -ge "$PERF_P95_SAMPLE_MIN" ] 2>/dev/null && [ "${n2:-0}" -ge "$PERF_P95_SAMPLE_MIN" ] 2>/dev/null; then
+    c="$(mv_ "$1" "$3" perf.p95)"; p="$(mv_ "$1" "$pv" perf.p95)"
+    [ -n "$(perf_regressed "$c" "$p" "$START_P95_YELLOW" "$PERF_REGRESS_PCT")" ] \
+      && _tier_metric_add "$([ "$1" = ios ] && echo ios || echo android)" "$2 $3 启动 P95 ${c}ms" "性能退化" "比上一版 ${pv}（${p}ms）慢 $(awk -v c="$c" -v p="$p" 'BEGIN{printf "%.0f", (c-p)/p*100}')%"
+  fi
+  # 慢帧 / 冻结：平台整体值在采集时已过样本闸门（不足则为空，perf_regressed 不判）
+  for lbl in "slow_all:慢帧:$SLOW_FRAME_YELLOW" "frozen_all:冻结率:$FROZEN_YELLOW" "net_err:接口错误率:$NET_ERR_YELLOW"; do
+    c="$(mv_ "$1" "$3" "perf.${lbl%%:*}")"; p="$(mv_ "$1" "$pv" "perf.${lbl%%:*}")"
+    [ -n "$(perf_regressed "$c" "$p" "${lbl##*:}" "$PERF_REGRESS_PCT")" ] || continue
+    _tier_metric_add "$([ "$1" = ios ] && echo ios || echo android)" "$2 $3 $(printf '%s' "$lbl" | cut -d: -f2) ${c}%" "性能退化" "上一版 $pv 为 ${p}%"
+  done
+  return 0
+}
+_tier_regress ios iOS "$IOS_ALERT_VER"
+_tier_regress and Android "$AND_ALERT_VER"
+IFS=$'\t' read -r TIER_N_URGENT TIER_N_RELEASE TIER_N_WATCH <<< "$(tier_counts "$TIERS_JSON")"
+TIER_N_URGENT=$(( ${TIER_N_URGENT:-0} + $(printf '%s' "$TIER_METRIC" | jq 'length') ))
+echo "  三档：🚨 ${TIER_N_URGENT} · ⏳ ${TIER_N_RELEASE:-0} · 👀 ${TIER_N_WATCH:-0}"
+
 SUMMARY_MD="$ALERTS"
 add_summary() { [ -n "$1" ] && SUMMARY_MD="${SUMMARY_MD:+$SUMMARY_MD
 }$1"; return 0; }
 # 发版判定的降级说明（change crash-fix-release-status，design D5/D6）：不是线上问题，只进摘要行（黄）
 add_summary "${FIX_RELEASE_NOTE:-}"
 add_summary "$(yellow_line "崩溃率" "$IOS_RATE_PCT" "$AND_RATE_PCT" "$CRASH_RATE_RED" "$CRASH_RATE_YELLOW" "%")"
-add_summary "$(yellow_line "慢帧最差页" "$IOS_SLOW_V1" "$AND_SLOW_V1" "$SLOW_FRAME_RED" "$SLOW_FRAME_YELLOW" "%")"
+add_summary "$(yellow_line "慢帧" "$IOS_SLOW_V1" "$AND_SLOW_V1" "$SLOW_FRAME_RED" "$SLOW_FRAME_YELLOW" "%")"
 add_summary "$(yellow_line "冻结率" "$IOS_FROZEN_V1" "$AND_FROZEN_V1" "$FROZEN_RED" "$FROZEN_YELLOW" "%")"
 add_summary "$(yellow_line "启动 P95" "$IOS_P95_V1" "$AND_P95_V1" "$START_P95_RED" "$START_P95_YELLOW" "ms")"
 add_summary "$(yellow_line "接口错误率" "$IOS_NETERR_V1" "$AND_NETERR_V1" "$NET_ERR_RED" "$NET_ERR_YELLOW" "%")"
@@ -1662,9 +1751,17 @@ cell() { # $1=plat $2=版本 $3=行键
                       [ "$CELL_BREVITY" = 1 ] && wscr="$(screen_brief "$wscr")"
                       lbl="${wscr} ${val}%"
                       [ -n "$samp" ] && lbl="${lbl}（${samp} 次）"
-                      cell_color "$val" "$SLOW_FRAME_RED" "$SLOW_FRAME_YELLOW" "$lbl"
+                      # ⛔ 最差页不着色（change crash-report-attention-tiers D3）：它是下钻线索、不是判灯值——
+                      #    单页长期超标会让这一格天天红（Android Splash 87.8% vs 平台整体 43.6%）。判灯看 slow_all。
+                      printf '%s' "$lbl"
                     else printf -- '— 样本不足'; fi;;
     frozen)         val="$(mv_ "$1" "$2" perf.frozen)"
+                    # ⛔ 同上：最差页的冻结率不着色，判灯看 frozen_all
+                    [ -n "$val" ] && printf '%s%%' "$val" || printf -- '— 样本不足';;
+    # 平台整体值（判灯用）：该平台全部 SCREEN_TRACE 的比率均值，与天级 slow_pct_1d 同算法、窗口不同
+    slow_all)       val="$(mv_ "$1" "$2" perf.slow_all)"
+                    [ -n "$val" ] && cell_color "$val" "$SLOW_FRAME_RED" "$SLOW_FRAME_YELLOW" "${val}%" || printf -- '— 样本不足';;
+    frozen_all)     val="$(mv_ "$1" "$2" perf.frozen_all)"
                     [ -n "$val" ] && cell_color "$val" "$FROZEN_RED" "$FROZEN_YELLOW" "${val}%" || printf -- '— 样本不足';;
     net_err)        val="$(mv_ "$1" "$2" perf.net_err)"
                     # 指名最差接口（决策 D7）：崩溃给最差 issue、慢帧给最差页面，接口只给总数则三者不对称
@@ -1704,6 +1801,8 @@ delta_of() { # $1=plat $2=V1 $3=V2 $4=行键
                     { [ -n "$s1" ] && [ -n "$s2" ] && [ "$s1" != "$s2" ]; } && printf '（页不同）'
                     ;;
     frozen)         delta_cell "$(mv_ "$1" "$2" perf.frozen)"    "$(mv_ "$1" "$3" perf.frozen)"    pp lower_better;;
+    slow_all)       delta_cell "$(mv_ "$1" "$2" perf.slow_all)"  "$(mv_ "$1" "$3" perf.slow_all)"  pp lower_better;;
+    frozen_all)     delta_cell "$(mv_ "$1" "$2" perf.frozen_all)" "$(mv_ "$1" "$3" perf.frozen_all)" pp lower_better;;
     net_err)        delta_cell "$(mv_ "$1" "$2" perf.net_err)"   "$(mv_ "$1" "$3" perf.net_err)"   pp lower_better;;
     sessions)       delta_cell "$(mv_ "$1" "$2" adopt.sessions)" "$(mv_ "$1" "$3" adopt.sessions)" n  neutral;;
   esac
@@ -1716,16 +1815,11 @@ delta_of() { # $1=plat $2=V1 $3=V2 $4=行键
 # 行标签带窗口天数：崩溃 7d 与会话数 1d 并排出现时，不标窗口必被读成同一口径。
 # ⚠️ **卡片与文档的行集合必须分开**（change crash-card-brief D3）：
 # 卡片回答「今天要不要管」、文档回答「具体是什么」，两者的完备性要求不同。
-# 三个调用点各自指定：build_table()/md_table() 用 CARD，xml_table() 用 DOC。
+# ⚠️ 卡片自 change crash-report-attention-tiers 起不再用行定义表（改为三档 + 健康度），
+#    ROW_DEFS_CARD 已删除；ROW_DEFS_DOC 仍是文档版本对照表的唯一行定义。
 # 直接改 ROW_DEFS_DOC 会把文档一起砍掉——而文档的完备性正是卡片敢砍的前提。
 # 版本分列布局的行集合：crash-free 用单值版（全版本值移到下方 markdown 行），
 # 对比不占列——四个版本并排，变化直接横向读得出来。
-ROW_DEFS_CARD="crash_free|Crash-free 会话 ${CRASH_DAYS}d
-crash_brief|崩溃 ${CRASH_DAYS}d
-anr_brief|卡死信号
-nonfatal_count|非致命 ${CRASH_DAYS}d
-start_p95|启动 P95 ${PERF_DAYS}d
-slow_worst|慢帧最差页 ${PERF_DAYS}d"
 ROW_DEFS_DOC="crash_free|Crash-free 会话 ${CRASH_DAYS}d
 crash_count|崩溃次数 ${CRASH_DAYS}d
 crash_rate|崩溃率 ${CRASH_DAYS}d
@@ -1735,65 +1829,13 @@ anr_rate|ANR 率 ${CRASH_DAYS}d
 nonfatal_count|非致命 ${CRASH_DAYS}d
 start_p50|启动 P50 ${PERF_DAYS}d
 start_p95|启动 P95 ${PERF_DAYS}d
+slow_all|慢帧（平台整体）${PERF_DAYS}d
 slow_worst|慢帧最差页 ${PERF_DAYS}d
+frozen_all|冻结率（平台整体）${PERF_DAYS}d
 frozen|冻结率（最差页）${PERF_DAYS}d
 net_err|接口错误率 ${PERF_DAYS}d
 sessions|会话数 ${DAYS}d"
 ROW_DEFS="$ROW_DEFS_DOC"   # 兼容：verdict_line 等按全量行集合遍历
-
-# ── 卡片：单表、列 = 平台（change crash-card-brief）──────────────────
-# 「每端一张表」让行数天然翻倍（N 个指标 = 2N 行），加上 ANR/非致命/crash-free 后要滑很久。
-# 改成一张表、列为平台：同样的信息量只占一半高度，且双端对比从「上下翻找」变成「左右对照」。
-# 代价是版本维度失去独立列 → 版本进表头、对比进格内（D1/D2/D4）。
-
-# 表头：iOS 1.5.4(832)→1.5.3(2141)。括号内是会话数——放量规模是读其他数字的前提
-# （12 台设备上的 0 崩溃说明不了什么），但它本身不值一整行。
-# 卡片表格：列 = 平台 × 版本，每格只装一个数（2026-08-22 手机端实测通过后定为唯一布局）。
-#
-# 为什么不是「列 = 平台、版本挤在格内」：那种排法**只显示最新版的值**，主力版本要从 delta 反推。
-# 而新版刚放量时最新版样本极小（实测 Android 1.5.4 只有 1 个会话），于是卡片上唯一可见的数字
-# 全是没有统计意义的那个——`Android 1.5.3: 49 次 ANR 0.72%` 这种真正要看的数字**完全不出现**。
-#
-# 对比靠横向读，不需要 delta 列；放量规模与全版本 crash-free 放在表下的 markdown 行
-# （表头是整张表最吃宽度的地方，挂上「(1229/888)」会被 CardKit 截断）。
-build_card_table() {
-  CELL_BREVITY=1
-  local cols='[{"name":"metric","display_name":"指标","data_type":"text","width":"auto","horizontal_align":"left"}]'
-  local rows='[]' key label rowj i=0 pk pn v tag
-  # ⚠️ 列名必须是 c1…cN：CardKit 把 `ios` / `android` 当**平台变体键**，用它们做列名
-  #    在 DRY RUN 里毫无异常，只有真发一张才炸。
-  # ⚠️ 列集合由 IOS_CARD_COLS / AND_CARD_COLS 给（最新 N 版 ∪ 性能可得 2 版），
-  #    ⛔ 不再硬写 V1/V2——性能可得版本可能不在最新两版里（change crash-data-completeness B 组）。
-  for pp in "ios:iOS:$IOS_CARD_COLS" "and:Android:$AND_CARD_COLS"; do
-    pk="${pp%%:*}"; rest="${pp#*:}"; pn="${rest%%:*}"
-    for v in ${rest#*:}; do
-      [ -n "$v" ] || continue
-      i=$((i + 1))
-      # 只给「因为性能才进来的列」打角标：它在崩溃/放量行里是旧版本，读者需要知道它为什么在这
-      tag="$(perf_only_tag "$pk" "$v")"
-      cols="$(printf '%s' "$cols" | jq -c --arg n "c$i" --arg d "$pn $v$tag" \
-        '. + [{name:$n,display_name:$d,data_type:"lark_md",width:"auto",horizontal_align:"left"}]')"
-    done
-  done
-  while IFS='|' read -r key label; do
-    [ -n "$key" ] || continue
-    rowj="$(jq -cn --arg m "$label" '{metric:$m}')"; i=0
-    for pp in "ios:$IOS_CARD_COLS" "and:$AND_CARD_COLS"; do
-      pk="${pp%%:*}"
-      for v in ${pp#*:}; do
-        [ -n "$v" ] || continue
-        i=$((i + 1))
-        rowj="$(printf '%s' "$rowj" | jq -c --arg k "c$i" --arg val "$(cell "$pk" "$v" "$key")" '. + {($k):$val}')"
-      done
-    done
-    rows="$(printf '%s' "$rows" | jq -c --argjson r "$rowj" '. + [$r]')"
-  done <<< "$ROW_DEFS_CARD"
-  jq -cn --argjson c "$cols" --argjson r "$rows" \
-    '{tag:"table",page_size:10,row_height:"low",
-      header_style:{text_align:"left",text_size:"normal",background_style:"grey",text_color:"default",bold:true,lines:1},
-      columns:$c,rows:$r}'
-  CELL_BREVITY=0
-}
 
 blame_top() { # $1=plat $2=版本 → 「自家代码 12 人 · 三方 SDK 8 人」（卡片用，仅 owner 汇总）
   local f="$TMP/blame-$1-$2.csv"
@@ -1973,41 +2015,326 @@ IOS_VER_SUM="$(ver_summary "$IOS_V1" "$IOS_V2" "$IOS_COLS" "$IOS_TOPSESS" "$IOS_
 AND_VER_SUM="$(ver_summary "$AND_V1" "$AND_V2" "$AND_COLS" "$AND_TOPSESS" "$AND_PERF_VERS")"
 
 step "组装卡片"
-CARD_TABLE="$(build_card_table)"
+# ── 卡片：三档 + 健康度（change crash-report-attention-tiers，取代 2026-08-22 的「单表、列 = 平台 × 版本」）──
+# 单表回答「各指标是多少」，回答不了「谁今天要动什么」：2026-10-11 卡片 4 条 🔴 全是慢性状态，
+# 「修了仍在」与本周第一的崩溃都没出现。⛔ 单表的初衷「最新版必须被看见」由健康度面板的「最新版」行承担。
+# 组件选型（2026-10-11 实发验证，spec crash-perf-attention-tiers「卡片组件按内容选型」）：
+#   🚨 column_set 色底块 + 按钮（要一句「为什么」+ 一键控制台）；次要列表进 collapsible_panel，
+#   面板内用 **markdown 表格语法**——⛔ `{tag:"table"}` 进不了折叠面板（ErrCode 200621）、单元格也不渲染链接。
+# ⛔ 一切颜色走主题自适应枚举（template / text_tag color / column_set background_style / chart color_theme），
+#    不写死 hex（spec「保留项·深色风格主题自适应」）。
 CARD_FOCUS="$(card_focus_line)"
 
-HEADER_TITLE="📊 ${DAY:5} $TS_HM 崩溃 & 性能"
-HEADER_COLOR="blue"; [ -n "$ALERTS" ] && HEADER_COLOR="red"
+# 健康度：判定版本的整体指标，**每个数字独立判灯**（design D3/D4）。红档另加 🔴——状态色不能只靠颜色传达。
+hmark() { case "$1" in *'<font color=red>'*) printf '%s 🔴' "$1";; *) printf '%s' "$1";; esac; }
+health_md() { # $1=plat键 $2=平台名 → markdown（判定版本为空则空）
+  local v nv dev val ws wp lines="" cst
+  if [ "$1" = ios ]; then v="$IOS_ALERT_VER"; nv="$IOS_V1"; else v="$AND_ALERT_VER"; nv="$AND_V1"; fi
+  [ -n "$v" ] || { printf ''; return 0; }
+  CELL_BREVITY=1
+  dev="$(mv_ "$1" "$v" adopt.devices)"
+  lines="**$2 ${v}** <font color='grey'>${dev:-—} 设备/天</font>"
+  cst="$(mv_ "$1" "$v" crash.state)"
+  if [ "$cst" = ok ]; then
+    val="$(mv_ "$1" "$v" crash.crash_free_pct)"
+    if [ -n "$val" ]; then
+      val="$(hmark "$(cell_color "$(mv_ "$1" "$v" crash.crash_free_bad)" \
+        "$(awk -v r="$CRASH_FREE_RED" 'BEGIN{printf "%.2f", 100-r}')" \
+        "$(awk -v y="$CRASH_FREE_YELLOW" 'BEGIN{printf "%.2f", 100-y}')" "${val}%")")$(sample_note "$1" "$v")"
+    else val='无法计算'; fi
+    lines="${lines}
+crash-free　${val}"
+    val="$(mv_ "$1" "$v" crash.rate_pct)"
+    [ -n "$val" ] && lines="${lines}
+崩溃率　$(hmark "$(cell_color "$val" "$CRASH_RATE_RED" "$CRASH_RATE_YELLOW" "${val}%")")"
+    if [ "$1" = and ]; then
+      val="$(mv_ "$1" "$v" errtype.anr_rate_pct)"
+      [ -n "$val" ] && lines="${lines}
+ANR 率　$(hmark "$(cell_color "$val" "$ANR_RATE_RED" "$ANR_RATE_YELLOW" "${val}%")")"
+    fi
+  else
+    lines="${lines}
+崩溃　$(cell "$1" "$v" crash_free)"
+  fi
+  lines="${lines}
+启动 P95　$(hmark "$(cell "$1" "$v" start_p95)")"
+  ws="$(mv_ "$1" "$v" perf.worst_screen)"; wp="$(mv_ "$1" "$v" perf.worst_slow)"
+  val="$(hmark "$(cell "$1" "$v" slow_all)")"
+  # 最差页只作括注、⛔ 不着色（它不是判灯值）
+  [ -n "$ws" ] && [ -n "$wp" ] && val="${val} <font color='grey'>（最差页 $(screen_brief "$ws") ${wp}%）</font>"
+  lines="${lines}
+慢帧　${val}"
+  val="$(hmark "$(cell "$1" "$v" frozen_all)")"
+  wp="$(mv_ "$1" "$v" perf.frozen)"
+  [ -n "$wp" ] && [ "$(mv_ "$1" "$v" perf.state)" = ok ] && val="${val} <font color='grey'>（最差页 ${wp}%）</font>"
+  lines="${lines}
+冻结　${val}"
+  if [ "$(mv_ "$1" "$v" perf.state)" = ok ]; then
+    val="$(mv_ "$1" "$v" perf.net_err)"
+    if [ -n "$val" ]; then val="$(hmark "$(cell_color "$val" "$NET_ERR_RED" "$NET_ERR_YELLOW" "${val}%")")"; else val='— 样本不足'; fi
+  else val="$(cell "$1" "$v" net_err)"; fi
+  lines="${lines}
+接口错误　${val}"
+  # ⛔ 最新版必须可见（版本口径「让新版本被看见」）：判定版本因小样本回退时，最新版另起一行
+  if [ -n "$nv" ] && [ "$nv" != "$v" ]; then
+    local ib="" ibn
+    ibn="$(internal_build "$1" "$nv")"
+    [ -n "$ibn" ] && ib=" · 内部构建"
+    lines="${lines}
+<font color='grey'>最新版 ${nv} · $(mv_ "$1" "$nv" adopt.devices) 设备$(sample_note "$1" "$nv")${ib}</font>"
+  fi
+  CELL_BREVITY=0
+  printf '%s' "$lines"
+}
+
+# ── 红灯下钻（design D5）：亮红才出，全卡最多 CARD_DRILL_MAX 张图 ──
+# 每块 = 标题 + 横向条形图 + 一句结论 + 一句「对比上一版」。⛔ 不按机型下钻（单机型样本 4–15，P95≈最大值）。
+qdrill_startup() { # $1=perf表 $2=版本 → TSV「os_major n p95 slow」（无表头）
+  local _t0=$SECONDS _rc=0 _out
+  [ -n "$1" ] && [ -n "$PERF_WIN_START" ] && [ -n "$PERF_LCD" ] || { printf ''; return 0; }
+  _out="$(bqq csv "$(q_render perf-startup-by-os.sql TABLE="$1" LCD_START="$PERF_WIN_START" LCD_END="$PERF_LCD" \
+            VERSIONS="$(vlist "$2")" SLOW_MS="$START_P95_RED")" | tail -n +2)" || _rc=$?
+  audit query qdrill "$(jq -cn --arg tbl "$1" --arg ver "$2" \
+    --argjson rows "$(printf '%s' "$_out" | grep -c . || true)" --argjson secs "$((SECONDS - _t0))" --argjson rc "$_rc" \
+    '{fn:"qdrill",sql:"perf-startup-by-os.sql",table:$tbl,version:$ver,rows:$rows,secs:$secs,rc:$rc}')"
+  [ -n "$_out" ] && printf '%s\n' "$_out" | csv2tsv
+  return 0
+}
+_drill_trend() { # $1=本版值 $2=上一版值 $3=上一版 $4=单位 → 「对比上一版 1.8.1：2369ms → 本版 2231ms（在改善）」
+  { [ -n "$1" ] && [ -n "$2" ] && [ -n "$3" ]; } || { printf ''; return 0; }
+  printf '对比上一版 %s：%s%s → 本版 %s%s（%s）' "$3" "$2" "$4" "$1" "$4" \
+    "$(awk -v c="$1" -v p="$2" 'BEGIN{ if (p+0==0) print "无可比"; else if ((c-p)/p > 0.05) print "在变差"; else if ((p-c)/p > 0.05) print "在改善，属老问题"; else print "持平，属老问题" }')"
+}
+_chart() { # $1=values JSON [{k,v}] $2=红线（可空）$3=红线标签 → chart 元素 JSON
+  jq -cn --argjson vals "$1" --arg red "$2" --arg rl "$3" '
+    {tag:"chart", color_theme:"brand", height:"auto",
+     chart_spec:({type:"bar", direction:"horizontal", data:{values:$vals}, xField:"v", yField:"k",
+                  label:{visible:true, position:"outside"}, tooltip:{visible:true},
+                  axes:[{orient:"bottom", visible:true}, {orient:"left", visible:true, domainLine:{visible:false}}]}
+                 + (if $red != "" then {markLine:[{x:($red|tonumber), label:{visible:true, text:$rl, position:"insideEndTop"},
+                                                   endSymbol:{visible:false}}]} else {} end))}'
+}
+DRILL_ELEMS='[]'; DRILL_N=0; DRILL_MD=""
+_drill_add() { # $1=标题 $2=chart JSON $3=结论 $4=对比
+  local body="$3"
+  [ -n "$4" ] && body="${body:+$body
+}<font color='grey'>$4</font>"
+  DRILL_ELEMS="$(printf '%s' "$DRILL_ELEMS" | jq -c --arg t "$1" --argjson c "$2" --arg b "$body" \
+    '. + [{tag:"markdown", content:("**🔍 " + $t + "**"), margin:"10px 0px 0px 0px"}, $c]
+       + (if $b != "" then [{tag:"markdown", content:$b}] else [] end)')"
+  DRILL_MD="${DRILL_MD:+$DRILL_MD
+}🔍 $1
+$3${4:+
+$4}"
+  DRILL_N=$((DRILL_N + 1))
+}
+drill_platform() { # $1=plat键 $2=平台名
+  local v pv tbl c p tsv vals sm lst lab f
+  if [ "$1" = ios ]; then v="$IOS_ALERT_VER"; tbl="$IOS_PERF_TBL"; else v="$AND_ALERT_VER"; tbl="$AND_PERF_TBL"; fi
+  [ -n "$v" ] || return 0
+  [ "$(mv_ "$1" "$v" perf.state)" = ok ] || return 0
+  pv="$(prev_ver_of "$1" "$v")"
+  # 启动 P95 → 系统版本分桶
+  c="$(mv_ "$1" "$v" perf.p95)"
+  if [ "$DRILL_N" -lt "$CARD_DRILL_MAX" ] && [ "$(traffic_light "$c" "$START_P95_RED" "$START_P95_YELLOW")" = red ]; then
+    tsv="$(qdrill_startup "$tbl" "$v")"
+    if [ -n "$tsv" ]; then
+      vals='[]'
+      while IFS=$'\t' read -r _om _n _p95 _sl; do
+        [ -n "$_om" ] && [ "${_n:-0}" -ge "$PERF_P95_SAMPLE_MIN" ] 2>/dev/null || continue
+        vals="$(printf '%s' "$vals" | jq -c --arg k "$(os_label "$1" "$_om") · ${_n} 次" --arg v "$_p95" '. + [{k:$k, v:($v|tonumber)}]')"
+      done <<< "$tsv"
+      # ⚠️ 上限 8 不是 6：按版本号降序截 6 会正好切掉最老、最慢的那一桶（10-11 实跑：Android 10 P95 5787ms 被截掉）
+      vals="$(printf '%s' "$vals" | jq -c '.[0:8]')"
+      sm="$(startup_drill_summary "$tsv" "$START_P95_RED" "$PERF_P95_SAMPLE_MIN")"
+      if [ -n "$sm" ]; then
+        lst=""
+        for _om in $(printf '%s' "$sm" | cut -f1); do
+          lab="$(os_label "$1" "$_om")"; [ -n "$lst" ] && lst="${lst}、"; lst="${lst}${lab}"
+        done
+        sm="拖慢 P95 的是 **${lst}**：只占 $(printf '%s' "$sm" | cut -f2)% 的启动，却贡献了 **$(printf '%s' "$sm" | cut -f3)%** 的慢启动（>${START_P95_RED}ms，$(printf '%s' "$sm" | cut -f4)/$(printf '%s' "$sm" | cut -f5)）"
+      else sm="没有样本足够且超红线的单个系统版本——慢启动分散，详见文档性能段"; fi
+      p=""; [ -n "$pv" ] && [ "$(mv_ "$1" "$pv" perf.start_samples)" -ge "$PERF_P95_SAMPLE_MIN" ] 2>/dev/null && p="$(mv_ "$1" "$pv" perf.p95)"
+      [ "$(printf '%s' "$vals" | jq 'length')" -gt 0 ] \
+        && _drill_add "$2 $v 启动 P95 ${c}ms 为什么红 · 按系统版本" "$(_chart "$vals" "$START_P95_RED" "红线 ${START_P95_RED}ms")" "$sm" "$(_drill_trend "$c" "$p" "$pv" ms)"
+    fi
+  fi
+  # 慢帧 / 冻结 → 页面（perf-screens.sql 已取：screen,samples,slow_pct,frozen_pct,p50）
+  f="$TMP/screens-$1-$v.csv"
+  for _m in "slow_all:慢帧:3:$SLOW_FRAME_RED:$SLOW_FRAME_YELLOW" "frozen_all:冻结率:4:$FROZEN_RED:$FROZEN_YELLOW"; do
+    [ "$DRILL_N" -lt "$CARD_DRILL_MAX" ] || break
+    IFS=: read -r _k _lbl _col _r _y <<< "$_m"
+    c="$(mv_ "$1" "$v" "perf.$_k")"
+    [ "$(traffic_light "$c" "$_r" "$_y")" = red ] && [ -s "$f" ] || continue
+    # ⚠️ 赋值里的命令替换失败会触发 ERR trap（发假故障卡）——jq 解析不了就兜成空数组
+    vals="$(csv2tsv < "$f" | sort -t$'\t' -k"$_col","$_col" -gr | head -3 \
+      | jq -Rc --argjson col "$_col" 'split("\t") | select(length >= $col and (.[$col-1] | test("^[0-9.]+$")))
+          | {k:((.[0] | .[0:24]) + " · " + .[1] + " 次"), v:(.[$col-1] | tonumber)}' | jq -cs '.')" || vals='[]'
+    [ "$(printf '%s' "$vals" | jq 'length' 2>/dev/null || echo 0)" -gt 0 ] || continue
+    sm="最差页：$(printf '%s' "$vals" | jq -r '.[0] | "\(.k | split(" · ")[0]) \(.v)%"')（平台整体 ${c}%）"
+    p=""; [ -n "$pv" ] && p="$(mv_ "$1" "$pv" "perf.$_k")"
+    _drill_add "$2 $v ${_lbl} ${c}% 为什么红 · 最差页面" "$(_chart "$vals" "$_r" "红线 ${_r}%")" "$sm" "$(_drill_trend "$c" "$p" "$pv" %)"
+  done
+  # 接口错误率 → 接口（perf-network.sql 已取：endpoint,n,p50,p95,errors,err_pct）
+  f="$TMP/net-$1-$v.csv"; c="$(mv_ "$1" "$v" perf.net_err)"
+  if [ "$DRILL_N" -lt "$CARD_DRILL_MAX" ] && [ "$(traffic_light "$c" "$NET_ERR_RED" "$NET_ERR_YELLOW")" = red ] && [ -s "$f" ]; then
+    vals="$(csv2tsv < "$f" | sort -t$'\t' -k6,6 -gr | head -3 \
+      | jq -Rc 'split("\t") | select(length >= 6 and (.[5] | test("^[0-9.]+$")))
+          | {k:((.[0] | sub("^[^/]*dinoenglish\\.ai"; "") | .[0:28]) + " · " + .[1] + " 次"), v:(.[5] | tonumber)}' | jq -cs '.')" || vals='[]'
+    if [ "$(printf '%s' "$vals" | jq 'length' 2>/dev/null || echo 0)" -gt 0 ]; then
+    sm="错误率最高：$(printf '%s' "$vals" | jq -r '.[0] | "\(.k | split(" · ")[0]) \(.v)%"')"
+    p=""; [ -n "$pv" ] && p="$(mv_ "$1" "$pv" perf.net_err)"
+    _drill_add "$2 $v 接口错误率 ${c}% 为什么红 · 接口" "$(_chart "$vals" "$NET_ERR_RED" "红线 ${NET_ERR_RED}%")" "$sm" "$(_drill_trend "$c" "$p" "$pv" %)"
+    fi
+  fi
+  return 0
+}
+drill_platform and Android
+drill_platform ios iOS
+echo "  红灯下钻：${DRILL_N} 张图"
+
+# 控制台链接补进分档结果（URL 由 common.sh 的 issue_url 构造，⛔ 不在 jq 里拼前缀——两处构造会漂）
+_tier_urls='{}'
+while IFS=$'\t' read -r _up _ui; do
+  [ -n "$_ui" ] || continue
+  _tier_urls="$(printf '%s' "$_tier_urls" | jq -c --arg i "$_ui" --arg u "$(issue_url "$_up" "$_ui")" '. + {($i): $u}')"
+done < <(printf '%s' "$TIERS_JSON" | jq -r '.[] | [.plat, .id] | @tsv' 2>/dev/null || true)
+TIERS_JSON="$(printf '%s' "$TIERS_JSON" | jq -c --argjson u "$_tier_urls" 'map(. + {url:($u[.id] // "")})')"
+
+# 卡片上的流水线说明：摘要里**除指标灯行之外**的全部（判定回退 / 内部构建 / MCP 与事实层降级 /
+# 发版判定不可得 / 性能停更 / 全版本口径的 issue 变化）。指标灯已在健康度面板逐格着色，⛔ 不再重复成行。
+CARD_NOTES="$(printf '%s\n' "$SUMMARY_MD" | grep -v '^$' \
+  | grep -vE '^(🔴|🟡) (崩溃率|慢帧|冻结率|启动 P95|接口错误率|ANR 率) ' \
+  | sed -e 's/^🔴 \(.*全版本口径\)/ℹ️ \1/' -e 's/^🔁 \(.*全版本口径\)/ℹ️ \1/' || true)"
+# ⚠️ 上面的 sed：全版本口径的「新增 / 回归 N 个」是 MCP 全版本的计数说明，⛔ 不是紧急项——
+#    卡片上带 🔴 会与 🚨 档混读（10-11 DRY RUN 实见）。具体哪些 issue 要动手，看 🚨 段。
+[ -n "$VERSION_NOTES_MD" ] && CARD_NOTES="${VERSION_NOTES_MD}${CARD_NOTES:+
+$CARD_NOTES}"
+# 判灯口径变更的首周注记（change crash-report-attention-tiers，design Risks）：慢帧 / 冻结改用平台整体值后，
+# Android 的灯会从 🔴 变 🟡——那是口径变化，⛔ 不是性能改善。截止日到了自动不再出现。
+JUDGE_CHANGE_NOTE_UNTIL="${CRASH_REPORT_JUDGE_CHANGE_NOTE_UNTIL:-2026-10-25}"
+if [[ "$DAY" < "$JUDGE_CHANGE_NOTE_UNTIL" ]] || [ "$DAY" = "$JUDGE_CHANGE_NOTE_UNTIL" ]; then
+  _jcn="ℹ️ 本周起慢帧 / 冻结判灯改用平台整体值（原为最差页）——灯由红变黄是口径变化，不是性能改善；最差页仍在括注里"
+  CARD_NOTES="${CARD_NOTES:+$CARD_NOTES
+}${_jcn}"
+fi
+
+if [ "${TIER_N_URGENT:-0}" -gt 0 ]; then HEADER_COLOR="red"; HEADER_VERDICT="${TIER_N_URGENT} 项需开发处理"
+elif [ "${TIER_N_RELEASE:-0}" -gt 0 ]; then HEADER_COLOR="orange"; HEADER_VERDICT="今日无需开发处理"
+else HEADER_COLOR="green"; HEADER_VERDICT="今日无需开发处理"; fi
+HEADER_TITLE="📊 ${DAY:5} $TS_HM 崩溃日报 · ${HEADER_VERDICT}"
+HEADER_SUB="判定版本 iOS ${IOS_ALERT_VER:-—} · Android ${AND_ALERT_VER:-—}"
 SESS_FALLBACK_NOTE=""
 { [ "$SESS_IOS_FALLBACK" = 1 ] || [ "$SESS_AND_FALLBACK" = 1 ]; } && SESS_FALLBACK_NOTE="；⚠️ 放量回退批量表（可能停更）"
-NOTE_MD="$(printf '本报告只统计最新 %s 个版本（会话量 top2 不在其中时补「主力」列）；跨版本合计值不再输出。\n带「性能兜底」角标的列是**性能表里可得的最新版本**——性能批量表比崩溃/放量滞后约 2 天，新版在它里面常年零行，那一列的性能值本来就取不到。⛔ 该列的崩溃/放量数字是**这个旧版本自己的**，不是新版的。\n取数区间 性能 %sd：%s\n取数区间 放量 %sd：%s\n取数区间 崩溃 %sd：%s%s\n崩溃=BigQuery 事件级（含已关闭 issue）· 崩溃率=事件数/会话数 · Crash-free=会话口径（**与控制台的用户口径不可比**，且为下界估计）· 卡死信号行**双端指标不同不可比**：Android=ANR 率（%sd，与 Play 门槛口径亦不同），iOS=冻结帧率（%sd，系统层无 ANR 概念）· 非致命双端不可比 · 慢帧>16ms / 冻结>700ms 为帧级占比\n格内对比 = 最新版 − 上一版（箭头跟数值方向、颜色跟好坏）；表头括号内为该版本的 **会话数/设备数**（设备数才是「多少人在用」，会话数会被同一人反复启动放大）；影响集中行取该端事件最多的版本；同版本 DoD/WoW 与完整 13 项指标见日报文档' \
-  "$VERSION_COUNT" \
+HEALTH_IOS="$(health_md ios iOS)"; HEALTH_AND="$(health_md and Android)"
+HEALTH_FOOT="全版本 crash-free：iOS ${IOS_CF_ALL:-—}% · Android ${AND_CF_ALL:-—}% · 性能 ${PERF_DAYS}d：$(win_days "$PERF_WIN_START" "$PERF_LCD" "$RUN_EPOCH" "$DATA_UNTIL") · 崩溃 ${CRASH_DAYS}d · 只给超阈值的数字上色，灯按平台分判"
+NOTE_MD="$(printf '只统计最新 %s 个版本 + 告警判定版本；跨版本合计值不输出。分档：🚨 = 修了仍在且近 %s 天仍有事件 / 新增·回归 ≥%s 台 / 长期 ≥%s 台 / 崩溃率·ANR 红档 / 性能比上一版差 ≥%s%%；⏳ = 代码已修、含修复的版本未上线；其余 👀。台数 = 报告版本内 FATAL 受影响安装。\n取数区间 性能 %sd：%s\n取数区间 放量 %sd：%s\n取数区间 崩溃 %sd：%s%s\nCrash-free=会话口径（与控制台的用户口径不可比，且为下界估计）· ANR 率与 Play 门槛口径不同 · 慢帧 >16ms / 冻结 >700ms 为帧级占比，判灯用平台整体值、最差页只作线索' \
+  "$VERSION_COUNT" "$CRASH_DAYS" "$TIER_NEW_MIN" "$TIER_LONG_MIN" "$PERF_REGRESS_PCT" \
   "$PERF_DAYS"  "$(win_days "$PERF_WIN_START" "$PERF_LCD" "$RUN_EPOCH" "$DATA_UNTIL")" \
   "$DAYS"       "$(win_compact "$RUN_EPOCH" "$TZ_LABEL" "$DAYS" "$ADOPTION_UNTIL")" \
-  "$CRASH_DAYS" "$(win_compact "$RUN_EPOCH" "$TZ_LABEL" "$CRASH_DAYS" "$CRASH_UNTIL")" "$SESS_FALLBACK_NOTE" \
-  "$CRASH_DAYS" "$PERF_DAYS")"
+  "$CRASH_DAYS" "$(win_compact "$RUN_EPOCH" "$TZ_LABEL" "$CRASH_DAYS" "$CRASH_UNTIL")" "$SESS_FALLBACK_NOTE")"
+# 观察面板里的影响集中等行：💚 全版本 crash-free 已在健康度脚注，⛔ 不重复
+WATCH_EXTRA="$(printf '%s\n' "$CARD_FOCUS" | grep -v '^💚' | grep -v '^$' || true)"
+# 面板里统一用表（用户 2026-10-11）：影响集中 / 归因 / 放量等行转成「项 | 内容」两列表，按第一个全角冒号拆。
+# 没有冒号的说明行（前后台摘要）整行进「内容」列，「项」写「说明」。⚠️ awk 按字节找「：」，对 UTF-8 是安全的
+# （多字节序列不会与其他字符的字节错位匹配）。表格里的竖线换成「/」，免得把行拆成多列。
+WATCH_EXTRA_TABLE=""
+if [ -n "$WATCH_EXTRA" ]; then
+  WATCH_EXTRA_TABLE="$(printf '%s\n' "$WATCH_EXTRA" | awk -v sep="：" '
+    BEGIN { print "| 项 | 内容 |"; print "|---|---|" }
+    NF { gsub(/\|/, "/"); i = index($0, sep)
+         if (i > 0) printf "| %s | %s |\n", substr($0, 1, i - 1), substr($0, i + length(sep))
+         else       printf "| 说明 | %s |\n", $0 }')"
+fi
 
 CARD_JSON="$(jq -n \
-  --arg hc "$HEADER_COLOR" --arg ht "$HEADER_TITLE" --arg sm "$STATUS_MD" \
-  --arg vn "$VERSION_NOTES_MD" \
-  --arg nm "$NOTE_MD" \
-  --argjson ct "$CARD_TABLE" --arg fo "$CARD_FOCUS" \
-  '{schema:"2.0",
-    config:{width_mode:"fill"},
-    header:{template:$hc,title:{tag:"plain_text",content:$ht}},
-    body:{elements:([
-      {tag:"markdown",content:$sm}]
-      + (if $vn != "" then [{tag:"markdown",content:$vn}] else [] end)
-      + [$ct]
-      + (if $fo != "" then [{tag:"markdown",content:$fo}] else [] end)
-      + [
-      {tag:"div",text:{tag:"plain_text",content:$nm,text_size:"notation",text_color:"grey"}},
-      {tag:"markdown",content:"📄 [详情](__DETAIL_URL__) · 🗂 [崩溃跟踪索引](__INDEX_URL__) · 📁 [全部报告](__FOLDER_URL__)"}
-    ])}}')"
+  --arg hc "$HEADER_COLOR" --arg ht "$HEADER_TITLE" --arg hs "$HEADER_SUB" \
+  --argjson nu "${TIER_N_URGENT:-0}" --argjson nr "${TIER_N_RELEASE:-0}" --argjson nw "${TIER_N_WATCH:-0}" \
+  --argjson tiers "$TIERS_JSON" --argjson metric "$TIER_METRIC" \
+  --arg hi "$HEALTH_IOS" --arg ha "$HEALTH_AND" --arg hf "$HEALTH_FOOT" \
+  --argjson drill "$DRILL_ELEMS" --arg notes "$CARD_NOTES" --arg wx "$WATCH_EXTRA_TABLE" --arg nm "$NOTE_MD" '
+  def g($s): "<font color=\u0027grey\u0027>" + $s + "</font>";
+  def pn: if .plat == "ios" then "iOS" else "Android" end;
+  def lk: if (.url // "") != "" then "[\(.id[0:8])](\(.url))" else .id[0:8] end;
+  def btn($u): {tag:"button", text:{tag:"plain_text", content:"控制台"}, type:"default", size:"small",
+                behaviors:[{type:"open_url", default_url:$u}]};
+  def block($bg; $md; $u):
+    {tag:"column_set", flex_mode:"none", background_style:$bg, horizontal_spacing:"8px", margin:"4px 0px 4px 0px",
+     columns:([{tag:"column", width:"weighted", weight:5, vertical_align:"center", padding:"8px 8px 8px 8px",
+                elements:[{tag:"markdown", content:$md}]}]
+              + (if $u != "" then [{tag:"column", width:"auto", vertical_align:"center", padding:"8px 8px 8px 0px",
+                                    elements:[btn($u)]}] else [] end))};
+  def panel($title; $md):
+    {tag:"collapsible_panel", expanded:false, margin:"4px 0px 0px 0px",
+     header:{title:{tag:"markdown", content:$title}, vertical_align:"center",
+             icon:{tag:"standard_icon", token:"down-small-ccm_outlined", size:"16px 16px"},
+             icon_position:"right", icon_expanded_angle:-180},
+     border:{color:"grey", corner_radius:"5px"}, padding:"6px 8px 6px 8px",
+     elements:[{tag:"markdown", content:$md}]};
+  def tagof: if .fix_status == "修了仍在" and (.why | startswith("修了仍在")) then "修了仍在"
+             elif .life == "🆕新增" then "新增" elif .life == "🔁回归" then "回归" else "持续出现" end;
+  # ⚠️ 尖括号换成 ‹›：`<init>` 被截断成 `<i` 后会被卡片 markdown 当标签吞掉
+  def ttl: (if (.title // "") == "" then "（标题未取到）" else (.title | gsub("<"; "‹") | gsub(">"; "›") | if length > 48 then .[0:47] + "…" else . end) end);
+  [$tiers[] | select(.tier == "urgent")] as $u
+  | [$tiers[] | select(.tier == "release")] as $r
+  | [$tiers[] | select(.tier == "watch")] as $w
+  | {schema:"2.0", config:{width_mode:"fill"},
+     header:{template:$hc, title:{tag:"plain_text", content:$ht}, subtitle:{tag:"plain_text", content:$hs},
+             text_tag_list:[
+               {tag:"text_tag", text:{tag:"plain_text", content:"🚨 紧急 \($nu)"}, color:"red"},
+               {tag:"text_tag", text:{tag:"plain_text", content:"⏳ 等发版 \($nr)"}, color:"orange"},
+               {tag:"text_tag", text:{tag:"plain_text", content:"👀 观察 \($nw)"}, color:"neutral"}]},
+     body:{elements:(
+       [{tag:"markdown", content:"**🚨 紧急 · 开发要修**"}]
+       + (if ($u | length) + ($metric | length) == 0
+          then [{tag:"markdown", content:"<font color=\u0027green\u0027>✅ 今日无需开发处理的崩溃</font>"}]
+          else
+            # 理由去掉标签已经说过的开头（「修了仍在」「新增 · 」…），避免「「新增」 新增 · …」这种重复
+            [ $u[] | block("red-50";
+                "**\(pn) · \(ttl)** `\(.id[0:8])`\n<text_tag color=\u0027red\u0027>\(tagof)</text_tag> \(.why | sub("^(修了仍在：|新增 · |回归（曾消失又重现） · |暴涨 · |长期 · )"; ""))"
+                + (if (.by_ver // "") != "" then "\n" + g("7 天：" + .by_ver) else "" end); (.url // "")) ]
+            + [ $metric[] | block("red-50"; "**\(.title)**\n<text_tag color=\u0027red\u0027>\(.tag)</text_tag> \(.why)"; "") ]
+          end)
+       + (if ($r | length) == 0 then [] else
+            [{tag:"markdown", content:"**⏳ 等发版 · 代码已修，催上线**", margin:"12px 0px 0px 0px"}]
+            + (if ($r[0].users // 0) > 0 then
+                 [ $r[0] | block("orange-50";
+                     "**\(pn) · \(ttl)** `\(.id[0:8])`\n<text_tag color=\u0027orange\u0027>7 天影响最大</text_tag> 7 天 \(.users) 台 · 修复：\(.fix_subject)"; (.url // "")) ]
+               else [] end)
+            + ( (if ($r[0].users // 0) > 0 then $r[1:] else $r end) as $rest
+                | if ($rest | length) == 0 then [] else
+                    [panel((if ($r[0].users // 0) > 0 then "其余 \($rest | length) 个 " else "代码已修 \($rest | length) 个 " end)
+                           + g("· 按 7 天台数排序");
+                       "| 平台 | Issue | 7天台数 | 修复 |\n|---|---|---|---|\n"
+                       + ([ $rest[] | "| \(pn) | \(lk) | \(.users) | \(.fix_subject | gsub("\\|"; "/")) |" ] | join("\n")))]
+                  end)
+          end)
+       + (if ($w | length) == 0 and $wx == "" then [] else
+            [{tag:"markdown", content:"**👀 观察 · 今天不用动**", margin:"12px 0px 0px 0px"},
+             panel("观察 \($w | length) 项 " + g("· 点开看");
+               (if ($w | length) > 0 then
+                  "| 平台 | Issue | 标题 | 7天台数 | 说明 |\n|---|---|---|---|---|\n"
+                  + ([ $w[] | "| \(pn) | \(lk) | \(ttl | gsub("\\|"; "/") | .[0:28]) | \(.users) | \(.why | gsub("\\|"; "/")) |" ] | join("\n"))
+                else "" end)
+               + (if $wx != "" then (if ($w | length) > 0 then "\n\n" else "" end) + $wx else "" end))]
+          end)
+       + [{tag:"hr", margin:"12px 0px 4px 0px"},
+          {tag:"markdown", content:("**📈 健康度** " + g("判定版本 · 只给超阈值的数字上色"))},
+          {tag:"column_set", flex_mode:"none", horizontal_spacing:"8px",
+           columns:[ ($hi, $ha) | select(. != "")
+                     | {tag:"column", width:"weighted", weight:1, background_style:"grey-50",
+                        padding:"8px 10px 8px 10px", elements:[{tag:"markdown", content:.}]} ]},
+          {tag:"markdown", content:g($hf)}]
+       + $drill
+       + (if $notes != "" then [{tag:"markdown", content:$notes, margin:"8px 0px 0px 0px"}] else [] end)
+       + [{tag:"hr"},
+          {tag:"div", text:{tag:"plain_text", content:$nm, text_size:"notation", text_color:"grey"}},
+          {tag:"markdown", content:"📄 [详情](__DETAIL_URL__) · 🗂 [崩溃跟踪索引](__INDEX_URL__) · 📁 [全部报告](__FOLDER_URL__)"}]
+     )}}')"
 
 # markdown 回退视图（调试与 message.md；结构化卡片投递失败时人也能读）
 # **文档专用**的 markdown 表：全量行 × 版本列，与 xml_table 同口径。
-# ⚠️ 与卡片的 md_table() 是两个函数，别合并——卡片砍到 6 行的前提正是文档保持完备
+# ⚠️ 卡片已改为三档 + 健康度（不再有卡片表）——文档版本对照表保持全量行，是卡片敢只放要点的前提
 # （change crash-card-brief D3：ROW_DEFS 必须拆成 _CARD / _DOC，三个调用点各自指定）。
 md_table_doc() { # $1=plat $2=版本列 $3=V1 $4=V2
   local key label v
@@ -2022,47 +2349,49 @@ md_table_doc() { # $1=plat $2=版本列 $3=V1 $4=V2
   done <<< "$ROW_DEFS_DOC"
 }
 
-# 卡片的 markdown 回退视图：与结构化卡片同形态（列 = 平台×版本），投递失败时人也能读。
-# ⚠️ 与 build_card_table() 是**同一张表的两套渲染**（这里出 markdown 预览，那里出 CardKit JSON）：
-#    列集合改一处必须改两处，漏一处的表现是「DRY RUN 预览 4 列、真发出去 6 列」——
-#    预览与实发不一致，正是这个仓库最难排查的一类。
-md_table() { # 无参数：直接用全局的卡片版本列
-  local key label pp pk pn v rest
-  CELL_BREVITY=1
-  printf '| 指标 |'
-  for pp in "ios:iOS:$IOS_CARD_COLS" "and:Android:$AND_CARD_COLS"; do
-    pk="${pp%%:*}"; rest="${pp#*:}"; pn="${rest%%:*}"
-    for v in ${rest#*:}; do
-      [ -n "$v" ] && printf ' %s %s%s |' "$pn" "$v" "$(perf_only_tag "$pk" "$v")"
-    done
-  done
-  printf '\n|---|'
-  for pp in "ios:$IOS_CARD_COLS" "and:$AND_CARD_COLS"; do
-    for v in ${pp#*:}; do [ -n "$v" ] && printf -- '---|'; done
-  done
-  printf '\n'
-  while IFS='|' read -r key label; do
-    [ -n "$key" ] || continue
-    printf '| %s |' "$label"
-    for pp in "ios:$IOS_CARD_COLS" "and:$AND_CARD_COLS"; do
-      pk="${pp%%:*}"
-      for v in ${pp#*:}; do
-        [ -n "$v" ] || continue
-        printf ' %s |' "$(cell "$pk" "$v" "$key" | sed -e 's|<font color=[a-z]*>||g' -e 's|</font>||g')"
-      done
-    done
-    printf '\n'
-  done <<< "$ROW_DEFS_CARD"
-  CELL_BREVITY=0
+# 卡片的 markdown 回退视图（message.md / DRY RUN 预览）：与结构化卡片同一份数据（TIERS_JSON / 健康度 / 下钻），
+# ⚠️ 结构化卡片与这里是**同一张卡的两套渲染**——改档位或健康度必须两处一起改（F35：预览与实发不一致）。
+tier_md_list() { # $1=档(urgent|release|watch) → markdown 列表（空档输出空）
+  printf '%s' "$TIERS_JSON" | jq -r --arg t "$1" '.[] | select(.tier == $t)
+    | "- \(if .plat == "ios" then "iOS" else "Android" end) " +
+      (if (.url // "") != "" then "[\(.id[0:8])](\(.url))" else .id[0:8] end) +
+      (if (.title // "") == "" then "" else " " + (.title | gsub("<"; "‹") | gsub(">"; "›") | if length > 48 then .[0:47] + "…" else . end) end) + " — \(.why)" +
+      (if $t == "release" and (.fix_subject // "") != "" then "（修复：\(.fix_subject)）" else "" end) +
+      (if (.by_ver // "") != "" and $t != "watch" then "（\(.by_ver)）" else "" end)' 2>/dev/null || true
 }
+TIER_MD_URGENT="$(tier_md_list urgent)"
+_tm="$(printf '%s' "$TIER_METRIC" | jq -r '.[] | "- \(.title) — \(.tag)：\(.why)"' 2>/dev/null || true)"
+[ -n "$_tm" ] && TIER_MD_URGENT="${TIER_MD_URGENT:+$TIER_MD_URGENT
+}$_tm"
+[ -n "$TIER_MD_URGENT" ] || TIER_MD_URGENT="✅ 今日无需开发处理的崩溃"
+TIER_MD_RELEASE="$(tier_md_list release)"
+TIER_MD_WATCH="$(tier_md_list watch)"
+HEALTH_MD_PLAIN="$(printf '%s\n\n%s' "$HEALTH_IOS" "$HEALTH_AND" | sed -e "s|<font color='grey'>||g" -e "s|<font color=[a-z']*>||g" -e 's|</font>||g')"
+# ⛔ 带全角 / `·` 的段落先条件赋值再拼接，禁 ${var:+…}（CLAUDE.md 硬约束：bash 3.2 会把多字节并进变量名）
+_md_rel=""; [ -n "$TIER_MD_RELEASE" ] && _md_rel="
+**⏳ 等发版 · 代码已修，催上线**
+${TIER_MD_RELEASE}
+"
+_md_watch=""; [ -n "$TIER_MD_WATCH" ] && _md_watch="
+**👀 观察 · 今天不用动**
+${TIER_MD_WATCH}
+"
+[ -n "$WATCH_EXTRA" ] && _md_watch="${_md_watch}${WATCH_EXTRA}
+"
+CARD="**${HEADER_TITLE}**
+${HEADER_SUB} · 🚨 ${TIER_N_URGENT:-0} · ⏳ ${TIER_N_RELEASE:-0} · 👀 ${TIER_N_WATCH:-0}
 
-CARD="**📊 ${DAY:5} 崩溃 & 性能**
-$STATUS_MD
-$VERSION_NOTES_MD
-
-$(md_table)
-$(card_focus_line)
-
+**🚨 紧急 · 开发要修**
+${TIER_MD_URGENT}
+${_md_rel}${_md_watch}
+**📈 健康度**
+${HEALTH_MD_PLAIN}
+${HEALTH_FOOT}
+${DRILL_MD:+
+$DRILL_MD
+}${CARD_NOTES:+
+$CARD_NOTES
+}
 > $NOTE_MD"
 
 # ── 同版本环比（DoD/WoW，只对最新 N 版；卡片不放，见 design D7）────────
@@ -2164,6 +2493,19 @@ verdict_line() { # $1=plat $2=平台名 $3=V1 $4=V2
   return 0
 }
 
+# 分档列（change crash-report-attention-tiers）：明细表每行标出它进了哪一档，读者从表里也能对回首屏。
+# ⚠️ 只有报告版本集内的 issue 参与分档；「性能兜底」等补充列的版本不在其中，渲染「—」而不是「观察」。
+tier_cell() { # $1=完整 issue id → 🚨紧急 / ⏳等发版 / 👀观察 / —
+  local t
+  t="$(printf '%s' "${TIERS_JSON:-[]}" | jq -r --arg i "$1" 'first(.[] | select(.id == $i) | .tier) // ""' 2>/dev/null || echo "")"
+  case "$t" in
+    urgent)  printf '🚨紧急';;
+    release) printf '⏳等发版';;
+    watch)   printf '👀观察';;
+    *)       printf '—';;
+  esac
+}
+
 # 明细段
 issues_table() { # $1=plat $2=版本
   local f="$TMP/issues-$1-$2.json"
@@ -2172,13 +2514,13 @@ issues_table() { # $1=plat $2=版本
   fi
   # 集中度 = 事件 / 受影响安装：9 次影响 1 台（9.0）与 14 次影响 7 台（2.0）严重度完全不同，
   # 而只看事件数两者长得一样。排序已在 SQL 里改成按 users（change crash-impact-summary D3）。
-  printf '| Issue | 生命周期 | 开关 | 标题 | 事件 | 影响安装 | 集中度 | 最新 |\n|---|---|---|---|---|---|---|---|\n'
+  printf '| Issue | 分档 | 生命周期 | 开关 | 标题 | 事件 | 影响安装 | 集中度 | 最新 |\n|---|---|---|---|---|---|---|---|---|\n'
   # 生命周期与开关两列都逐行取：两者都要完整 id，而表里只显示短 id。
   # ⛔ 两列**不可合并**：一个是我们自己的历史判定，一个是 Firebase 侧的开关状态
   jq -r '.[] | [.issue_id, (if (.title // "") == "" then "—" else .title end), (.n|tostring), (.users|tostring), (((( .n|tonumber ) / (if (.users|tonumber) == 0 then 1 else (.users|tonumber) end) * 10 | round) / 10)|tostring), .latest] | @tsv' "$f" 2>/dev/null \
   | while IFS=$'\t' read -r fid ti n us cc la; do
       [ -n "$fid" ] || continue
-      printf '| %s | %s | %s | %s | %s | %s | %s | %s |\n' "$(_id_link "$1" "$fid")" "$(life_tag "$fid")" "$(issue_state_cell "$fid")" "$ti" "$n" "$us" "$cc" "$la"
+      printf '| %s | %s | %s | %s | %s | %s | %s | %s | %s |\n' "$(_id_link "$1" "$fid")" "$(tier_cell "$fid")" "$(life_tag "$fid")" "$(issue_state_cell "$fid")" "$ti" "$n" "$us" "$cc" "$la"
     done
   printf '\n'
 }
@@ -2390,12 +2732,12 @@ xml_issues() { # $1=plat $2=版本
   | while IFS=$'\t' read -r fid ti n us cc la; do
       [ -n "$fid" ] || continue
       # 第 8 列是完整 32 位 id：**不显示**，只供渲染器构造链接（⛔ 不能用 8 位短 id 拼回去）
-      printf '"%s","%s","%s","%s","%s","%s","%s","%s","%s"\n' "${fid:0:8}" "$(life_tag "$fid")" "$(issue_state_cell "$fid")" "$ti" "$n" "$us" "$cc" "$la" "$fid" \
+      printf '"%s","%s","%s","%s","%s","%s","%s","%s","%s","%s"\n' "${fid:0:8}" "$(tier_cell "$fid")" "$(life_tag "$fid")" "$(issue_state_cell "$fid")" "$ti" "$n" "$us" "$cc" "$la" "$fid" \
         >> "$TMP/iss-$1-$2.csv"
     done
-  # ⚠️ 链接列规格里的 9 是**完整 32 位 id 的列号**，随开关列插入从 8 变 9——
+  # ⚠️ 链接列规格里的 10 是**完整 32 位 id 的列号**：开关列插入时 8→9，分档列插入时 9→10——
   #    改漏不会报错，只会让每条链接指向「最新」列的内容（静默产出坏链接）。
-  xml_csv_table "$TMP/iss-$1-$2.csv" 'Issue,生命周期,开关,标题,事件,影响安装,集中度,最新' '1,2,3,4,5,6,7,8' "1:9:$(issue_url_prefix "$1")"
+  xml_csv_table "$TMP/iss-$1-$2.csv" 'Issue,分档,生命周期,开关,标题,事件,影响安装,集中度,最新' '1,2,3,4,5,6,7,8,9' "1:10:$(issue_url_prefix "$1")"
 }
 xml_nonfatal() { # $1=plat $2=版本
   local f="$TMP/nonfatal-$1-$2.json"
@@ -2466,6 +2808,15 @@ REPORT="$STATE/reports/$DAY-daily.md"
   printf '> iOS %s · Android %s\n' "$IOS_TOP_NOTE" "$AND_TOP_NOTE"
   printf '> 窗口起点 = 本次跑批时刻 − N 天（SQL 下界）；终点 = 该表实际取到的最新数据，两者之差即数据滞后。\n'
   printf '> 本次运行 %s · 审计 $STATE/audit/daily-%s.events.jsonl\n\n' "$RUN_ID" "$RUN_ID"
+
+  # 首屏 = 三档（change crash-report-attention-tiers；spec「首屏只回答单一问题」）。
+  # ⛔ 下方「一、汇总」及之后各段一个不少——卡片敢只放要点的前提正是文档保持完备。
+  printf '## 今日要点\n\n'
+  printf '**🚨 紧急 · 开发要修**\n\n%s\n\n' "$TIER_MD_URGENT"
+  if [ -n "$TIER_MD_RELEASE" ]; then printf '**⏳ 等发版 · 代码已修，催上线**\n\n%s\n\n' "$TIER_MD_RELEASE"; fi
+  if [ -n "$TIER_MD_WATCH" ]; then printf '**👀 观察 · 今天不用动**\n\n%s\n\n' "$TIER_MD_WATCH"; fi
+  if [ -n "$DRILL_MD" ]; then printf '**🔍 红灯下钻**\n\n%s\n\n' "$DRILL_MD"; fi
+  printf '> 分档规则：%s\n\n' "🚨 = 修了仍在且近 ${CRASH_DAYS} 天仍有事件 / 新增·回归 ≥${TIER_NEW_MIN} 台 / 长期 ≥${TIER_LONG_MIN} 台 / 崩溃率·ANR 红档 / 性能比上一版差 ≥${PERF_REGRESS_PCT}%；⏳ = 代码已修、含修复的版本未上线；其余 👀。台数 = 报告版本内 FATAL 受影响安装。"
 
   printf '## 一、汇总\n\n'
   printf '%s\n\n' "$STATUS_MD"
@@ -2732,6 +3083,33 @@ build_index() {
 }
 
 # ── 日报 XML 文档（有颜色的那一份；markdown 版保留作回退与调试）──
+# 三档 → DocxXML 高亮框（链接与转义都在 jq 里做：@html 转义正文，href 用完整 id 构造的控制台 URL）
+tier_xml_paras() { # $1=档(urgent|release|watch)
+  local emoji bg ttl items metric=""
+  case "$1" in
+    urgent)  emoji="🚨"; bg="light-red";    ttl="紧急 · 开发要修";;
+    release) emoji="⏳"; bg="light-yellow"; ttl="等发版 · 代码已修，催上线";;
+    *)       emoji="👀"; bg="light-blue";   ttl="观察 · 今天不用动";;
+  esac
+  items="$(printf '%s' "$TIERS_JSON" | jq -r --arg t "$1" '.[] | select(.tier == $t)
+    | "  <p><b>" + ((if .plat == "ios" then "iOS" else "Android" end) + " · " + (if (.title // "") == "" then "（标题未取到）" else .title[0:48] end) | @html) + "</b> "
+      + (if (.url // "") != "" then "<a href=\"" + (.url | @html) + "\">" + .id[0:8] + "</a>" else .id[0:8] end)
+      + " — " + (.why | @html)
+      + (if $t == "release" and (.fix_subject // "") != "" then "（修复：" + (.fix_subject | @html) + "）" else "" end)
+      + (if (.by_ver // "") != "" and $t != "watch" then "<span text-color=\"gray\">（" + (.by_ver | @html) + "）</span>" else "" end)
+      + "</p>"' 2>/dev/null || true)"
+  [ "$1" = urgent ] && metric="$(printf '%s' "$TIER_METRIC" | jq -r '.[] | "  <p><b>" + (.title | @html) + "</b> — " + (.tag | @html) + "：" + (.why | @html) + "</p>"' 2>/dev/null || true)"
+  if [ -z "$items" ] && [ -z "$metric" ]; then
+    [ "$1" = urgent ] || return 0
+    printf '<callout emoji="✅" background-color="light-green">\n  <p><b>今日无需开发处理的崩溃</b></p>\n</callout>\n'
+    return 0
+  fi
+  printf '<callout emoji="%s" background-color="%s">\n  <p><b>%s</b></p>\n' "$emoji" "$bg" "$ttl"
+  [ -n "$items" ] && printf '%s\n' "$items"
+  [ -n "$metric" ] && printf '%s\n' "$metric"
+  printf '</callout>\n'
+  return 0
+}
 build_report_xml() {
   local v p pn tone emoji bg border
   REPORT_XML="$PUBLISH_DIR/docs/daily.xml"
@@ -2739,14 +3117,28 @@ build_report_xml() {
   else tone="无异常"; emoji="✅"; bg="light-green"; border="green"; fi
   {
     printf '<title>崩溃 &amp; 性能日报 · %s %s</title>\n' "$DAY" "$TS_HM"
-    # 结论高亮框：一眼看到今天该不该紧张
+    # 首屏 = 三档（change crash-report-attention-tiers）：🚨 红 / ⏳ 黄 / 👀 蓝三个高亮框。
+    # ⚠️ 底色只用仓库里实际渲染过的三种（light-red / light-yellow / light-blue）——DocxXML 的颜色名
+    #    在 lark-cli 包里查不到清单，用没验证过的名字可能让整份文档建不出来。
+    printf '<h1>今日要点</h1>\n'
+    tier_xml_paras urgent
+    tier_xml_paras release
+    tier_xml_paras watch
+    if [ -n "$DRILL_MD" ]; then
+      printf '<callout emoji="🔍" background-color="light-blue">\n'
+      printf '%s\n' "$DRILL_MD" | grep -v '^$' | while IFS= read -r line; do
+        printf '  <p>%s</p>\n' "$(printf '%s' "$line" | sed -e 's/\*\*//g' | xesc)"
+      done
+      printf '</callout>\n'
+    fi
+    # 健康度判灯行与流水线说明（原结论框内容）：⛔ 不删，挪到三档之后
     printf '<callout emoji="%s" background-color="%s" border-color="%s">\n' "$emoji" "$bg" "$border"
     if [ -n "$ALERTS" ]; then
       printf '%s\n' "$SUMMARY_MD" | grep -v '^$' | while IFS= read -r line; do
         printf '  <p>%s</p>\n' "$(printf '%s' "$line" | xesc)"
       done
     else
-      printf '  <p><b>今日无异常</b>：崩溃率 / 慢帧 / 冻结 / 启动 P95 / 接口错误率 全部在阈值内</p>\n'
+      printf '  <p><b>指标无超阈值</b>：崩溃率 / 慢帧 / 冻结 / 启动 P95 / 接口错误率 全部在阈值内</p>\n'
     fi
     printf '  <p><span text-color="gray">只统计最新 %s 个版本：iOS %s · Android %s</span></p>\n' \
       "$VERSION_COUNT" "$(printf '%s' "$IOS_VER_SUM" | xesc)" "$(printf '%s' "$AND_VER_SUM" | xesc)"

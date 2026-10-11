@@ -1,0 +1,437 @@
+{
+  "schema": "2.0",
+  "config": {
+    "width_mode": "fill"
+  },
+  "header": {
+    "template": "red",
+    "title": {
+      "tag": "plain_text",
+      "content": "📊 崩溃周报 10-05 · 本周必修 5 项"
+    },
+    "subtitle": {
+      "tag": "plain_text",
+      "content": "主力版本 iOS 1.7.1 / 1.8.2 · Android 1.8.1 / 1.8.2 · 近 7 天"
+    },
+    "text_tag_list": [
+      {
+        "tag": "text_tag",
+        "text": {
+          "tag": "plain_text",
+          "content": "🚨 P0 2 · P1 3"
+        },
+        "color": "red"
+      },
+      {
+        "tag": "text_tag",
+        "text": {
+          "tag": "plain_text",
+          "content": "⚠️ 修了仍在 3"
+        },
+        "color": "orange"
+      },
+      {
+        "tag": "text_tag",
+        "text": {
+          "tag": "plain_text",
+          "content": "🆕 新增 7"
+        },
+        "color": "neutral"
+      }
+    ]
+  },
+  "body": {
+    "elements": [
+      {
+        "tag": "markdown",
+        "content": "**🚨 本周必修**　<font color=\"grey\">模型分析 · 未经人工复核，落地前须验证</font>"
+      },
+      {
+        "tag": "column_set",
+        "flex_mode": "none",
+        "background_style": "red-50",
+        "horizontal_spacing": "8px",
+        "margin": "4px 0px 4px 0px",
+        "columns": [
+          {
+            "tag": "column",
+            "width": "weighted",
+            "weight": 5,
+            "vertical_align": "center",
+            "padding": "8px 8px 8px 8px",
+            "elements": [
+              {
+                "tag": "markdown",
+                "content": "<text_tag color=\"red\">P0</text_tag> **Android · LINE OpenChat Channel ID 为空** `8bc4b97e`\n🆕 新增 · 14 台 · 全在 1.8.2 · 启动即崩\n<font color=\"grey\">👉 入口处校验 Channel ID 非空，未配置就不启动 OpenChat</font>"
+              }
+            ]
+          },
+          {
+            "tag": "column",
+            "width": "auto",
+            "vertical_align": "center",
+            "padding": "8px 8px 8px 0px",
+            "elements": [
+              {
+                "tag": "button",
+                "text": {
+                  "tag": "plain_text",
+                  "content": "控制台"
+                },
+                "type": "default",
+                "size": "small",
+                "behaviors": [
+                  {
+                    "type": "open_url",
+                    "default_url": "https://console.firebase.google.com/v1/appid/project/dino-english-497507/crashlytics/app/1:465344775452:android:2c546b57b0176325f466d9/issues/8bc4b97e887ce32a7fada8b4fd2abc29"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "tag": "column_set",
+        "flex_mode": "none",
+        "background_style": "red-50",
+        "horizontal_spacing": "8px",
+        "margin": "4px 0px 4px 0px",
+        "columns": [
+          {
+            "tag": "column",
+            "width": "weighted",
+            "weight": 5,
+            "vertical_align": "center",
+            "padding": "8px 8px 8px 8px",
+            "elements": [
+              {
+                "tag": "markdown",
+                "content": "<text_tag color=\"red\">P0 取证</text_tag> **iOS · NSDictionary nil key** `18101022` +1\n🆕 新增 · 20 台 · 1.7.1 · 影响量最高\n<font color=\"grey\">👉 先拿到符号化的调用方样本，⛔ 别盲加 nil guard</font>"
+              }
+            ]
+          },
+          {
+            "tag": "column",
+            "width": "auto",
+            "vertical_align": "center",
+            "padding": "8px 8px 8px 0px",
+            "elements": [
+              {
+                "tag": "button",
+                "text": {
+                  "tag": "plain_text",
+                  "content": "控制台"
+                },
+                "type": "default",
+                "size": "small",
+                "behaviors": [
+                  {
+                    "type": "open_url",
+                    "default_url": "https://console.firebase.google.com/v1/appid/project/dino-english-497507/crashlytics/app/1:465344775452:ios:610bc2f8ea0750fff466d9/issues/181010225a8f7695edf124ff32b9c406"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "tag": "markdown",
+        "content": "<text_tag color=\"orange\">P1</text_tag> [62f88f39](https://console.firebase.google.com/v1/appid/project/dino-english-497507/crashlytics/app/1:465344775452:android:2c546b57b0176325f466d9/issues/62f88f3900a1313c994871bf51c65f81) Android Speech SDK SIGSEGV · ⚠️修了仍在 · 4 台\n<text_tag color=\"orange\">P1</text_tag> [85c581ed](https://console.firebase.google.com/v1/appid/project/dino-english-497507/crashlytics/app/1:465344775452:android:2c546b57b0176325f466d9/issues/85c581edcdb39b941df627e7b1324a71) Android libc SIGABRT · ⚠️修了仍在 📈 · 5 台\n<text_tag color=\"orange\">P1</text_tag> [09ee5ad3](https://console.firebase.google.com/v1/appid/project/dino-english-497507/crashlytics/app/1:465344775452:ios:610bc2f8ea0750fff466d9/issues/09ee5ad371c6c16acf0388f898f1839f) iOS Azure ASR 崩溃 · 1 台 · 可远程切 system ASR 止血"
+      },
+      {
+        "tag": "markdown",
+        "content": "**🔧 修复进度**",
+        "margin": "12px 0px 0px 0px"
+      },
+      {
+        "tag": "markdown",
+        "content": "⚠️ 修了仍在 **3**　🛠️ 已修待验 **3**　✅ 本周关闭 **8**　<font color=\"grey\">· 消失 7</font>"
+      },
+      {
+        "tag": "collapsible_panel",
+        "expanded": false,
+        "margin": "4px 0px 0px 0px",
+        "header": {
+          "title": {
+            "tag": "markdown",
+            "content": "修了仍在 3 个 <font color=\"grey\">· 修复已上线但还在崩，要重查</font>"
+          },
+          "vertical_align": "center",
+          "icon": {
+            "tag": "standard_icon",
+            "token": "down-small-ccm_outlined",
+            "size": "16px 16px"
+          },
+          "icon_position": "right",
+          "icon_expanded_angle": -180
+        },
+        "border": {
+          "color": "grey",
+          "corner_radius": "5px"
+        },
+        "padding": "6px 8px 6px 8px",
+        "elements": [
+          {
+            "tag": "markdown",
+            "content": "| 平台 | Issue | 修复提交 |\n|---|---|---|\n| Android | [62f88f39](https://console.firebase.google.com/v1/appid/project/dino-english-497507/crashlytics/app/1:465344775452:android:2c546b57b0176325f466d9/issues/62f88f3900a1313c994871bf51c65f81) | fix(tts) 隔离停止等待 · e8f9b936 |\n| Android | [4d05f9e7](https://console.firebase.google.com/v1/appid/project/dino-english-497507/crashlytics/app/1:465344775452:android:2c546b57b0176325f466d9/issues/4d05f9e74e77520b418eac3a355108f1) | fix(account) 收紧旧 GMS 登录 · 328af7a9 |\n| Android | [8b297547](https://console.firebase.google.com/v1/appid/project/dino-english-497507/crashlytics/app/1:465344775452:android:2c546b57b0176325f466d9/issues/8b297547b9f21c0b1809e8c8989edb06) | fix(radio) 透明调度页方向 · 96738df6 |"
+          }
+        ]
+      },
+      {
+        "tag": "markdown",
+        "content": "**👀 观察**",
+        "margin": "12px 0px 0px 0px"
+      },
+      {
+        "tag": "collapsible_panel",
+        "expanded": false,
+        "margin": "4px 0px 0px 0px",
+        "header": {
+          "title": {
+            "tag": "markdown",
+            "content": "P2 系统 native 崩溃 3 个 <font color=\"grey\">· 无业务帧，先补 tombstone</font>"
+          },
+          "vertical_align": "center",
+          "icon": {
+            "tag": "standard_icon",
+            "token": "down-small-ccm_outlined",
+            "size": "16px 16px"
+          },
+          "icon_position": "right",
+          "icon_expanded_angle": -180
+        },
+        "border": {
+          "color": "grey",
+          "corner_radius": "5px"
+        },
+        "padding": "6px 8px 6px 8px",
+        "elements": [
+          {
+            "tag": "markdown",
+            "content": "| 平台 | Issue | 位置 | 7天台数 |\n|---|---|---|---|\n| Android | [a086ba79](https://console.firebase.google.com/v1/appid/project/dino-english-497507/crashlytics/app/1:465344775452:android:2c546b57b0176325f466d9/issues/a086ba799cf74a0238d7fb7f800b3cc0) | libperfetto_hprof | 4 |\n| Android | [af63b03d](https://console.firebase.google.com/v1/appid/project/dino-english-497507/crashlytics/app/1:465344775452:android:2c546b57b0176325f466d9/issues/af63b03d3def6cf9f5af2c6a6a019e63) | libart | 2 |\n| Android | [d0dcb015](https://console.firebase.google.com/v1/appid/project/dino-english-497507/crashlytics/app/1:465344775452:android:2c546b57b0176325f466d9/issues/d0dcb015e40f828e706fcbf113d9560a) | audiopolicy | 1 |"
+          }
+        ]
+      },
+      {
+        "tag": "hr",
+        "margin": "12px 0px 4px 0px"
+      },
+      {
+        "tag": "markdown",
+        "content": "**📈 主力版本健康度**　<font color=\"grey\">近 7 天 · 括号内为比上周 · 只标出超阈值的项</font>"
+      },
+      {
+        "tag": "column_set",
+        "flex_mode": "none",
+        "horizontal_spacing": "8px",
+        "columns": [
+          {
+            "tag": "column",
+            "width": "weighted",
+            "weight": 1,
+            "background_style": "grey-50",
+            "padding": "8px 10px 8px 10px",
+            "elements": [
+              {
+                "tag": "markdown",
+                "content": "**iOS 1.7.1** <font color=\"grey\">1493 设备</font>\ncrash-free　99.53% <font color=\"grey\">(↓0.44pp)</font>\n崩溃　20 次 <font color=\"grey\">(上周 1)</font>\n启动 P95　841ms <font color=\"grey\">(+89ms)</font>\n慢帧　<font color=\"orange\">45.7%</font>\n接口错误　<font color=\"orange\">0.80%</font>\n<font color=\"grey\">1.8.2 新版 272 设备 · crash-free 100%</font>"
+              }
+            ]
+          },
+          {
+            "tag": "column",
+            "width": "weighted",
+            "weight": 1,
+            "background_style": "grey-50",
+            "padding": "8px 10px 8px 10px",
+            "elements": [
+              {
+                "tag": "markdown",
+                "content": "**Android 1.8.1** <font color=\"grey\">1466 设备</font>\ncrash-free　99.58% <font color=\"grey\">(↓0.15pp)</font>\nANR　10 次 0.35% <font color=\"grey\">(上周 5)</font>\n启动 P95　<font color=\"red\">2156ms 🔴</font>\n冻结　<font color=\"red\">5.02% 🔴</font>　接口错误　<font color=\"red\">1.25% 🔴</font>\n<font color=\"red\">1.8.2 新版 974 设备 · crash-free 98.90% 🔴</font>"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "tag": "markdown",
+        "margin": "10px 0px 0px 0px",
+        "content": "**🔍 Android 1.8.2 crash-free 为什么红**　<font color=\"grey\">20 次崩溃按 issue 拆</font>"
+      },
+      {
+        "tag": "chart",
+        "height": "150px",
+        "chart_spec": {
+          "type": "bar",
+          "direction": "horizontal",
+          "data": [
+            {
+              "id": "d",
+              "values": [
+                {
+                  "k": "8bc4b97e LINE SDK",
+                  "v": 14,
+                  "lbl": "14 次"
+                },
+                {
+                  "k": "a086ba79 perfetto",
+                  "v": 3,
+                  "lbl": "3 次"
+                },
+                {
+                  "k": "85c581ed libc",
+                  "v": 2,
+                  "lbl": "2 次"
+                },
+                {
+                  "k": "d0dcb015 audiopolicy",
+                  "v": 1,
+                  "lbl": "1 次"
+                }
+              ]
+            }
+          ],
+          "xField": "v",
+          "yField": "k",
+          "bar": {
+            "style": {
+              "fill": "#5B8FF9",
+              "cornerRadius": [
+                0,
+                4,
+                4,
+                0
+              ]
+            }
+          },
+          "barMaxWidth": 16,
+          "label": {
+            "visible": true,
+            "position": "outside",
+            "style": {
+              "fill": "#646A73",
+              "fontSize": 11
+            }
+          },
+          "axes": [
+            {
+              "orient": "bottom",
+              "visible": true,
+              "grid": {
+                "visible": true,
+                "style": {
+                  "lineDash": [
+                    2,
+                    2
+                  ],
+                  "stroke": "#E5E6EB"
+                }
+              },
+              "label": {
+                "style": {
+                  "fill": "#8F959E"
+                }
+              }
+            },
+            {
+              "orient": "left",
+              "visible": true,
+              "label": {
+                "style": {
+                  "fill": "#646A73"
+                }
+              },
+              "domainLine": {
+                "visible": false
+              }
+            }
+          ],
+          "tooltip": {
+            "visible": true
+          }
+        }
+      },
+      {
+        "tag": "markdown",
+        "content": "**结论：** 70% 来自 P0 的 LINE 崩溃，修掉它 1.8.2 的 crash-free 回到约 99.7%\n<font color=\"grey\">性能 = 09-25~10-01 完整日（滞后 3 天）· 启动 P95 / 冻结的下钻与趋势图见完整周报</font>"
+      },
+      {
+        "tag": "column_set",
+        "flex_mode": "none",
+        "horizontal_spacing": "8px",
+        "margin": "8px 0px 0px 0px",
+        "columns": [
+          {
+            "tag": "column",
+            "width": "auto",
+            "elements": [
+              {
+                "tag": "button",
+                "text": {
+                  "tag": "plain_text",
+                  "content": "完整周报"
+                },
+                "type": "primary",
+                "size": "small",
+                "behaviors": [
+                  {
+                    "type": "open_url",
+                    "default_url": "https://qjphu5vphyf4.jp.larksuite.com/docx/UPQNdbzGio2l3bxOleRjK1nOpHd"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "tag": "column",
+            "width": "auto",
+            "elements": [
+              {
+                "tag": "button",
+                "text": {
+                  "tag": "plain_text",
+                  "content": "修复清单"
+                },
+                "type": "default",
+                "size": "small",
+                "behaviors": [
+                  {
+                    "type": "open_url",
+                    "default_url": "https://qjphu5vphyf4.jp.larksuite.com/docx/UPQNdbzGio2l3bxOleRjK1nOpHd"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "tag": "column",
+            "width": "auto",
+            "elements": [
+              {
+                "tag": "button",
+                "text": {
+                  "tag": "plain_text",
+                  "content": "台账"
+                },
+                "type": "default",
+                "size": "small",
+                "behaviors": [
+                  {
+                    "type": "open_url",
+                    "default_url": "https://qjphu5vphyf4.jp.larksuite.com/docx/TtpwdhgKroMH1DxJumojTflrppz"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "tag": "markdown",
+        "content": "<font color=\"grey\">【周报定稿 W2】面板内为 markdown 表格；「完整周报」「修复清单」暂指索引页</font>"
+      }
+    ]
+  }
+}

@@ -256,7 +256,22 @@ sessions 优先 REALTIME 活表，缺失才回退批量表并在卡片上显式�
 
 ### 阈值与告警
 
-红/黄/绿阈值集中在 `crash-daily.sh` 顶部常量（`CRASH_RATE_RED` 等）；判定统一走 `traffic_light()`，红档进 `red_line()` → `ALERTS` → 卡片 header 变红，黄档只进摘要不告警。空值 / 「无法计算」不判定，避免误告警。
+红/黄/绿阈值集中在 `crash-daily.sh` 顶部常量（`CRASH_RATE_RED` 等）；判定统一走 `traffic_light()`，红档进 `red_line()` → `ALERTS`（文档摘要），黄档只进摘要不告警。空值 / 「无法计算」不判定，避免误告警。
+
+**卡片 header 颜色自 change `crash-report-attention-tiers`（2026-10-11）起由三档决定，不再由 `ALERTS` 决定**：
+有 🚨 红、只有 ⏳ 橙、都没有绿。指标灯（含慢性红档）只在健康度面板着色，⛔ 不再单独让 header 变红——
+2026-10-11 卡片 4 条 🔴 全是慢性状态（天天一样），真正要开发重修的「修了仍在」反而没出现。
+
+**三档分档**（`bin/lib/core/tier.sh`，纯函数，夹具 `bin/test/core-tier.sh` 用 10-11 生产数据作期望）：
+- 🚨：① 修了仍在 **且报告版本集内 7 天仍有事件**（⛔ fixmap 的 `new_build_events` 是修复以来累计量，`fix-release-builds.sql` 无时间上界，单用会让早已平息的 issue 长期占紧急档）；② 未修的新增 / 回归 ≥ `TIER_NEW_MIN`(2) 台；③ 未修的长期 ≥ `TIER_LONG_MIN`(5) 台；④ 判定版本崩溃率 / ANR 率红档；⑤ 性能版本退化（比上一版差 ≥ `PERF_REGRESS_PCT`(20)% 且已达黄档、两版样本过闸门）。
+- ⏳：「已修未发版 + 发版判定 ok + OPEN」——与原「代码已修但未发版」计数**同一判定**，但逐条列 id、按台数排序。
+- 👀：其余。🔕 MUTED 一律 👀（人做过的处置决定）。发版判定不可得时 ⛔ 不依据修复状态判 🚨①/⏳，理由文案 ⛔ 不说「未修复」。
+- 台数 = **报告版本集**（最新 N 版 ∪ 告警判定版本，⛔ 不含性能兜底列）内 FATAL 受影响安装，跨版本相加（上界）。
+- 阈值 2 / 5 由生产 16 轮 L1 回测定（🚨 约 1–4 条/天），见 change design「Open Questions → 决定」。
+
+**慢帧 / 冻结判灯用平台整体值**（`perf-platform-frames.sql`，3d 完整日窗，与 `slow_pct_1d` 同算法）。
+最差页仍取、仍呈现，⛔ 不着色不判灯——单页长期超标会让灯天天红（Android Splash 87.8% vs 平台 43.6%）。
+⚠️ 冻结值 ⛔ 不走 `pct()`：它格式化到 1 位小数，0.51 → 0.5 正好压在黄线上被判绿。
 
 **告警判定版本**：默认最新版；**最新版会话数低于 `SAMPLE_SESSION_MIN`(30) 时回退为该端会话量最大的版本**
 （2026-08-22 起，change `crash-alert-sample-fallback`）。上一版与主力补充列平时只着色不告警（既定事实拦不了发版）。
@@ -302,7 +317,10 @@ sessions 优先 REALTIME 活表，缺失才回退批量表并在卡片上显式�
 
 ### 摘要行（卡片顶部的 🔴 / 🟡 行）
 
-摘要行由 `red_line()` / `yellow_line()` 生成，**必须标版本、且区分「没超阈值」与「没算出来」**：
+摘要行由 `red_line()` / `yellow_line()` 生成（自 2026-10-11 起只进**文档**；卡片改为健康度面板逐格着色），**必须标版本、且区分「没超阈值」与「没算出来」**：
+
+- ⚠️ **灯按平台分判**（2026-10-11 起）：一条摘要行**只列出各自超阈值的那一端**。原写法一端红就把两端都写进同一条 🔴——
+  「🔴 慢帧最差页 iOS 1.8.2 45.1% · Android 87.8%」里 iOS 45.1% 只是黄档。下文「无值的端降级成末尾括注」随之取消：没值的端直接不出现。
 
 - **有值的端**渲染成 `iOS 1.5.4 425ms`——不标版本会被读成两端同口径，而两端最新版常常不是同一个版本号（Android 线上没有 1.5.2，序列是 `1.5.3 → 1.5.1`）。
 - **无值的端**降级成末尾括注 `（iOS 1.5.4 无数据）`，不占主位。表格里的缺数三态（样本不足 / 该版本无数据 / 表未同步）压进摘要行只剩一个「—」，看起来像故障。
@@ -325,6 +343,14 @@ sessions 优先 REALTIME 活表，缺失才回退批量表并在卡片上显式�
 CardKit v2 的 `table` 组件字段只有 `rows` / `page_size` / `row_height` / `row_max_height` / `freeze_first_column` / `header_style` / `margin`。**`header_style` 只作用于表头**（`background_style` 仅 `grey|none`），**行级与单元格级都没有背景色**。单元格是 `lark_md`，只有 `<font color=>`（文字色），没有底色语法。
 
 所以**斑马纹是文档独有能力**（DocxXML 的 `<td background-color>`），卡片对齐不了；卡片能与文档一致的只有文字颜色（同一套 `traffic_light()` 判定）。
+
+**2026-10-11 实发验证的其余组件**（change `crash-report-attention-tiers`）：
+- `column_set` 支持 `background_style` 色底（`red-50` / `orange-50` / `grey-50`，主题自适应枚举）——🚨 条目用它做色底块。
+- `button`（`behaviors:[{type:"open_url"}]`）可用——🚨 条目的「控制台」直达。
+- `collapsible_panel` 可用；⛔ **`{tag:"table"}` 不能放进折叠面板**（飞书拒发 `ErrCode 200621 ... not supported tag: table`）。
+- **markdown 块里的表格语法**（`| a | b |\n|---|---|`）渲染为表格、**链接可点**、可进折叠面板——面板内要「对齐成列 + 能点 id」就用它。
+  ⚠️ `im +messages-mget` 读回时 markdown 表格里的链接被压平成文本——读回看不到 ≠ 点不了，可点性只能在客户端点。
+- header `subtitle` / `text_tag_list` 可用；`chart` 横向条形 + `markLine` 被接受（深色模式下的参考线颜色未实测）。
 
 ### 报告结构：汇总 / 版本对照 / 明细
 
@@ -388,7 +414,12 @@ CardKit v2 的 `table` 组件字段只有 `rows` / `page_size` / `row_height` / 
   **一条都没有**（字段存在但恒空）。要用它得先确认客户端是否在用 Remote Config rollouts 并正确上报。
   ——**不要基于「字段存在」推断可用，先查有没有值。**
 
-### 卡片：单表、列 = 平台 × 版本（2026-08-22 定稿）
+### 卡片：单表、列 = 平台 × 版本（2026-08-22 定稿；⚠️ 2026-10-11 被三档 + 健康度取代）
+
+> ⚠️ **本节描述的单表版式已被 change `crash-report-attention-tiers` 取代**：卡片改为 🚨 / ⏳ / 👀 三档 + 健康度面板 + 红灯下钻，
+> `build_card_table()` / `md_table()` / `ROW_DEFS_CARD` 已删除。下文保留作为踩坑记录——其中两条教训**仍然成立**：
+> ① 「版面选择直接决定了哪些数字存在」→ 健康度面板在判定版本 ≠ 最新版时另起「最新版」行；
+> ② 文档行定义 `ROW_DEFS_DOC` 必须保持完备（新增「慢帧 / 冻结（平台整体）」两行）。
 
 卡片是**一张** CardKit v2 表：**列 = 指标 | iOS 最新 | iOS 上版 | Android 最新 | Android 上版**，
 行 = 6 项简报指标。手机端实测通过。

@@ -35,14 +35,14 @@ ISSUE_STATES_JSON='{"aaaa":"OPEN"}'
 
 echo "── 源码断言：两个渲染点都必须接上（F35）──"
 SRC="$(cat "$ROOT/bin/crash-daily.sh")"
-h_assert_contains "$SRC" '"$(life_tag "$fid")" "$(issue_state_cell "$fid")" "$ti" "$n" "$us" "$cc" "$la"' \
-  '⛔ markdown 明细表必须调用开关列'
-h_assert_contains "$SRC" '"$(life_tag "$fid")" "$(issue_state_cell "$fid")" "$ti" "$n" "$us" "$cc" "$la" "$fid"' \
-  '⛔ DocxXML 明细表必须调用开关列'
-h_assert_contains "$SRC" "'Issue,生命周期,开关,标题,事件,影响安装,集中度,最新' '1,2,3,4,5,6,7,8'" \
+h_assert_contains "$SRC" '"$(tier_cell "$fid")" "$(life_tag "$fid")" "$(issue_state_cell "$fid")" "$ti" "$n" "$us" "$cc" "$la"' \
+  '⛔ markdown 明细表必须调用开关列（与分档列）'
+h_assert_contains "$SRC" '"$(tier_cell "$fid")" "$(life_tag "$fid")" "$(issue_state_cell "$fid")" "$ti" "$n" "$us" "$cc" "$la" "$fid"' \
+  '⛔ DocxXML 明细表必须调用开关列（与分档列）'
+h_assert_contains "$SRC" "'Issue,分档,生命周期,开关,标题,事件,影响安装,集中度,最新' '1,2,3,4,5,6,7,8,9'" \
   '⛔ DocxXML 表头与列规格必须同步加列'
-h_assert_contains "$SRC" '"1:9:$(issue_url_prefix "$1")"' \
-  '⛔ 链接列规格里完整 id 的列号必须从 8 改成 9——改漏不报错，只会静默产出坏链接'
+h_assert_contains "$SRC" '"1:10:$(issue_url_prefix "$1")"' \
+  '⛔ 链接列规格里完整 id 的列号随加列移动（开关 8→9、分档 9→10）——改漏不报错，只会静默产出坏链接'
 h_assert_absent "$SRC" '| Issue | 状态 | 标题 |' \
   '⛔ 原「状态」列必须改名「生命周期」：它渲染的是 life_tag，与开关状态正交（F26 同名不同义）'
 

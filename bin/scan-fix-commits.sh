@@ -68,6 +68,14 @@ scan_repo() { # $1=仓库路径 $2=平台标签
   git -C "$repo" log --all --grep='\[crash:' --grep='[Cc]rashlytics' --since="${WINDOW} days ago" \
     --format='%H%x09%aI%x09%at%x09%ct%x09%s' 2>/dev/null | while IFS=$'\t' read -r hash date epoch cepoch subject; do
     [ -n "$hash" ] || continue
+    # ⛔ **非代码类提交不算修复**（2026-10-11 生产实证）：`d0dcb015` 的「修复提交」是
+    #    `docs(crash): 更新 d0dcb015 定向规避与验证边界`——文档里提到 issue id 就被判成「已修未发版」。
+    #    约定式提交类型为 docs / test(s) / ci / style 的跳过；同一 issue 若还有更早的代码提交，
+    #    第 3 步的「取窗口内最新一条」会自然落到它上面。
+    #    ⚠️ **chore 刻意不排除**：依赖升级类修复有时写成 chore（如「chore(deps): 升级 fragment-ktx 修复崩溃」）。
+    case "$subject" in
+      docs:*|docs\(*|docs!:*|test:*|test\(*|tests:*|tests\(*|ci:*|ci\(*|style:*|style\(*) continue ;;
+    esac
     _msg="$(git -C "$repo" show -s --format=%B "$hash" 2>/dev/null || true)"
     # ⛔ 每个 grep 都要 `|| true`：无匹配返回 1，而 set -o pipefail 下会让整条管道失败（F31）。
     {

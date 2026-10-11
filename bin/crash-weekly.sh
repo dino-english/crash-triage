@@ -148,7 +148,7 @@ mkdir -p "$OUT_DIR"
 . "$ROOT/bin/lib/query.sh" # SQL 占位符替换唯一入口（q_render），漏传占位符当场失败
 # 核心层（纯函数），与 L1 共用同一份实现——此前 _fmt / _until_epoch / win_* / stale_days
 # 在两个脚本里各存了一份，其中 stale_days 逐字节相同。
-for _c in format verdict version cache fixrelease; do
+for _c in format verdict version cache fixrelease tier; do
   # shellcheck disable=SC1090
   . "$ROOT/bin/lib/core/${_c}.sh" || { echo "❌ 核心层缺失：bin/lib/core/${_c}.sh" >&2; exit 1; }
 done
@@ -613,12 +613,16 @@ if command -v bq >/dev/null 2>&1 && bqq csv 'SELECT 1' >/dev/null 2>&1; then
   #    ⛔ 不用性能段那个「最后一个完整日」——sessions 是活表，没有残日问题。
   main_versions() { # $1=sessions表 → 「版本,会话,设备,理由」最多 3 行
     local _all _top2 _d1v _row
+    # ⚠️ **只取前 3 列**（版本,会话,设备）：latest-versions.sql 自 2026-09-17 起多出 devs_perf_on / max_build_tail3
+    #    两列（内部构建识别用），本函数在行尾拼「理由」、调用方按 `read -r ver sess dev why` 读——
+    #    多出的两列连同理由一起被吸进 why，周报「入选」列渲染成「1493,,窗口主力」（2026-10-05 生产实证）。
+    #    ⛔ 走 csv2tsv 再取列，不裸 cut -d,（CLAUDE.md：bq CSV 一律走 csv2tsv）。
     _all="$(bqq csv "$(q_render latest-versions.sql TABLE="$1" DAYS="$WEEK_DAYS" MIN_SESSIONS="$MIN_SESSIONS")" \
-      | tail -n +2 | sort -t, -k2,2 -nr || true)"
+      | tail -n +2 | csv2tsv | awk -F'\t' 'NF>=3{print $1","$2","$3}' | sort -t, -k2,2 -nr || true)"
     [ -n "$_all" ] || return 0
     _top2="$(printf '%s\n' "$_all" | head -2)"
     _d1v="$(bqq csv "$(q_render latest-versions.sql TABLE="$1" DAYS=1 MIN_SESSIONS="$MIN_SESSIONS")" \
-      | tail -n +2 | sort -t, -k2,2 -nr | head -1 | cut -d, -f1 || true)"
+      | tail -n +2 | csv2tsv | sort -t$'\t' -k2,2 -nr | head -1 | cut -f1 || true)"
     printf '%s\n' "$_top2" | while IFS= read -r _row; do
       [ -n "$_row" ] || continue
       if [ -n "$_d1v" ] && [ "${_row%%,*}" = "$_d1v" ]; then printf '%s,窗口+当日\n' "$_row"
@@ -805,6 +809,9 @@ AND_PERF_TBL="$PROJECT.firebase_performance.com_prime_dino_english_ANDROID"
 PERF_ROWS=""    # TSV：平台/版本/启动P50/启动P95/慢帧最差页/慢帧率/冻结率/接口错误率（列以制表符分隔）
 # 周环比基准（7.4）：按 (平台,版本) 存最近几轮的性能快照，供 WoW 对比；无基准则显式标明而非显示零变化。
 PERF_HISTORY="$STATE/perf-history.jsonl"
+# 卡片 P95 趋势图的样本闸门（Q4）：与日报 PERF_P95_SAMPLE_MIN 同一个环境变量、同一缺省值
+# （P95 在 n<20 时退化成最大值）。
+WEEK_P95_SAMPLE_MIN="${CRASH_REPORT_PERF_P95_SAMPLE_MIN:-20}"
 PERF_MISSING=""   # TSV「平台 版本 kind 日期」：kind=stale_fetch(本轮未取到) / never(尚无数据)
 # 第 3 态细分（change crash-data-completeness C 组，与 L1 同一判据）。
 # ⛔ 数据源是 **perf-history.jsonl**（性能侧 p50/p95），⚠️ tasks 3.6 原文写的
@@ -847,6 +854,8 @@ if [ "$ADOPT_OK" = "1" ]; then
     # set -e 直接杀掉整跑（同源问题在 L1 是误报告警，见 crash-daily.sh collect_window）。
     p50="$(printf '%s\n' "$traces" | grep '^_app_start,' | cut -d, -f3 | head -1 || true)"
     p95="$(printf '%s\n' "$traces" | grep '^_app_start,' | cut -d, -f4 | head -1 || true)"
+    # 样本数（perf-traces.sql 第 2 列）：写进历史，供卡片 P95 趋势图做样本闸门（Q4）
+    p_n="$(printf '%s\n' "$traces" | grep '^_app_start,' | cut -d, -f2 | head -1 || true)"
     wscreen="$(printf '%s\n' "$screens" | head -1 | cut -d, -f1)"
     wslow="$(printf '%s\n' "$screens" | head -1 | cut -d, -f3)"
     frozen="$(printf '%s\n' "$screens" | head -1 | cut -d, -f4)"
@@ -902,9 +911,10 @@ if [ "$ADOPT_OK" = "1" ]; then
       #   legacy       —— 锚在跑批时刻的 7 天滚动窗，首尾两天都残缺
       #   complete_day —— 完整日闭区间 [LCD-6, LCD]
       # ⛔ 不回填不重算旧行；缺该字段的旧行一律读作 legacy。
+      # ⚠️ n 是 change crash-report-attention-tiers 起新增的字段；旧行没有它，读取侧按「无 n」单独处理（Q4）
       jq -nc --arg p "$pname" --arg v "$ver" --arg d "$DAY" --arg p50 "${p50:-}" --arg p95 "${p95:-}" \
-        --arg wm "$PERF_WINDOW_MODE" \
-        '{platform:$p, version:$v, day:$d, window_mode:$wm, p50:($p50|tonumber? // null), p95:($p95|tonumber? // null)}' >> "$PERF_HISTORY"
+        --arg wm "$PERF_WINDOW_MODE" --arg n "${p_n:-}" \
+        '{platform:$p, version:$v, day:$d, window_mode:$wm, p50:($p50|tonumber? // null), p95:($p95|tonumber? // null), n:($n|tonumber? // null)}' >> "$PERF_HISTORY"
     fi
   }
   PERF_OK=1
@@ -1049,7 +1059,9 @@ _fix_rows() { # $1=平台key $2=是否带链接(1/0)
              | [.key, .value.platform, .value.status, .value.commit,
                 # ⛔ 不得输出空字段：IFS=制表符会合并连续空字段、让后续字段左移（同 _chg_rows）
                 (.value.release_check // "ok"), ((.value.old_build_events // 0) | tostring),
-                .value.subject] | @tsv' \
+                # 只取 subject 首行、60 字：曾把整段提交正文拼进卡片（2026-10-05 生产卡片实证）。
+                # ⚠️ 在 jq 里截（按码点），⛔ 不用 bash ${s:0:60}——cron 下 locale 可能是 C，会按字节切坏 UTF-8
+                ((.value.subject // "") | split("\n")[0] | .[0:60])] | @tsv' \
            2>/dev/null || true)
   # ⛔ 同 _chg_rows：必须显式 return 0。
   return 0
@@ -1410,19 +1422,6 @@ perf_md() {
   fi
 }
 
-MSG="$(cat <<MSG_END
-**📊 崩溃周报 · ${DAY} ${TS_HM}${WEEK_TAG:+ $WEEK_TAG}**
-
-$VERSION_NOTES_MD
-$CHANGES_MD
-
-**🚀 主力版本（近 ${WEEK_DAYS} 天会话量 top2 ∪ 当日 top1）**
-
-$(adopt_md)
-> $NOTE_MD
-MSG_END
-)"
-
 # 结构化卡片（CardKit v2，与日报同款；agent 原样投递，仅回填 __REPORT_URL__）
 # ⚠️ 卡片只给**补入那一版**打角标（`·当日`）：窗口 top 通常同时也是当日 top，全都打上等于
 #    稳态每行都多三个字，白占列宽；而需要解释的恰恰是那个「窗口累计落榜、当日却是大头」的版本。
@@ -1434,91 +1433,291 @@ ADOPT_JSON="$(printf '%s' "$ADOPT_ROWS" | while IFS=$'\t' read -r _p _v _s _d _c
   done \
   | jq -Rsc 'split("\n") | map(select(length>0) | split("\t")
       | {plat:.[0], ver:.[1], sess:.[2], dev:.[3], crash:.[4], rate:.[5], cfree:.[6], anr:.[7], nf:.[8]})')"
-# 只有真出现变化才红；基线与平稳周都是蓝——红色要留给「需要看一眼」的场合
-HEADER_COLOR="blue"; [ "$WEEK_STATE" = changed ] && HEADER_COLOR="red"
-# ── 卡片图表（change crash-card-charts）────────────────────────────────────
-# 飞书 Card 2.0 原生 chart 组件（VChart spec，纯 JSON）。⚠️ 单卡建议 ≤5 图；
-# ⛔ 移动端不支持纹理/锥形渐变等属性，只用最基础的 bar/line。
-# ⛔ **数据不够就不画**：weekly-metrics 本轮才建立（实测 4 行全是今天），
-#    画出来是一条单点"趋势线"——比不画更误导（镜头 5：变化必须有基准）。
-CHART_EVENTS='[]'; CHART_SCREEN='[]'; CHART_P95='[]'
+# ── 三档分档（change crash-report-attention-tiers，design D2）──────────────────
+# 🚨 取自分析层产物 priorities.json 的 P0/P1（经脚本校验）；契约失效时回落为日报同一套确定性规则。
+# ⛔ priorities.json **不进分析层成功判据**（fetch-snapshot.sh 的产物齐全判据与本文件的 report.md 判据保持两端一致）：
+#    缺它只降级、不让整轮失败。⚠️ prompt 没有语法检查、模型未必照办——唯一可靠的检查是这里的产物校验。
+PRIO_FILE="$OUT_DIR/analysis/priorities.json"
+# ⚠️ 两份快照**各自读**：合在一个 jq 调用里时缺任一份整体失败，id 集合变空——模型给的 P0/P1 会被
+#    当成「快照外编造」全部剔除，卡片却显示「本周无必修」（把取数故障渲染成好消息）。
+_wk_ids="$( { jq -c '[(.ios // [])[]?.id, (.android // [])[]?.id]' "$SNAP_NEW" 2>/dev/null || true
+              jq -c '[(.ios // [])[]?.id, (.android // [])[]?.id]' "$OUT_DIR/analysis/snapshot.json" 2>/dev/null || true; } \
+  | jq -cs 'add // [] | map(select(. != null)) | unique' 2>/dev/null || echo '[]')"
+WEEK_TIER_SRC="rule"; WEEK_TIER_WHY=""
+WEEK_URGENT='[]'; WEEK_WATCH='[]'
+_wk_title_of() { # $1=平台键 $2=完整 id → 标题（快照里没有则空）
+  jq -r --arg k "$1" --arg i "$2" '(.[$k] // [])[]? | select(.id == $i) | .title // empty' "$SNAP_NEW" 2>/dev/null | head -1 || true
+}
+_wk_users_of() { # $1=平台键 $2=完整 id → 受影响用户（快照里没有则 0）
+  jq -r --arg k "$1" --arg i "$2" '[(.[$k] // [])[]? | select(.id == $i) | .users // 0][0] // 0' "$SNAP_NEW" 2>/dev/null || echo 0
+}
+if [ "$ANALYSIS_OK" = "1" ]; then
+  PRIO_JSON="$(priorities_validate "$(cat "$PRIO_FILE" 2>/dev/null || true)" "$_wk_ids")"
+  if [ "$(printf '%s' "$PRIO_JSON" | jq -r '.ok')" = "true" ] \
+     && { [ "$(printf '%s' "$PRIO_JSON" | jq '.items | length')" -gt 0 ] || [ "$(printf '%s' "$_wk_ids" | jq 'length')" = 0 ]; }; then
+    WEEK_TIER_SRC="model"
+    _pd="$(printf '%s' "$PRIO_JSON" | jq -r '.dropped')"
+    [ "${_pd:-0}" -gt 0 ] 2>/dev/null && WEEK_TIER_WHY="已剔除 ${_pd} 条不合规或快照外的条目"
+  else
+    WEEK_TIER_WHY="$(printf '%s' "$PRIO_JSON" | jq -r 'if .ok then "校验后为空而本周快照非空" else .reason end')"
+  fi
+else
+  WEEK_TIER_WHY="本周无深度分析"
+fi
+if [ "$WEEK_TIER_SRC" = "model" ]; then
+  # 补标题 / 台数 / 链接（模型只给 id + 优先级 + 一句话，标题与台数以数据层快照为准，⛔ 不信模型自报的数）
+  _wk_items='[]'
+  while IFS=$'\t' read -r _wp _wi _wpr _wa _ww; do
+    [ -n "$_wi" ] || continue
+    _wk_items="$(printf '%s' "$_wk_items" | jq -c --arg p "$_wp" --arg i "$_wi" --arg pr "$_wpr" --arg a "$_wa" --arg w "$_ww" \
+      --arg t "$(_wk_title_of "$_wp" "$_wi")" --arg u "$(_wk_users_of "$_wp" "$_wi")" --arg url "$(issue_url "$_wp" "$_wi")" \
+      '. + [{plat:$p, id:$i, priority:$pr, action:$a, why:$w, title:$t, users:($u|tonumber? // 0), url:$url}]')"
+  done < <(printf '%s' "$PRIO_JSON" | jq -r '.items[] | [.plat, .id, .priority, .action, .why] | @tsv' 2>/dev/null || true)
+  WEEK_URGENT="$(printf '%s' "$_wk_items" | jq -c '[.[] | select(.priority == "P0" or .priority == "P1")]')"
+  WEEK_WATCH="$(printf '%s' "$_wk_items" | jq -c '[.[] | select(.priority == "P2")]')"
+else
+  # 回落：日报同一套 tier_classify（周口径数据）。生命周期取本周变化检测的桶。
+  _wk_in="$(jq -c --argjson d "$DIFF" '
+      def life($k; $i): if ([$d[$k].new[]?.id] | index($i)) then "🆕新增"
+                        elif ([$d[$k].regressed[]?.id] | index($i)) then "🔁回归"
+                        elif ([$d[$k].spiked[]?.id] | index($i)) then "📈暴涨" else "长期" end;
+      [ ("ios", "android") as $k | (.[$k] // [])[]?
+        | {plat:$k, id, title:(.title // ""), users:(.users // 0),
+           by_ver:((.versions // []) | map("\(.version) \(.n) 次") | join(" · ")), life:life($k; .id)} ]' "$SNAP_NEW" 2>/dev/null || echo '[]')"
+  _wk_fm="$(jq -c . "$FIXMAP_FILE" 2>/dev/null || echo '{}')"
+  _wk_t="$(tier_classify "$_wk_in" "$_wk_fm" "$ISSUE_STATES_JSON" "$TIER_NEW_MIN" "$TIER_LONG_MIN" 2>/dev/null || echo '[]')"
+  _wk_urls='{}'
+  while IFS=$'\t' read -r _up _ui; do
+    [ -n "$_ui" ] || continue
+    _wk_urls="$(printf '%s' "$_wk_urls" | jq -c --arg i "$_ui" --arg u "$(issue_url "$_up" "$_ui")" '. + {($i): $u}')"
+  done < <(printf '%s' "$_wk_t" | jq -r '.[] | [.plat, .id] | @tsv' 2>/dev/null || true)
+  # ⏳ 在周报里归「修复进度」段，不进 🚨 / 👀
+  WEEK_URGENT="$(printf '%s' "$_wk_t" | jq -c --argjson u "$_wk_urls" '[.[] | select(.tier == "urgent") | . + {priority:"", action:"", url:($u[.id] // "")}]')"
+  WEEK_WATCH="$(printf '%s' "$_wk_t" | jq -c --argjson u "$_wk_urls" '[.[] | select(.tier == "watch") | . + {priority:"", action:"", url:($u[.id] // "")}]')"
+fi
+WEEK_N_URGENT="$(printf '%s' "$WEEK_URGENT" | jq 'length')"; WEEK_N_WATCH="$(printf '%s' "$WEEK_WATCH" | jq 'length')"
+echo "  三档：🚨 ${WEEK_N_URGENT}（来源 ${WEEK_TIER_SRC}${WEEK_TIER_WHY:+ · $WEEK_TIER_WHY}）· 👀 ${WEEK_N_WATCH}"
+
+# 🔧 修复进度：fixmap 四态 + 开关态。状态 → 文案只走 fix_mark（core/fixrelease.sh，全仓唯一定义）。
+FIX_PROGRESS='[]'
+if [ -s "$FIXMAP_FILE" ]; then
+  while IFS=$'\t' read -r _fi _fp _fs _fc _frc _fo _fsub; do
+    [ -n "$_fi" ] || continue
+    _fst="$(printf '%s' "$ISSUE_STATES_JSON" | jq -r --arg k "$_fi" '.[$k] // ""' 2>/dev/null || true)"
+    FIX_PROGRESS="$(printf '%s' "$FIX_PROGRESS" | jq -c --arg i "$_fi" --arg p "$_fp" --arg s "$_fs" --arg st "$_fst" \
+      --arg m "$(fix_mark "$_fs" "$_frc" "$_fo" "$_fst")" --arg c "$_fc" --arg sub "$_fsub" --arg url "$(issue_url "$_fp" "$_fi")" \
+      '. + [{id:$i, plat:$p, status:$s, state:$st, mark:$m, commit:$c, subject:$sub, url:$url}]')"
+  done < <(jq -r '(.mapped // {}) | to_entries[]
+      | [.key, (.value.platform // ""), (.value.status // ""), (.value.commit // "-"),
+         (.value.release_check // "ok"), ((.value.old_build_events // 0) | tostring),
+         ((.value.subject // "") | split("\n")[0] | .[0:60])] | @tsv' "$FIXMAP_FILE" 2>/dev/null || true)
+fi
+WEEK_CHG_COUNTS="$(printf '%s' "$DIFF" | jq -r '[("ios","android") as $k | [(.[$k].new // [] | length), (.[$k].regressed // [] | length), (.[$k].spiked // [] | length), (.[$k].resolved // [] | length)]]
+  | transpose | map(add) | "🆕 新增 **\(.[0])**　🔁 回归 **\(.[1])**　📈 暴涨 **\(.[2])**　✅ 消失 **\(.[3])**"' 2>/dev/null || echo "")"
+# 本周变化明细表（卡片面板用）：与「修复进度」面板同一种载体——markdown 表格（用户 2026-10-11：面板里的表要统一）。
+# ⛔ 文档与群消息仍用 CHANGES_MD 列表（文档一节、三个消费点的约定不动），只有卡片面板换成表。
+# 修复列取 FIX_PROGRESS 里同一 issue 的 mark（fix_mark 唯一定义），没有修复映射的写「—」。
+_chg_urls='{}'
+while IFS=$'\t' read -r _ck _ci; do
+  [ -n "$_ci" ] || continue
+  _chg_urls="$(printf '%s' "$_chg_urls" | jq -c --arg i "$_ci" --arg u "$(issue_url "$_ck" "$_ci")" '. + {($i): $u}')"
+done < <(printf '%s' "$DIFF" | jq -r '("ios","android") as $k | [.[$k].new[]?, .[$k].regressed[]?, .[$k].spiked[]?, .[$k].resolved[]?] | .[] | [$k, .id] | @tsv' 2>/dev/null || true)
+WEEK_CHG_TABLE="$(jq -rn --argjson d "$DIFF" --argjson fx "$FIX_PROGRESS" --argjson u "$_chg_urls" '
+  [ ("ios", "android") as $k
+    | (["new", "🆕 新增"], ["regressed", "🔁 回归"], ["spiked", "📈 暴涨"], ["resolved", "✅ 消失"]) as [$b, $lab]
+    | ($d[$k][$b] // [])[]
+    | {k:$k, lab:$lab, id, title:(.title // ""), ev:(if $b == "resolved" then "—" else ((.events // "—") | tostring) end)} ] as $rows
+  | if ($rows | length) == 0 then "" else
+      "| 平台 | 变化 | Issue | 标题 | 事件 | 修复 |\n|---|---|---|---|---|---|\n"
+      + ([ $rows[] | . as $r
+           | "| \(if $r.k == "ios" then "iOS" else "Android" end) | \($r.lab) | "
+             + (if ($u[$r.id] // "") != "" then "[\($r.id[0:8])](\($u[$r.id]))" else $r.id[0:8] end)
+             + " | \($r.title | gsub("\\|"; "/") | gsub("<"; "‹") | gsub(">"; "›") | if length > 36 then .[0:35] + "…" else . end)"
+             + " | \($r.ev) | \(([$fx[] | select(.id == $r.id) | .mark][0]) // "—") |" ] | join("\n"))
+    end' 2>/dev/null || echo "")"
+
+# 必修项带上修复状态（用户 2026-10-11 采纳）：模型可能把「已修未发版」的 issue 排成 P0——那条该催发版，
+# 不该再派人去修。状态取 FIX_PROGRESS 的 mark（fix_mark 唯一定义），⛔ 不在这里另判。
+# ⚠️ 只给模型路径加：规则路径的理由本身就带修复状态（「修了仍在：修复 … 已随 … 发版」），再加一行是重复。
+if [ "$WEEK_TIER_SRC" = model ]; then
+  WEEK_URGENT="$(printf '%s' "$WEEK_URGENT" | jq -c --argjson fx "$FIX_PROGRESS" \
+    'map(. as $x | . + {fixmark:(([$fx[] | select(.id == $x.id) | .mark][0]) // "")})' 2>/dev/null || printf '%s' "$WEEK_URGENT")"
+fi
+# 卡片：三档 + 修复进度 + 本周变化 + 主力版本（change crash-report-attention-tiers，样稿 W2）
+WEEK_N_RELEASE_BAD="$(printf '%s' "$FIX_PROGRESS" | jq '[.[] | select(.status == "修了仍在" and .state != "CLOSED")] | length')"
+if [ "${WEEK_N_URGENT:-0}" -gt 0 ]; then HEADER_COLOR="red"; WEEK_VERDICT="本周必修 ${WEEK_N_URGENT} 项"
+elif [ "$WEEK_STATE" = changed ]; then HEADER_COLOR="orange"; WEEK_VERDICT="本周无必修"
+else HEADER_COLOR="green"; WEEK_VERDICT="本周无必修"; fi
+WEEK_SRC_NOTE="模型分析 · 未经人工复核，落地前须验证"
+[ "$WEEK_TIER_SRC" = rule ] && WEEK_SRC_NOTE="⚠️ 分析层优先级不可用（${WEEK_TIER_WHY}）——以下为规则判定"
+[ "$WEEK_TIER_SRC" = model ] && [ -n "$WEEK_TIER_WHY" ] && WEEK_SRC_NOTE="${WEEK_SRC_NOTE}（${WEEK_TIER_WHY}）"
+ADOPT_WOW_PLAIN="$(printf '%b' "${ADOPT_WOW_MD:-}" | sed 's/^> //' | grep -v '^$' || true)"
+
+# ── 卡片图表（change crash-card-charts → crash-report-attention-tiers 收敛）──────────
+# 卡片只留两类图：① 红灯下钻（主力版本崩溃率红档 → 按 issue 拆）；② 启动 P95 趋势（只画主力版本 + 样本闸门，Q4）。
+# 「三类事件构成」「崩溃页面 TOP5」两张图移出卡片：前者的数字就在主力版本表里，后者在文档「三、影响面分布」——
+# 卡片只放要点（用户 2026-10-11：卡片只留要点，文档保留明细）。
+CHART_DRILL='[]'; DRILL_NOTE=""
 if [ -n "$ADOPT_ROWS" ]; then
-  # ① 三类事件构成：平台+版本 × FATAL/ANR/非致命。⚠️ iOS 无 ANR 不produce 该系列（不填 0）
-  CHART_EVENTS="$(printf '%s' "$ADOPT_ROWS" | awk -F'\t' 'NF>=9{
-      gsub(/[^0-9]/,"",$5); a=$8; gsub(/ .*/,"",a); gsub(/[^0-9]/,"",a); n=$9; gsub(/[^0-9]/,"",n)
-      k=$1" "$2
-      printf "%s\t崩溃(FATAL)\t%s\n", k, ($5==""?0:$5)
-      if (a != "") printf "%s\tANR\t%s\n", k, a
-      printf "%s\t非致命\t%s\n", k, (n==""?0:n) }' \
-    | jq -Rsc 'split("\n")|map(select(length>0)|split("\t")|{x:.[0],type:.[1],y:(.[2]|tonumber? // 0)})')"
+  while IFS=$'\t' read -r _p _v _s _d _c _r _f _a _n; do
+    [ -n "$_p" ] || continue
+    _rv="$(printf '%s' "$_r" | tr -d '%')"
+    [ "$(traffic_light "$_rv" "$CRASH_RATE_RED" "$CRASH_RATE_YELLOW")" = red ] || continue
+    _k="$([ "$_p" = iOS ] && echo ios || echo android)"
+    CHART_DRILL="$(jq -c --arg k "$_k" --arg v "$_v" '[(.[$k] // [])[]?
+        | {id, title:(.title // ""), n:([(.versions // [])[]? | select(.version == $v) | .n][0] // 0)}
+        | select(.n > 0)] | sort_by(-.n) | .[0:5]
+        | map({k:(.id[0:8] + " " + (.title | .[0:20])), v:.n})' "$SNAP_NEW" 2>/dev/null || echo '[]')"
+    if [ "$(printf '%s' "$CHART_DRILL" | jq 'length')" -gt 0 ]; then
+      DRILL_NOTE="$(printf '%s' "$CHART_DRILL" | jq -r --arg p "$_p" --arg v "$_v" --arg c "$_c" \
+        '"**结论：** \($c) 次崩溃里 \(.[0].v) 次（\((.[0].v / ($c|tonumber? // 1) * 100) | floor)%）来自 " + (.[0].k | split(" ")[0])' 2>/dev/null || true)"
+      DRILL_TITLE="🔍 ${_p} ${_v} 崩溃率 ${_r} 为什么红 · 按 issue"
+      break   # 卡片下钻图上限：周报只画最差的一个版本
+    fi
+  done <<< "$ADOPT_ROWS"
 fi
-# ② 崩溃页面 TOP5（横向条形）——把最可行动的维度放进卡片
-if ls "$OUT_DIR"/dim-screen-*.csv >/dev/null 2>&1; then
-  CHART_SCREEN="$(for f in "$OUT_DIR"/dim-screen-*.csv; do
-      [ -s "$f" ] || continue
-      b="$(basename "$f" .csv)"; b="${b#dim-screen-}"
-      csv2tsv < "$f" | awk -F'\t' -v k="${b%%-*} ${b#*-}" 'NF>=4{printf "%s · %s\t%s\n", k, $1, $2}'
-    done | sort -t"$(printf '\t')" -k2 -rn | head -5 \
-    | jq -Rsc 'split("\n")|map(select(length>0)|split("\t")|{x:.[0],y:(.[1]|tonumber? // 0)})' || echo '[]')"
-fi
-# ③ 启动 P95 趋势（折线，按天取该平台各版本最大值——代表最差体验）
+# ② 启动 P95 趋势：只画本周主力版本；有样本数 n 的行按 P95 样本闸门过滤，旧行（无 n）去掉该版本首次出现那一周
+#    ——首周样本最少，2026-09-28 Android 1.8.1 首周 P95 7784ms 正是这种点，按「每日各版本最大值」会被画成体验暴跌。
+CHART_P95='[]'
 if [ -s "$PERF_HISTORY" ]; then
-  CHART_P95="$(jq -sc '[.[]|select(.p95)]|group_by(.platform+.day)
-      |map({x:.[0].day, type:.[0].platform, y:([.[].p95]|max)})|sort_by(.x)' "$PERF_HISTORY" 2>/dev/null || echo '[]')"
+  _main="$(printf 'iOS\t%s\n' $IOS_TOP2_VERS; printf 'Android\t%s\n' $AND_TOP2_VERS)"
+  _main_j="$(printf '%s\n' "$_main" | jq -Rsc 'split("\n") | map(select(length>0) | split("\t") | {p:.[0], v:.[1]})')"
+  CHART_P95="$(jq -sc --argjson m "$_main_j" --argjson gate "$WEEK_P95_SAMPLE_MIN" '
+      [.[] | select(.p95 != null)] as $all
+      | [ $all[] | . as $r | select([$m[] | select(.p == $r.platform and .v == $r.version)] | length > 0) ]
+      | group_by(.platform + " " + .version)
+      | map( (map(.day) | min) as $first
+             | .[] | select(if .n != null then .n >= $gate else .day != $first end) )
+      | map({x:.day, type:(.platform + " " + .version), y:.p95}) | sort_by(.x)' "$PERF_HISTORY" 2>/dev/null || echo '[]')"
   # ⛔ 少于 2 个日期不画折线：单点连不成趋势
   [ "$(printf '%s' "$CHART_P95" | jq '[.[].x]|unique|length' 2>/dev/null || echo 0)" -ge 2 ] || CHART_P95='[]'
 fi
 
 CARD_JSON="$(jq -n \
-  --arg hc "$HEADER_COLOR" --arg ht "📊 崩溃周报 · ${DAY} ${TS_HM}${WEEK_TAG:+ $WEEK_TAG}" \
-  --arg ch "$CHANGES_MD" --arg vn "$VERSION_NOTES_MD" --arg nm "$NOTE_MD" \
-  --argjson rows "${ADOPT_JSON:-[]}" \
-  --argjson chev "${CHART_EVENTS:-[]}" --argjson chsc "${CHART_SCREEN:-[]}" --argjson chp95 "${CHART_P95:-[]}" \
-  '{schema:"2.0",
-    config:{width_mode:"fill"},
-    header:{template:$hc,title:{tag:"plain_text",content:$ht}},
-    body:{elements:(
-      (if $vn != "" then [{tag:"markdown",content:$vn}] else [] end)
-      + [
-      {tag:"markdown",content:"<font color=\u0027red\u0027>**🔁 本周变化**</font>"},{tag:"hr"},
-      {tag:"markdown",content:$ch},
-      {tag:"markdown",content:"<font color=\u0027green\u0027>**🚀 主力版本**</font>"},{tag:"hr"}]
-      + (if ($rows | length) > 0 then [
-          {tag:"table",page_size:10,row_height:"low",
-           header_style:{text_align:"left",text_size:"normal",background_style:"grey",text_color:"default",bold:true,lines:1},
-           columns:[{name:"plat",display_name:"平台",data_type:"text",width:"auto",horizontal_align:"left"},
-                    {name:"ver",display_name:"版本",data_type:"text",width:"auto",horizontal_align:"left"},
-                    {name:"sess",display_name:"会话",data_type:"text",width:"auto",horizontal_align:"left"},
-                    {name:"dev",display_name:"设备",data_type:"text",width:"auto",horizontal_align:"left"},
-                    {name:"crash",display_name:"崩溃",data_type:"text",width:"auto",horizontal_align:"left"},
-                    {name:"rate",display_name:"崩溃率",data_type:"lark_md",width:"auto",horizontal_align:"left"},
-                    {name:"cfree",display_name:"Crash-free",data_type:"text",width:"auto",horizontal_align:"left"},
-                    {name:"anr",display_name:"ANR",data_type:"text",width:"auto",horizontal_align:"left"},
-                    {name:"nf",display_name:"非致命",data_type:"text",width:"auto",horizontal_align:"left"}],
-           rows:$rows}]
-         else [{tag:"markdown",content:"（本次未取到放量数据）"}] end)
-      + (if ($chev | length) > 0 then [
-          {tag:"markdown",content:"<font color=\u0027grey\u0027>**📊 三类事件构成**（iOS 无 ANR 系列，⛔ 不是 0）</font>"},
-          {tag:"chart", color_theme:"rainbow",
-           chart_spec:{type:"bar", data:{values:$chev}, xField:"x", yField:"y", seriesField:"type",
-                       stack:true, legends:{visible:true, position:"bottom"},
-                       title:{text:"三类事件（近 7 天，主力版本）"}}}]
-         else [] end)
-      + (if ($chsc | length) > 0 then [
-          {tag:"markdown",content:"<font color=\u0027grey\u0027>**🎯 崩溃页面 TOP5**（绝对数，⛔ 无会话分母故不给率）</font>"},
-          {tag:"chart", color_theme:"brand",
-           chart_spec:{type:"bar", direction:"horizontal", data:{values:$chsc}, xField:"y", yField:"x",
-                       title:{text:"崩溃最多的页面（Android=FATAL+ANR · iOS=NON_FATAL，口径不同不可并读）"}}}]
-         else [] end)
-      + (if ($chp95 | length) > 0 then [
-          {tag:"markdown",content:"<font color=\u0027grey\u0027>**🚀 启动 P95 趋势**（每日各版本最大值＝最差体验）</font>"},
-          {tag:"chart", color_theme:"complementary",
-           chart_spec:{type:"line", data:{values:$chp95}, xField:"x", yField:"y", seriesField:"type",
-                       legends:{visible:true, position:"bottom"},
-                       title:{text:"启动 P95（ms，越小越好）"}}}]
-         else [] end)
-      + [{tag:"div",text:{tag:"plain_text",content:$nm,text_size:"notation",text_color:"grey"}},
-         {tag:"markdown",content:"📄 [完整报告](__REPORT_URL__) · 📁 [全部报告](__FOLDER_URL__)"}])}}')"
+  --arg hc "$HEADER_COLOR" --arg ht "📊 崩溃周报 · ${DAY} ${TS_HM} · ${WEEK_VERDICT}" \
+  --arg hs "主力版本 · 近 ${WEEK_DAYS} 天${WEEK_TAG:+ $WEEK_TAG}" \
+  --argjson nu "${WEEK_N_URGENT:-0}" --argjson nbad "${WEEK_N_RELEASE_BAD:-0}" --argjson nw "${WEEK_N_WATCH:-0}" \
+  --argjson urg "$WEEK_URGENT" --argjson wat "$WEEK_WATCH" --argjson fix "$FIX_PROGRESS" \
+  --arg srcn "$WEEK_SRC_NOTE" --arg cc "$WEEK_CHG_COUNTS" --arg ch "$WEEK_CHG_TABLE" --arg vn "$VERSION_NOTES_MD" \
+  --arg wow "$ADOPT_WOW_PLAIN" --arg nm "$NOTE_MD" \
+  --argjson rows "${ADOPT_JSON:-[]}" --argjson chd "$CHART_DRILL" --arg dt "${DRILL_TITLE:-}" --arg dn "$DRILL_NOTE" \
+  --argjson chp95 "${CHART_P95:-[]}" '
+  def g($s): "<font color=\u0027grey\u0027>" + $s + "</font>";
+  def pn: if .plat == "ios" then "iOS" else "Android" end;
+  def lk: if (.url // "") != "" then "[\(.id[0:8])](\(.url))" else .id[0:8] end;
+  def btn($u): {tag:"button", text:{tag:"plain_text", content:"控制台"}, type:"default", size:"small",
+                behaviors:[{type:"open_url", default_url:$u}]};
+  def block($bg; $md; $u):
+    {tag:"column_set", flex_mode:"none", background_style:$bg, horizontal_spacing:"8px", margin:"4px 0px 4px 0px",
+     columns:([{tag:"column", width:"weighted", weight:5, vertical_align:"center", padding:"8px 8px 8px 8px",
+                elements:[{tag:"markdown", content:$md}]}]
+              + (if $u != "" then [{tag:"column", width:"auto", vertical_align:"center", padding:"8px 8px 8px 0px",
+                                    elements:[btn($u)]}] else [] end))};
+  def panel($title; $md):
+    {tag:"collapsible_panel", expanded:false, margin:"4px 0px 0px 0px",
+     header:{title:{tag:"markdown", content:$title}, vertical_align:"center",
+             icon:{tag:"standard_icon", token:"down-small-ccm_outlined", size:"16px 16px"},
+             icon_position:"right", icon_expanded_angle:-180},
+     border:{color:"grey", corner_radius:"5px"}, padding:"6px 8px 6px 8px",
+     elements:[{tag:"markdown", content:$md}]};
+  # ⚠️ 尖括号换成 ‹›：`<init>` 被截断成 `<i` 后会被卡片 markdown 当标签吞掉（与日报同一处理）
+  def ttl: (if (.title // "") == "" then "（标题未取到）" else (.title | gsub("<"; "‹") | gsub(">"; "›") | if length > 48 then .[0:47] + "…" else . end) end);
+  def ptag: if (.priority // "") != "" then "<text_tag color=\u0027" + (if .priority == "P0" then "red" else "orange" end) + "\u0027>\(.priority)</text_tag> "
+            else "<text_tag color=\u0027red\u0027>规则判定</text_tag> " end;
+  [$fix[] | select(.status == "修了仍在" and .state != "CLOSED")] as $bad
+  | [$fix[] | select(.status == "已修未发版" and .state != "CLOSED")] as $pend
+  | [$fix[] | select(.status == "已发版待验" and .state != "CLOSED")] as $wait
+  | [$fix[] | select(.state == "CLOSED")] as $closed
+  | {schema:"2.0", config:{width_mode:"fill"},
+     header:{template:$hc, title:{tag:"plain_text", content:$ht}, subtitle:{tag:"plain_text", content:$hs},
+             text_tag_list:[
+               {tag:"text_tag", text:{tag:"plain_text", content:"🚨 必修 \($nu)"}, color:"red"},
+               {tag:"text_tag", text:{tag:"plain_text", content:"⚠️ 修了仍在 \($nbad)"}, color:"orange"},
+               {tag:"text_tag", text:{tag:"plain_text", content:"👀 观察 \($nw)"}, color:"neutral"}]},
+     body:{elements:(
+       (if $vn != "" then [{tag:"markdown", content:$vn}] else [] end)
+       + [{tag:"markdown", content:("**🚨 本周必修**　" + g($srcn))}]
+       + (if ($urg | length) == 0
+          then [{tag:"markdown", content:"<font color=\u0027green\u0027>✅ 本周无必修</font>"}]
+          else [ $urg[] | block("red-50";
+                   "\(ptag)**\(pn) · \(ttl)** `\(.id[0:8])`\n"
+                   + (if (.why // "") != "" then .why else "" end)
+                   + (if (.users // 0) > 0 then " · \(.users) 人" else "" end)
+                   + (if (.fixmark // "") != "" then "\n" + g("修复状态：" + .fixmark) else "" end)
+                   + (if (.action // "") != "" then "\n" + g("👉 " + .action) else "" end); (.url // "")) ]
+          end)
+       + [{tag:"markdown", content:"**🔧 修复进度**", margin:"12px 0px 0px 0px"},
+          {tag:"markdown", content:"⚠️ 修了仍在 **\($bad | length)**　🛠️ 已修未发版 **\($pend | length)**　📦 已发版待验 **\($wait | length)**　✅ 已关闭 **\($closed | length)**"}]
+       + (if ($bad | length) + ($pend | length) == 0 then [] else
+            [panel("修了仍在 / 已修未发版 " + g("· 点开看明细");
+               "| 平台 | Issue | 状态 | 修复 |\n|---|---|---|---|\n"
+               + ([ ($bad + $pend)[] | "| \(pn) | \(lk) | \(.mark) | \(.subject | gsub("\\|"; "/")) · \(.commit) |" ] | join("\n")))]
+          end)
+       + [{tag:"markdown", content:("**📌 本周变化**　" + $cc), margin:"12px 0px 0px 0px"}]
+       + (if $ch == "" then [] else [panel("本周变化明细 " + g("· 点开看"); $ch)] end)
+       + (if ($wat | length) == 0 then [] else
+            [{tag:"markdown", content:"**👀 观察**", margin:"12px 0px 0px 0px"},
+             panel("观察 \($wat | length) 项 " + g("· 今天不用动");
+               "| 平台 | Issue | 标题 | 说明 |\n|---|---|---|---|\n"
+               + ([ $wat[] | "| \(pn) | \(lk) | \(ttl | gsub("\\|"; "/") | .[0:28]) | \(((.priority // "") + " " + ((.why // "") | gsub("\\|"; "/"))) | ltrimstr(" ")) |" ] | join("\n")))]
+          end)
+       + [{tag:"hr", margin:"12px 0px 4px 0px"},
+          {tag:"markdown", content:("**📈 主力版本健康度**　" + g("近 7 天 · 会话量 top2 ∪ 当日 top1"))}]
+       + (if ($rows | length) > 0 then [
+           {tag:"table", page_size:10, row_height:"low",
+            header_style:{text_align:"left", text_size:"normal", background_style:"grey", text_color:"default", bold:true, lines:1},
+            columns:[{name:"plat",display_name:"平台",data_type:"text",width:"auto",horizontal_align:"left"},
+                     {name:"ver",display_name:"版本",data_type:"text",width:"auto",horizontal_align:"left"},
+                     {name:"sess",display_name:"会话",data_type:"text",width:"auto",horizontal_align:"left"},
+                     {name:"dev",display_name:"设备",data_type:"text",width:"auto",horizontal_align:"left"},
+                     {name:"crash",display_name:"崩溃",data_type:"text",width:"auto",horizontal_align:"left"},
+                     {name:"rate",display_name:"崩溃率",data_type:"lark_md",width:"auto",horizontal_align:"left"},
+                     {name:"cfree",display_name:"Crash-free",data_type:"text",width:"auto",horizontal_align:"left"},
+                     {name:"anr",display_name:"ANR",data_type:"text",width:"auto",horizontal_align:"left"},
+                     {name:"nf",display_name:"非致命",data_type:"text",width:"auto",horizontal_align:"left"}],
+            rows:$rows}]
+          else [{tag:"markdown", content:"（本次未取到放量数据）"}] end)
+       + (if $wow != "" then [{tag:"markdown", content:g($wow)}] else [] end)
+       + (if ($chd | length) > 0 then [
+           {tag:"markdown", content:("**" + $dt + "**"), margin:"10px 0px 0px 0px"},
+           {tag:"chart", color_theme:"brand", height:"auto",
+            chart_spec:{type:"bar", direction:"horizontal", data:{values:$chd}, xField:"v", yField:"k",
+                        label:{visible:true, position:"outside"}, tooltip:{visible:true}}}]
+           + (if $dn != "" then [{tag:"markdown", content:$dn}] else [] end)
+          else [] end)
+       + (if ($chp95 | length) > 0 then [
+           {tag:"markdown", content:("**🚀 启动 P95 趋势** " + g("主力版本 · 样本不足的周不画")), margin:"10px 0px 0px 0px"},
+           {tag:"chart", color_theme:"complementary",
+            chart_spec:{type:"line", data:{values:$chp95}, xField:"x", yField:"y", seriesField:"type",
+                        legends:{visible:true, position:"bottom"}}}]
+          else [] end)
+       + [{tag:"hr"},
+          {tag:"div", text:{tag:"plain_text", content:$nm, text_size:"notation", text_color:"grey"}},
+          {tag:"markdown", content:"📄 [完整报告](__REPORT_URL__) · 📁 [全部报告](__FOLDER_URL__)"}])}}')"
+
+# 群消息 markdown（message.md）：与卡片同一份数据的文本形态
+WEEK_MD_URGENT="$(printf '%s' "$WEEK_URGENT" | jq -r '.[] | "- \(if (.priority // "") != "" then .priority + " " else "" end)\(if .plat == "ios" then "iOS" else "Android" end) \(if (.url // "") != "" then "[\(.id[0:8])](\(.url))" else .id[0:8] end) \((.title // "") | gsub("<"; "‹") | gsub(">"; "›") | if length > 48 then .[0:47] + "…" else . end) — \(.why // "")\(if (.action // "") != "" then "；👉 " + .action else "" end)\(if (.fixmark // "") != "" then "（修复状态：" + .fixmark + "）" else "" end)"' 2>/dev/null || true)"
+[ -n "$WEEK_MD_URGENT" ] || WEEK_MD_URGENT="✅ 本周无必修"
+# ⚠️ 图标与 fix_mark（core/fixrelease.sh）一致，格式与「本周变化」行一致（数字加粗、全角空格）——用户 2026-10-11 要求统一
+WEEK_MD_FIX="$(printf '%s' "$FIX_PROGRESS" | jq -r '"⚠️ 修了仍在 **\([.[] | select(.status == "修了仍在" and .state != "CLOSED")] | length)**　🛠️ 已修未发版 **\([.[] | select(.status == "已修未发版" and .state != "CLOSED")] | length)**　📦 已发版待验 **\([.[] | select(.status == "已发版待验" and .state != "CLOSED")] | length)**　✅ 已关闭 **\([.[] | select(.state == "CLOSED")] | length)**"' 2>/dev/null || true)"
+MSG="$(cat <<MSG_END
+**📊 崩溃周报 · ${DAY} ${TS_HM} · ${WEEK_VERDICT}**
+
+$VERSION_NOTES_MD
+**🚨 本周必修**（${WEEK_SRC_NOTE}）
+${WEEK_MD_URGENT}
+
+**🔧 修复进度**：${WEEK_MD_FIX}
+**📌 本周变化**：${WEEK_CHG_COUNTS}
+
+$CHANGES_MD
+
+**🚀 主力版本（近 ${WEEK_DAYS} 天会话量 top2 ∪ 当日 top1）**
+
+$(adopt_md)
+> $NOTE_MD
+MSG_END
+)"
 
 REPORT="$STATE/reports/$DAY-weekly.md"
 {
@@ -1526,6 +1725,11 @@ REPORT="$STATE/reports/$DAY-weekly.md"
   printf '> 取数区间 %sd：**%s**\n' "$WEEK_DAYS" "$WIN_FULL"
   printf '> 窗口起点 = 本次跑批时刻 − %s 天（SQL 下界）；终点 = sessions 活表实际取到的最新数据。\n' "$WEEK_DAYS"
   [ -n "$VERSION_NOTES_MD" ] && printf '%s\n' "$VERSION_NOTES_MD"
+  # 首屏 = 本周必修 + 修复进度（change crash-report-attention-tiers）。⛔ 这是**引用**：
+  #    分析层段落仍原样追加在文末（spec「周报文档构成——数据层段落不得被分析层替换」）。
+  printf '## 本周必修\n\n> %s\n\n%s\n\n' "$WEEK_SRC_NOTE" "$WEEK_MD_URGENT"
+  printf '**🔧 修复进度**：%s\n\n' "$WEEK_MD_FIX"
+  printf '**📌 本周变化**：%s\n\n' "$WEEK_CHG_COUNTS"
   printf '## 一、本周变化\n\n%s\n\n' "$CHANGES_MD"
   [ -n "$RECUR_MD" ] && printf '%s\n\n' "$RECUR_MD"
   [ -n "$RECUR_MD" ] && printf '> ⚠️ 「回归」指该 issue 在**上一轮基准日**（取基准里 `last` 的最大值，**不是「上周」**）无记录、本轮重新出现。判定窗口是崩溃段的滚动窗口——「消失」是**窗口内无事件**，⛔ 不等于「已修复」。⛔ 只给分数不给百分比：基准规模小（本轮 '"$SEEN_SIZE"' 项），百分比是伪精度。\n\n'

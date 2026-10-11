@@ -14,6 +14,11 @@ mk "$(printf 'fix(g): iOS 无冒号写法\n\n- 修复 Crashlytics issue 99999999
 # ⛔ 取自 Android 8fea0314 原文（2026-10-02 实测漏检）：git trailer 写法，连字符连接
 mk "$(printf 'fix(ai): 仅上报最终 ASR 停止失败\n\nCrashlytics-Issue: 88888888111122223333444455556666\n')"
 mk "fix(d): 与 issue 无关的普通提交"
+# ⛔ 取自 Android d0dcb015 原文（2026-10-11 生产误判）：文档提交里提到 issue id，不是修复
+mk "$(printf 'docs(crash): 更新 77777777 定向规避与验证边界\n\nCrashlytics: 77777777111122223333444455556666\n')"
+mk "test(scan): 夹具里出现 Crashlytics: 66666666111122223333444455556666"
+# chore 刻意不排除：依赖升级修崩溃常写成 chore
+mk "chore(deps): 升级 fragment-ktx 修复 Crashlytics: 55555555111122223333444455556666"
 mk "fix(e): 提到 crashlytics 但没有 id"
 
 # 直接跑生产 scan_repo（从脚本抽出，非拷贝）
@@ -28,7 +33,9 @@ h_assert_contains "$out" "cccccccc" "③ Crashlytics issue: <32位> 写在 body 
 h_assert_contains "$out" "ffffffff" "⑥ Crashlytics+8位、无冒号也认（Android a4a7ce99 实际写法）"
 h_assert_contains "$out" "99999999" "⑦ Crashlytics issue+32位、无冒号也认（iOS a9c8c306 实际写法）"
 h_assert_contains "$out" "88888888" "⑧ Crashlytics-Issue: <32位> trailer 也认（Android 8fea0314 实际写法）"
-h_assert_eq "6" "$(printf '%s' "$out" | grep -c . )" "④ 无 id 的提交不产生命中（负向：不误报）"
+h_assert_contains "$out" "55555555" "⑩ chore 提交仍认（依赖升级修复，刻意不排除）"
+h_assert_eq "" "$(printf '%s' "$out" | grep -o '77777777\|66666666' || true)" "⑨ docs / test 提交提到 id 也不算修复（d0dcb015 生产误判）"
+h_assert_eq "7" "$(printf '%s' "$out" | grep -c . )" "④ 无 id 的提交不产生命中（负向：不误报）"
 h_assert_eq "" "$(printf '%s' "$out" | grep -o 'dddddddd\|eeeeeeee' || true)" "⑤ 「提到 crashlytics 但没 id」不误命中"
 h_summary
 

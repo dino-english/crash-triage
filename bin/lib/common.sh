@@ -18,6 +18,16 @@
 ALERTED=0
 CURRENT_STEP="启动"
 
+# ── L1 / L2 共用的判定常量（change crash-report-attention-tiers）──────────────
+# ⛔ 只在这里定义一次：日报与周报是两个进程、各自 source 本文件——两处各写一份必然漂移。
+# 崩溃率红 / 黄线（原在 crash-daily.sh 顶部；周报的红灯下钻也要判它，故上移到这里）。
+CRASH_RATE_RED="${CRASH_REPORT_CRASH_RATE_RED:-1.0}"        # 崩溃率 红 >1%（拍板）
+CRASH_RATE_YELLOW="${CRASH_REPORT_CRASH_RATE_YELLOW:-0.5}"  # 黄 0.5–1%、绿 <0.5%（待对齐）
+# 三档分档阈值（design D1 / Q2）。2026-10-11 用生产近 16 轮 L1 回测：按 2 / 5 每天紧急约 1–4 条，
+# 不天天空也不天天满；设 8 则长期未修几乎从不触发。⚠️ 判的是**报告版本集内 FATAL 受影响安装**。
+TIER_NEW_MIN="${CRASH_REPORT_TIER_NEW_MIN:-2}"     # 新增 / 回归 / 暴涨 issue 进 🚨 的 7 天台数下限
+TIER_LONG_MIN="${CRASH_REPORT_TIER_LONG_MIN:-5}"   # 长期未修 issue 进 🚨 的 7 天台数下限
+
 step() { CURRENT_STEP="$1"; echo "--- $1 ---"
   # 审计只记录不 gating；audit 未定义（lib.sh 未加载）或未接入（无 AUDIT_FILE）都静默跳过
   { declare -F audit >/dev/null && audit step.start "$1"; } 2>/dev/null || true; }

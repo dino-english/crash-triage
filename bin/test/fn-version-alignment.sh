@@ -2,6 +2,7 @@
 # change crash-report-version-alignment：主力版本集合 = 窗口 top2 ∪ 当日 top1（上限 3）
 ROOT="${CRASH_REPORT_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}"
 . "$ROOT/bin/test/harness.sh"
+. "$ROOT/bin/lib/csv.sh"   # main_versions 走 csv2tsv 取列
 
 # 用假 bqq 喂两套窗口的数据（真实 SQL 已在实施时对真表验过）
 mk() { # $1=7天CSV $2=当日CSV
@@ -47,4 +48,19 @@ h_assert_contains "$out" "1.5.3,536,300,当日主力" "当日仅 1 会话仍补�
 mk "$SEV" 'version,sessions,devices'
 out="$(h_run main_versions tbl)"
 h_assert_eq "2" "$(printf '%s\n' "$out" | grep -c . )" "当日无数据 → 退回 2 行"
+# ④ ⛔ 真实 SQL 是 5 列（2026-09-17 起多 devs_perf_on / max_build_tail3）——曾被吸进「理由」，
+#    周报「入选」列渲染成「1493,,窗口主力」（2026-10-05 生产 report.md 实证）。夹具原先只喂 3 列，看不见这条。
+mk 'version,sessions,devices,devs_perf_on,max_build_tail3
+1.7.1,4299,1493,1493,
+1.8.2,717,272,257,010' 'version,sessions,devices,devs_perf_on,max_build_tail3
+1.8.2,300,200,190,010'
+out="$(h_run main_versions tbl)"
+h_assert_contains "$out" "1.7.1,4299,1493,窗口主力" "5 列输入 → 只保留 版本,会话,设备 + 理由"
+h_assert_contains "$out" "1.8.2,717,272,窗口+当日" "当日 top1 判定也按清洗后的列"
+h_assert_eq "" "$(printf '%s' "$out" | grep -o ',,' || true)" "⛔ 不得出现空字段串（1493,, 那种）"
+while IFS=, read -r _v _s _d _why; do
+  [ -n "$_v" ] || continue
+  case "$_why" in 窗口主力|窗口+当日|当日主力) ;; *) h_assert_eq "合法理由" "$_why" "调用方按 4 列读出的理由必须是三种之一";; esac
+done <<< "$out"
+
 h_summary

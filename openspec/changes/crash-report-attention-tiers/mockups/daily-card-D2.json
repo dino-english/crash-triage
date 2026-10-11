@@ -1,0 +1,439 @@
+{
+  "schema": "2.0",
+  "config": {
+    "width_mode": "fill"
+  },
+  "header": {
+    "template": "red",
+    "title": {
+      "tag": "plain_text",
+      "content": "📊 10-11 崩溃日报 · 1 项需开发处理"
+    },
+    "subtitle": {
+      "tag": "plain_text",
+      "content": "iOS 1.8.2 · Android 1.8.2（会话量最大版本）"
+    },
+    "text_tag_list": [
+      {
+        "tag": "text_tag",
+        "text": {
+          "tag": "plain_text",
+          "content": "🚨 紧急 1"
+        },
+        "color": "red"
+      },
+      {
+        "tag": "text_tag",
+        "text": {
+          "tag": "plain_text",
+          "content": "⏳ 等发版 7"
+        },
+        "color": "orange"
+      },
+      {
+        "tag": "text_tag",
+        "text": {
+          "tag": "plain_text",
+          "content": "👀 观察 3"
+        },
+        "color": "neutral"
+      }
+    ]
+  },
+  "body": {
+    "elements": [
+      {
+        "tag": "markdown",
+        "content": "**🚨 紧急 · 开发要修**"
+      },
+      {
+        "tag": "column_set",
+        "flex_mode": "none",
+        "background_style": "red-50",
+        "horizontal_spacing": "8px",
+        "margin": "4px 0px 4px 0px",
+        "columns": [
+          {
+            "tag": "column",
+            "width": "weighted",
+            "weight": 5,
+            "vertical_align": "center",
+            "padding": "8px 8px 8px 8px",
+            "elements": [
+              {
+                "tag": "markdown",
+                "content": "**Android · [libc.so] SIGABRT** `85c581ed`\n<text_tag color=\"red\">修了仍在</text_tag> 修复 9bbe8b15 已随 1.5.4 发版，新包仍崩\n<font color=\"grey\">7 天：1.8.2 1 台 · 1.8.1 1 台</font>"
+              }
+            ]
+          },
+          {
+            "tag": "column",
+            "width": "auto",
+            "vertical_align": "center",
+            "padding": "8px 8px 8px 0px",
+            "elements": [
+              {
+                "tag": "button",
+                "text": {
+                  "tag": "plain_text",
+                  "content": "控制台"
+                },
+                "type": "default",
+                "size": "small",
+                "behaviors": [
+                  {
+                    "type": "open_url",
+                    "default_url": "https://console.firebase.google.com/v1/appid/project/dino-english-497507/crashlytics/app/1:465344775452:android:2c546b57b0176325f466d9/issues/85c581edcdb39b941df627e7b1324a71"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "tag": "markdown",
+        "content": "**⏳ 等发版 · 代码已修，催上线**",
+        "margin": "12px 0px 0px 0px"
+      },
+      {
+        "tag": "column_set",
+        "flex_mode": "none",
+        "background_style": "orange-50",
+        "horizontal_spacing": "8px",
+        "margin": "4px 0px 4px 0px",
+        "columns": [
+          {
+            "tag": "column",
+            "width": "weighted",
+            "weight": 5,
+            "vertical_align": "center",
+            "padding": "8px 8px 8px 8px",
+            "elements": [
+              {
+                "tag": "markdown",
+                "content": "**Android · LINE SDK LineApiClientBuilder** `8bc4b97e`\n<text_tag color=\"orange\">本周第一</text_tag> 7 天 10 台 · 修复：移除未使用的 LINE Open Chat 入口"
+              }
+            ]
+          },
+          {
+            "tag": "column",
+            "width": "auto",
+            "vertical_align": "center",
+            "padding": "8px 8px 8px 0px",
+            "elements": [
+              {
+                "tag": "button",
+                "text": {
+                  "tag": "plain_text",
+                  "content": "控制台"
+                },
+                "type": "default",
+                "size": "small",
+                "behaviors": [
+                  {
+                    "type": "open_url",
+                    "default_url": "https://console.firebase.google.com/v1/appid/project/dino-english-497507/crashlytics/app/1:465344775452:android:2c546b57b0176325f466d9/issues/8bc4b97e887ce32a7fada8b4fd2abc29"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "tag": "collapsible_panel",
+        "expanded": false,
+        "margin": "4px 0px 0px 0px",
+        "header": {
+          "title": {
+            "tag": "markdown",
+            "content": "其余 6 个 <font color=\"grey\">· 7 天内最新两版无事件</font>"
+          },
+          "vertical_align": "center",
+          "icon": {
+            "tag": "standard_icon",
+            "token": "down-small-ccm_outlined",
+            "size": "16px 16px"
+          },
+          "icon_position": "right",
+          "icon_expanded_angle": -180
+        },
+        "border": {
+          "color": "grey",
+          "corner_radius": "5px"
+        },
+        "padding": "6px 8px 6px 8px",
+        "elements": [
+          {
+            "tag": "markdown",
+            "content": "| 平台 | Issue | 修复内容 |\n|---|---|---|\n| Android | [8b297547](https://console.firebase.google.com/v1/appid/project/dino-english-497507/crashlytics/app/1:465344775452:android:2c546b57b0176325f466d9/issues/8b297547b9f21c0b1809e8c8989edb06) | 透明调度页方向 |\n| Android | [0055b556](https://console.firebase.google.com/v1/appid/project/dino-english-497507/crashlytics/app/1:465344775452:android:2c546b57b0176325f466d9/issues/0055b5565d49825afb5c19d78ab58fd4) | 音频服务前台化 |\n| Android | [8101c07c](https://console.firebase.google.com/v1/appid/project/dino-english-497507/crashlytics/app/1:465344775452:android:2c546b57b0176325f466d9/issues/8101c07c307416da1819dc7553864c1b) | Billing 代理页 |\n| Android | [fb54dcb7](https://console.firebase.google.com/v1/appid/project/dino-english-497507/crashlytics/app/1:465344775452:android:2c546b57b0176325f466d9/issues/fb54dcb72862c0de9f347c82cb6935af) | 通话模式切换 |\n| Android | [d0dcb015](https://console.firebase.google.com/v1/appid/project/dino-english-497507/crashlytics/app/1:465344775452:android:2c546b57b0176325f466d9/issues/d0dcb015e40f828e706fcbf113d9560a) | audiopolicy |\n| iOS | [09ee5ad3](https://console.firebase.google.com/v1/appid/project/dino-english-497507/crashlytics/app/1:465344775452:ios:610bc2f8ea0750fff466d9/issues/09ee5ad371c6c16acf0388f898f1839f) | Azure 识别器释放 |"
+          }
+        ]
+      },
+      {
+        "tag": "markdown",
+        "content": "**👀 观察 · 今天不用动**",
+        "margin": "12px 0px 0px 0px"
+      },
+      {
+        "tag": "collapsible_panel",
+        "expanded": false,
+        "margin": "4px 0px 0px 0px",
+        "header": {
+          "title": {
+            "tag": "markdown",
+            "content": "少量崩溃 3 个 <font color=\"grey\">· ≤3 台，未修</font>"
+          },
+          "vertical_align": "center",
+          "icon": {
+            "tag": "standard_icon",
+            "token": "down-small-ccm_outlined",
+            "size": "16px 16px"
+          },
+          "icon_position": "right",
+          "icon_expanded_angle": -180
+        },
+        "border": {
+          "color": "grey",
+          "corner_radius": "5px"
+        },
+        "padding": "6px 8px 6px 8px",
+        "elements": [
+          {
+            "tag": "markdown",
+            "content": "| 平台 | Issue | 位置 | 7天台数 |\n|---|---|---|---|\n| iOS | [3c8c9ac8](https://console.firebase.google.com/v1/appid/project/dino-english-497507/crashlytics/app/1:465344775452:ios:610bc2f8ea0750fff466d9/issues/3c8c9ac83ccceff5bf029f7d0d95f78a) | vImage 🆕 | 1 |\n| Android | [a086ba79](https://console.firebase.google.com/v1/appid/project/dino-english-497507/crashlytics/app/1:465344775452:android:2c546b57b0176325f466d9/issues/a086ba799cf74a0238d7fb7f800b3cc0) | libperfetto_hprof | 3 |\n| Android | [af63b03d](https://console.firebase.google.com/v1/appid/project/dino-english-497507/crashlytics/app/1:465344775452:android:2c546b57b0176325f466d9/issues/af63b03d3def6cf9f5af2c6a6a019e63) | libart | 2 |"
+          }
+        ]
+      },
+      {
+        "tag": "hr",
+        "margin": "12px 0px 4px 0px"
+      },
+      {
+        "tag": "markdown",
+        "content": "**📈 健康度** <font color=\"grey\">只标出超阈值的项 · 灯按平台分判</font>"
+      },
+      {
+        "tag": "column_set",
+        "flex_mode": "none",
+        "horizontal_spacing": "8px",
+        "columns": [
+          {
+            "tag": "column",
+            "width": "weighted",
+            "weight": 1,
+            "background_style": "grey-50",
+            "padding": "8px 10px 8px 10px",
+            "elements": [
+              {
+                "tag": "markdown",
+                "content": "**iOS 1.8.2** <font color=\"grey\">416 设备/天</font>\ncrash-free　99.98%\n启动 P95　809ms\n慢帧　31.7%<font color=\"grey\">（最差页 </font><font color=\"orange\">45.1%</font><font color=\"grey\">）</font>\n冻结　0.1%\n接口错误　0.1%"
+              }
+            ]
+          },
+          {
+            "tag": "column",
+            "width": "weighted",
+            "weight": 1,
+            "background_style": "grey-50",
+            "padding": "8px 10px 8px 10px",
+            "elements": [
+              {
+                "tag": "markdown",
+                "content": "**Android 1.8.2** <font color=\"grey\">518 设备/天</font>\ncrash-free　99.64%\n启动 P95　<font color=\"red\">2231ms 🔴</font><font color=\"grey\"> ↓262ms</font>\n慢帧　42.6%<font color=\"grey\">（最差页 Splash </font><font color=\"red\">87.8%</font><font color=\"grey\">）</font>\n冻结　0.6%<font color=\"grey\">（最差页 </font><font color=\"red\">5.2%</font><font color=\"grey\">）</font>\nANR　0.07%　接口错误　0.2%"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "tag": "markdown",
+        "content": "<font color=\"grey\">性能 = 10-05~10-07 完整日（导出滞后 4 天）· 崩溃 = 近 7 天 · iOS 1.9.0 为内测包（6 设备），样本不足不判</font>"
+      },
+      {
+        "tag": "markdown",
+        "margin": "10px 0px 0px 0px",
+        "content": "**🔍 Android 启动 P95 为什么红**　<font color=\"grey\">按系统版本拆 · 1231 次冷启动</font>"
+      },
+      {
+        "tag": "chart",
+        "height": "160px",
+        "chart_spec": {
+          "type": "bar",
+          "direction": "horizontal",
+          "data": [
+            {
+              "id": "d",
+              "values": [
+                {
+                  "grp": "Android 13+",
+                  "p95": 1577,
+                  "lbl": "1577ms · 1053 次"
+                },
+                {
+                  "grp": "Android 12",
+                  "p95": 2431,
+                  "lbl": "2431ms · 67 次"
+                },
+                {
+                  "grp": "Android 11 及以下",
+                  "p95": 5787,
+                  "lbl": "5787ms · 111 次"
+                }
+              ]
+            }
+          ],
+          "xField": "p95",
+          "yField": "grp",
+          "bar": {
+            "style": {
+              "fill": "#5B8FF9",
+              "cornerRadius": [
+                0,
+                4,
+                4,
+                0
+              ]
+            }
+          },
+          "barMaxWidth": 18,
+          "label": {
+            "visible": true,
+            "position": "outside",
+            "style": {
+              "fill": "#646A73",
+              "fontSize": 11
+            },
+            "formatMethod": null,
+            "dataKey": "lbl"
+          },
+          "axes": [
+            {
+              "orient": "bottom",
+              "visible": true,
+              "grid": {
+                "visible": true,
+                "style": {
+                  "lineDash": [
+                    2,
+                    2
+                  ],
+                  "stroke": "#E5E6EB"
+                }
+              },
+              "label": {
+                "style": {
+                  "fill": "#8F959E"
+                }
+              }
+            },
+            {
+              "orient": "left",
+              "visible": true,
+              "label": {
+                "style": {
+                  "fill": "#646A73"
+                }
+              },
+              "domainLine": {
+                "visible": false
+              }
+            }
+          ],
+          "markLine": [
+            {
+              "x": 2000,
+              "label": {
+                "visible": true,
+                "text": "红线 2000ms",
+                "position": "insideEndTop",
+                "labelBackground": {
+                  "visible": false
+                },
+                "style": {
+                  "fill": "#D83931",
+                  "fontSize": 11
+                }
+              },
+              "line": {
+                "style": {
+                  "stroke": "#D83931",
+                  "lineDash": [
+                    4,
+                    3
+                  ],
+                  "lineWidth": 1.5
+                }
+              },
+              "endSymbol": {
+                "visible": false
+              }
+            }
+          ],
+          "tooltip": {
+            "visible": true
+          }
+        }
+      },
+      {
+        "tag": "markdown",
+        "content": "**结论：** 拖慢 P95 的是老系统。**Android 11 及以下只占 9% 的启动，却贡献了 43% 的慢启动**（>2s，33/77）；Android 13+ 的 P95 只有 1577ms，在红线以内\n<font color=\"grey\">历史：P95 从 1.5.x 的约 3.5s 一版一版降到 1.8.2 的 2.1s，是在改善的老问题，不是本版退化</font>"
+      },
+      {
+        "tag": "column_set",
+        "flex_mode": "none",
+        "horizontal_spacing": "8px",
+        "margin": "8px 0px 0px 0px",
+        "columns": [
+          {
+            "tag": "column",
+            "width": "auto",
+            "elements": [
+              {
+                "tag": "button",
+                "text": {
+                  "tag": "plain_text",
+                  "content": "完整日报"
+                },
+                "type": "primary",
+                "size": "small",
+                "behaviors": [
+                  {
+                    "type": "open_url",
+                    "default_url": "https://qjphu5vphyf4.jp.larksuite.com/docx/UPQNdbzGio2l3bxOleRjK1nOpHd"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "tag": "column",
+            "width": "auto",
+            "elements": [
+              {
+                "tag": "button",
+                "text": {
+                  "tag": "plain_text",
+                  "content": "台账"
+                },
+                "type": "default",
+                "size": "small",
+                "behaviors": [
+                  {
+                    "type": "open_url",
+                    "default_url": "https://qjphu5vphyf4.jp.larksuite.com/docx/TtpwdhgKroMH1DxJumojTflrppz"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "tag": "markdown",
+        "content": "<font color=\"grey\">【日报定稿 D2】面板内为 markdown 表格；「完整日报」暂指索引页</font>"
+      }
+    ]
+  }
+}
