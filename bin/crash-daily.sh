@@ -1546,10 +1546,24 @@ prev_ver_of() { # $1=plat键 $2=版本 → 列集合里比它旧的最近一版�
   local cols; [ "$1" = ios ] && cols="$IOS_COLS" || cols="$AND_COLS"
   printf '%s\n' $cols | grep -v '^$' | sort -rV -u | awk -v v="$2" 'f{print; exit} $0==v{f=1}' || true
 }
+# 可比的上一版：除了「列集合里比它旧的最近一版」，**两版的日会话数都要 ≥ SAMPLE_SESSION_MIN**（与告警判定对象的
+# 小样本回退同一门槛）——否则不比，返回空。
+# ⛔ 2026-10-12 生产首轮实证：Android 1.8.1 正在退场（日会话 30，1.8.2 为 804），慢帧 30.1%（前一窗口 46%）、
+#    接口错误率 0.4%（2814 请求里 13 个错误），被拿去比出两条「性能退化」进了 🚨——都是误报。
+#    帧数闸门（PERF_FRAMES_SAMPLE_MIN）挡不住：991 帧早过了 20，问题不是帧少，是**剩下的那批用户不代表大盘**。
+cmp_prev_ver_of() { # $1=plat键 $2=版本 → 可比的上一版（无则空）
+  local pv s1 s2
+  pv="$(prev_ver_of "$1" "$2")"; [ -n "$pv" ] || { printf ''; return 0; }
+  s1="$(mv_ "$1" "$2" adopt.sessions)"; s2="$(mv_ "$1" "$pv" adopt.sessions)"
+  if [ "${s1:-0}" -ge "$SAMPLE_SESSION_MIN" ] 2>/dev/null && [ "${s2:-0}" -ge "$SAMPLE_SESSION_MIN" ] 2>/dev/null; then
+    printf '%s' "$pv"
+  fi
+  return 0
+}
 _tier_regress() { # $1=plat键 $2=平台名 $3=判定版本
   local pv c p n1 n2 lbl
   [ -n "$3" ] || return 0
-  pv="$(prev_ver_of "$1" "$3")"; [ -n "$pv" ] || return 0
+  pv="$(cmp_prev_ver_of "$1" "$3")"; [ -n "$pv" ] || return 0
   # 启动 P95：两版样本都过 P95 闸门才比（P95 在 n<20 时退化成最大值）
   n1="$(mv_ "$1" "$3" perf.start_samples)"; n2="$(mv_ "$1" "$pv" perf.start_samples)"
   if [ "${n1:-0}" -ge "$PERF_P95_SAMPLE_MIN" ] 2>/dev/null && [ "${n2:-0}" -ge "$PERF_P95_SAMPLE_MIN" ] 2>/dev/null; then
@@ -2133,7 +2147,8 @@ drill_platform() { # $1=plat键 $2=平台名
   if [ "$1" = ios ]; then v="$IOS_ALERT_VER"; tbl="$IOS_PERF_TBL"; else v="$AND_ALERT_VER"; tbl="$AND_PERF_TBL"; fi
   [ -n "$v" ] || return 0
   [ "$(mv_ "$1" "$v" perf.state)" = ok ] || return 0
-  pv="$(prev_ver_of "$1" "$v")"
+  # 「对比上一版」那句与退化判定同一门槛：上一版样本撑不住就不给对比（不给比给错强）
+  pv="$(cmp_prev_ver_of "$1" "$v")"
   # 启动 P95 → 系统版本分桶
   c="$(mv_ "$1" "$v" perf.p95)"
   if [ "$DRILL_N" -lt "$CARD_DRILL_MAX" ] && [ "$(traffic_light "$c" "$START_P95_RED" "$START_P95_YELLOW")" = red ]; then
