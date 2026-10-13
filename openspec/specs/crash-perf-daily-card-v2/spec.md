@@ -40,85 +40,28 @@
 - **THEN** 卡片 JSON MUST NOT 含任何 v1 专有字段（`wide_screen_mode`、顶层 `elements`、`note` 等）
 - **AND** 违规时整卡 MUST 被官方校验拒绝（错误码 230099/200861），而非静默降级
 
-### Requirement: 原生 table 组件承载崩溃与性能
-
-卡片 SHALL 使用**一张** CardKit v2 原生 `table` 组件承载简报指标，行 = 指标、列 = `指标 | iOS | Android`，指标列为 `text`、平台列为 `lark_md`。
-
-卡片承载的行集合 MUST 是简报口径的子集，MUST NOT 与文档共用同一份行定义——卡片回答「今天要不要管」，文档回答「具体是什么」，两者的完备性要求不同。
-
-版本标识与放量规模 MUST 并入表头，MUST NOT 各占独立行。
-
-#### Scenario: 两张 table 与行列结构
-
-- **WHEN** 生成卡片表格
-- **THEN** MUST 输出**一张** `tag:"table"` 组件，承载崩溃类与性能类简报指标
-- **AND** 行 MUST 为指标维度，列 MUST 为 `指标 | iOS | Android`
-- **AND** 列键 `name`（如 `metric`/`ios`/`android`）MUST 与行数据键名一致
-- **AND** 崩溃类与性能类指标 MUST NOT 拆成两张表——拆表会使卡片高度翻倍，与简报目的相悖
-
-#### Scenario: 卡片行集合与文档分离
-
-- **WHEN** 定义卡片与文档的指标行
-- **THEN** 两者 MUST 使用各自独立的行定义
-- **AND** 收缩卡片行集合 MUST NOT 影响文档呈现的完备性
-
-#### Scenario: 版本与放量并入表头
-
-- **WHEN** 呈现版本维度
-- **THEN** 平台列表头 MUST 标明所对比的两个版本及各自会话规模
-- **AND** 会话数 MUST NOT 另占一行
-
-#### Scenario: 单元格数据类型
-
-- **WHEN** 定义表格列
-- **THEN** 指标列 MUST 用 `data_type:"text"`
-- **AND** 平台列（iOS/Android）MUST 用 `data_type:"lark_md"`（承载单元格内彩色文本）
-- **AND** 数值 MUST NOT 放进 `options` 类型单元格（长文本会截断）
-
-#### Scenario: 单元格内承载值与对比
-
-- **WHEN** 某指标存在版本间对比
-- **THEN** 单元格 MUST 同时承载当期值与对比指示
-- **AND** 对比 MUST NOT 另占一列——独立对比列会使列数随平台数翻倍
-
-#### Scenario: 分页规避
-
-- **WHEN** 表格行数可能超过 CardKit 默认每页 5 行
-- **THEN** MUST 显式设置 `page_size: 10`
-- **AND** 行数不超过 10 时 MUST NOT 出现分页
-
-#### Scenario: 表格放置位置
-
-- **WHEN** 放置 table 组件
-- **THEN** table MUST 放在卡片 `body.elements` 根节点下
-- **AND** MUST NOT 嵌套在 `column_set` 或其他容器组件内（官方禁止）
-
-#### Scenario: 表头样式
-
-- **WHEN** 渲染表头
-- **THEN** 表头 MUST 用 `header_style` 配置加粗（`bold:true`）与灰色底（`background_style:"grey"`）以区分数据行
-- **AND** 表头文字色 MUST 用主题自适应色（`text_color:"default"` 或省略），MUST NOT 写死浅色/深色专属色值
-
 ### Requirement: 单元格红绿灯分级
 
-崩溃率、慢帧占比、冻结率、启动 P95、接口错误率五个指标的单元格 SHALL 按阈值红/黄/绿三级着色，红色超阈值、黄色临近、正常不标注。
+崩溃率、慢帧占比、冻结率、启动 P95、接口错误率五个指标 SHALL 按阈值红/黄/绿三级着色，红色超阈值、黄色临近、正常不标注。着色载体为健康度面板中的各端数字。
+
+判灯 MUST 按平台逐个数字独立进行，MUST NOT 两端合用一盏灯。慢帧与冻结的判灯值 MUST 为平台整体值，最差页不参与判灯。
 
 #### Scenario: 红档超阈值着色
 
-- **WHEN** 某指标平台值超过红档阈值（崩溃率>1%、慢帧>50%、冻结率>1%、启动 P95>2000ms、接口错误率>1%）
-- **THEN** 该单元格数值 MUST 用 `<font color=red>…</font>` 包红
-- **AND** 该指标 MUST 同时进入顶部摘要告警（见「顶部摘要只显示异常指标」）
+- **WHEN** 某指标某端值超过红档阈值（崩溃率>1%、慢帧>50%、冻结率>1%、启动 P95>2000ms、接口错误率>1%）
+- **THEN** 该端该数字 MUST 用 `<font color=red>…</font>` 包红
+- **AND** 另一端 MUST 按其自身值判定，MUST NOT 被连带着色
 
 #### Scenario: 黄档临近着色
 
-- **WHEN** 某指标平台值落在黄档（红档阈值 ≥ 值 > 黄档阈值，黄档初值采用脚本现值：崩溃率 0.5%、慢帧 30%、冻结 0.5%、启动 P95 1500ms、接口错误率 0.5%）
-- **THEN** 该单元格数值 MUST 用 `<font color=orange>…</font>` 包黄
-- **AND** 黄档阈值常量与注释 MUST 显式标注「待对齐」（Q2-a：采用现值着色，后续对齐仅微调常量）
+- **WHEN** 某指标某端值落在黄档（红档阈值 ≥ 值 > 黄档阈值，黄档初值采用脚本现值：崩溃率 0.5%、慢帧 30%、冻结 0.5%、启动 P95 1500ms、接口错误率 0.5%）
+- **THEN** 该数字 MUST 用 `<font color=orange>…</font>` 包黄
+- **AND** 黄档阈值常量与注释 MUST 显式标注「待对齐」
 
 #### Scenario: 正常不标注
 
-- **WHEN** 某指标平台值 ≤ 黄档阈值
-- **THEN** 该单元格数值 MUST 以裸值展示（主题自适应 default 色）
+- **WHEN** 某指标某端值 ≤ 黄档阈值
+- **THEN** 该数字 MUST 以裸值展示（主题自适应 default 色）
 - **AND** MUST NOT 包裹任何 `<font color>` 标签
 
 #### Scenario: 阈值集中可配
@@ -126,13 +69,18 @@
 - **WHEN** 需要调整某指标红/黄档阈值
 - **THEN** 只须改脚本顶部一处常量（如 `CRASH_RATE_RED`、`NET_ERR_RED`）
 - **AND** 着色判定 MUST 读取常量而非散落硬编码
-- **AND** 接口错误率红档 MUST 用 `NET_ERR_RED=1.0`（Q1-a：由 0 改为 1.0，与「>1% 红档」一致）
 
 #### Scenario: 空值不误判
 
-- **WHEN** 某指标平台值缺失或为「无法计算」
-- **THEN** 该单元格 MUST NOT 被着色判为红/黄/绿任何一档
-- **AND** MUST NOT 因空值误触发告警
+- **WHEN** 某指标某端值缺失或为「无法计算」
+- **THEN** 该数字 MUST NOT 被着色判为红/黄/绿任何一档
+- **AND** MUST NOT 因空值误触发分档
+
+#### Scenario: 最差页不判灯
+
+- **WHEN** 呈现慢帧或冻结的最差页
+- **THEN** 最差页值以括注呈现
+- **AND** MUST NOT 着红或着黄
 
 ### Requirement: 核心指标紧凑环比 DoD/WoW
 
@@ -179,36 +127,20 @@
 - **THEN** 环比变化量 MUST 与当前值同格展示，整体包裹同一红绿灯着色（由当前值阈值决定红/黄/裸值）
 - **AND** MUST NOT 单独按环比变化方向（↑/↓）另行着色
 
-### Requirement: 顶部摘要只显示异常指标
-
-日报卡片顶部摘要 SHALL 只渲染触发阈值（红/黄档）的指标行，MUST NOT 全量罗列所有指标。
-
-#### Scenario: 仅渲染异常行
-
-- **WHEN** 生成顶部摘要
-- **THEN** 摘要 MUST 只包含命中红档或黄档的指标行
-- **AND** 正常指标 MUST NOT 出现在摘要中
-
-#### Scenario: 无异常占位
-
-- **WHEN** 没有任何指标命中红/黄档
-- **THEN** 摘要 MUST 显示「✅ 无异常」占位
-- **AND** MUST NOT 输出空白摘要
-
 ### Requirement: 受影响安装数并列与小样本提示
 
-崩溃表 SHALL 在崩溃率旁并列展示受影响安装数；当某平台当日会话数低于阈值时，该平台相关单元格 SHALL 追加「⚠️ 样本量小」提示。
+卡片 SHALL 为每条 issue 级条目给出 7 天影响台数（受影响安装，沿用 `COUNT(DISTINCT installation_uuid)` 口径）；当某平台判定版本或最新版会话数低于阈值时，相关数字 SHALL 追加「⚠️ 样本小」提示。
 
 #### Scenario: 受影响安装数并列
 
-- **WHEN** 展示崩溃表
-- **THEN** 「受影响安装」MUST 作为独立指标行与崩溃率并列展示（如 `受影响安装 iOS 4 / Android 55`）
-- **AND** MUST 沿用既有 `COUNT(DISTINCT installation_uuid)` 口径（红线：不重算）
+- **WHEN** 卡片呈现一条 issue（任一档）
+- **THEN** MUST 给出该 issue 的 7 天影响台数
+- **AND** MUST 沿用既有 `COUNT(DISTINCT installation_uuid)` 口径（不重算）
 
 #### Scenario: 小样本提示
 
-- **WHEN** 某平台当日会话数 < 30（阈值可配）
-- **THEN** 该平台相关指标单元格 MUST 追加「⚠️ 样本量小」提示
+- **WHEN** 某平台版本当日会话数 < `SAMPLE_SESSION_MIN`（可配）
+- **THEN** 该版本相关数字 MUST 追加「⚠️ 样本小」提示
 - **AND** 提示 MUST 只标注不省略数据
 
 ### Requirement: 底部口径说明弱化
@@ -229,52 +161,28 @@
 
 ### Requirement: 保留项（深色风格 / 三层结构 / 时间戳 / 详情链接）
 
-迁移至 v2 时，深色风格、三大块分层结构、时间戳与详情跳转链接 SHALL 全部保留。
+卡片 SHALL 保留深色风格自适应、分层结构、时间戳与详情跳转链接。分层结构为「三档（🚨 / ⏳ / 👀）+ 健康度」。
 
 #### Scenario: 深色风格主题自适应
 
-- **WHEN** 迁移 v2 后卡片在深色模式下展示
-- **THEN** MUST 保持可读，通过主题自适应色实现（header template 色、`text_color:"default"`、`<font color>` 枚举色）
-- **AND** MUST NOT 引入写死的浅色/深色专属 RGBA 色值
+- **WHEN** 卡片在深色模式下展示
+- **THEN** MUST 保持可读，通过主题自适应色实现（header template 色、`text_color:"default"`、`<font color>` 枚举色、`column_set` 背景枚举色、图表 `color_theme`）
+- **AND** MUST NOT 引入写死的浅色/深色专属色值（含图表 spec 内的 hex 色值）
 
 #### Scenario: 三层结构与详情链接保留
 
-- **WHEN** 生成 v2 卡片
-- **THEN** MUST 保留「崩溃 / 性能 / 放量」三大块分层结构
-- **AND** MUST 保留彩色 header 标题栏（含日期与告警状态色切换）
+- **WHEN** 生成卡片
+- **THEN** MUST 按「三档 + 健康度」分层
+- **AND** MUST 保留彩色 header 标题栏（含日期，颜色随最高档切换）
 - **AND** MUST 保留详情跳转链接（`__DETAIL_URL__` 占位符）
-
-### Requirement: 纯展示层红线
-
-本 change SHALL 为纯展示层重构，MUST NOT 改动任何 SQL 查询、指标取数、告警判定、快照与趋势箭头逻辑；唯一例外是接口错误率红档阈值常量（Q1-a 已拍板）。
-
-#### Scenario: 数据链路零改动
-
-- **WHEN** 实施 v2 迁移
-- **THEN** `crash-rate.sql`、`crash-issues.sql`、`perf-*.sql`、`sessions-by-version.sql` 及天级单日值查询 MUST NOT 被修改
-- **AND** `crash-daily.sh` 中取数、聚合、告警判定、快照、`_dod_wow` 环比计算逻辑 MUST NOT 被修改
-
-#### Scenario: 唯一例外为阈值常量
-
-- **WHEN** 对齐接口错误率红档阈值
-- **THEN** 允许改 `NET_ERR_RED` 常量 `0 → 1.0`（Q1-a，requester 已拍板）
-- **AND** 除此之外 MUST NOT 改任何阈值常量、SQL 或计算逻辑
-
-#### Scenario: 双副本一致
-
-- **WHEN** 实施 v2 迁移
-- **THEN** `bin/crash-daily.sh` 与 `scripts/crash-report/crash-daily.sh` 两处副本 MUST 逐字节一致
-- **AND** 验收 MUST 用 `diff` 复测两副本无差异
 
 ### Requirement: 卡片承载影响集中信息
 
-卡片 MUST 呈现一行影响集中信息：受影响最多的若干设备型号及各自受影响的安装数。
+卡片 MUST 呈现影响集中信息：受影响最多的若干设备型号及各自受影响的安装数，以及崩溃率最高的系统版本及其率。该信息 MAY 置于 👀 折叠面板内，以 markdown 表格呈现。
 
-卡片 MUST 另行呈现崩溃率最高的系统版本及其率——系统版本维度的会话桶足够大，其率可靠，而设备型号维度不可靠（碎片化导致单型号会话量过小），两者的判读价值不同，不可合并为一行。
+系统版本维度的会话桶足够大，其率可靠；设备型号维度不可靠（碎片化导致单型号会话量过小），两者 MUST NOT 合并为一行。
 
-理由：卡片的职责之一是突发状况感知。「哪些设备受影响、影响多少人」是突发的第一落点，而事件总数回答不了这个问题。
-
-该行 MUST 只呈现头部若干条目，MUST NOT 展开完整分布——完整分布属于文档的汇总段。
+该信息 MUST 只呈现头部若干条目，MUST NOT 展开完整分布——完整分布属于文档的汇总段。
 
 #### Scenario: 存在受影响设备
 
@@ -285,13 +193,13 @@
 #### Scenario: 无崩溃事件
 
 - **WHEN** 窗口内无崩溃事件
-- **THEN** 该行不输出，而非输出空值或零
+- **THEN** 该信息不输出，而非输出空值或零
 
 #### Scenario: 系统版本分布可用
 
 - **WHEN** 某端存在崩溃事件且系统版本维度的会话量足以给出可靠的率
 - **THEN** 卡片呈现崩溃率最高的系统版本及其率
-- **AND** 设备型号行不呈现率——该维度的率不可靠
+- **AND** 设备型号不呈现率——该维度的率不可靠
 
 ### Requirement: 卡片并列呈现最新版与全版本的整体健康指标
 
