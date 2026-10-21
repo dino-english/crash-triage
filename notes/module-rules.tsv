@@ -1,0 +1,35 @@
+# 崩溃 → 模块的归属规则（change crash-owner-mention，design D2）
+#
+# 格式：信号 <TAB> 正则（jq test，区分大小写） <TAB> 模块键
+#   信号按优先级：scope > own > lib > screen；同一信号内按本文件行序，命中即停
+#     scope  —— 修复提交 conventional scope（`fix(tts): …` 里的 tts）
+#     own    —— 责任帧 owner = DEVELOPER 时的 symbol + file
+#     lib    —— 责任帧 library + symbol（不论 owner）
+#     screen —— 崩溃事件 custom key `current_screen` 的众数（⛔ 责任帧为 THIRD_PARTY 时不用：GC / 回收线程上的 SDK 崩溃与当前页面无关）
+#   都不命中 → crash_fallback
+#
+# ⛔ 宁落兜底不猜模块：错 @ 比不 @ 更伤信任。灰色项（media / pag / radio / designsystem /
+#    LINE SDK）2026-10-21 起草时**刻意不映射**，确认后再加。
+# ⛔ 不得写出能命中 Android `MainActivity` 的 screen 规则（单 Activity 架构，该值不带信息）。
+# 依据：2026-10-21 近 30 天 65 个 FATAL/ANR issue 实测。
+scope	^(tts|asr|ai|voice|speech|soe)$	voice
+scope	^(pay|billing|iap|purchase)$	pay
+scope	^(classsdk|dinoclass|class|classroom)$	dinoclass
+scope	^(account|login|auth)$	account
+scope	^(startup|launch|splash)$	startup
+scope	^(webview|h5)$	webview
+scope	^(network|net|api)$	core_network
+own	feature\.dinoclass|classsdk|DinoClass	dinoclass
+own	core\.ai\.|\.asr\.|\.tts\.	voice
+own	feature\.account|\.login\.	account
+own	feature\.pay\.|Paywall|Billing	pay
+own	core\.network\.	core_network
+own	Splash|AppLaunch	startup
+lib	CognitiveServices\.Speech|qcloudsoe|TAIOral	voice
+lib	billingclient|StoreKit	pay
+lib	chromium|WebKit	webview
+screen	^(DinoClass|DC[A-Z]|TeacherSelection)	dinoclass
+screen	Login|Account|Register|SignIn	account
+screen	Paywall|Purchase|Subscribe|Payment	pay
+screen	WebView|CommonWeb|CustomTab	webview
+screen	^(Splash|Launch)	startup

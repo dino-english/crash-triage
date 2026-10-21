@@ -79,6 +79,14 @@ fi
 # 父目录链接：故障时最常问的是「文档到底产出了没」，给个直达入口比让人翻云空间强
 FOLDER_URL="$( [ -s "$STATE/docs.json" ] && jq -r --arg k "${CACHE_NS}|folder-root-url" '.[$k] // empty' "$STATE/docs.json" 2>/dev/null || true )"
 
+# 失败告警 @ 两端维护人（change crash-owner-mention）。⛔ 只在 error 档 @：降级（warn）不该打扰人。
+# 两端同一人时只 @ 一次。读不到配置就不 @，告警照发（告警器不得因附加信息失败）。
+MAINT=""
+if [ "$SEVERITY" != warn ]; then
+  MAINT="$(awk -F'\t' '$1 == "monitor_maintainer" && $3 ~ /^ou_/ && !seen[$3]++ { printf "<at id=%s></at> ", $3 }' \
+             "$CRASH_REPORT_ROOT/notes/owners.tsv" 2>/dev/null || true)"
+fi
+
 ROWS="$(jq -cn --arg s "$SRC_NAME" --arg st "${STEP:-—}" --arg rc "${RC:-—}" \
   --arg rid "${RUN_ID:-—}" --arg t "$(date '+%Y-%m-%d %H:%M:%S')" \
   '[{k:"环节",v:$s},{k:"步骤",v:$st},{k:"退出码",v:$rc},{k:"运行 ID",v:$rid},{k:"时间",v:$t}]')"
@@ -87,7 +95,7 @@ CARD="$(jq -n \
   --arg hdr "$HDR" --arg title "$EMOJI 崩溃 & 性能流水线 · $TITLE" \
   --arg lead "**$SRC_NAME $TITLE**${STEP:+ · $STEP}" \
   --arg sum "$SUMMARY" --arg tail "$TAIL" --arg hint "$HINT" \
-  --arg logf "${LOGF:-—}" --arg tone "$TONE" --arg folder "$FOLDER_URL" \
+  --arg logf "${LOGF:-—}" --arg tone "$TONE" --arg folder "$FOLDER_URL" --arg maint "$MAINT" \
   --argjson rows "$ROWS" \
   '{schema:"2.0", config:{width_mode:"fill"},
     header:{template:$hdr,title:{tag:"plain_text",content:$title}},
@@ -101,6 +109,7 @@ CARD="$(jq -n \
        rows:$rows},
       {tag:"markdown",content:("**错误**\n```\n" + $sum + "\n```")}]
       + (if $tail != "" then [{tag:"markdown",content:("**日志尾部**\n```\n" + $tail + "\n```")}] else [] end)
+      + (if $maint != "" then [{tag:"markdown",content:("👤 " + $maint + "请看一下")}] else [] end)
       + [{tag:"markdown",content:("💡 " + $hint)},
          {tag:"div",text:{tag:"plain_text",content:("日志：" + $logf),text_size:"notation",text_color:"grey"}}])}}')"
 

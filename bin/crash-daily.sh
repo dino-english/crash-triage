@@ -246,7 +246,7 @@ else
 fi
 # 核心层（纯函数）。不依赖任何全局，加载顺序任意；缺失则整跑失败——
 # 这些是阈值判定与格式化的唯一实现，退化版本会静默产出错误数字，比直接失败危险得多。
-for _c in format verdict version cache fixrelease tier; do
+for _c in format verdict version cache fixrelease tier owner; do
   # shellcheck disable=SC1090
   . "$ROOT/bin/lib/core/${_c}.sh" || { echo "❌ 核心层缺失：bin/lib/core/${_c}.sh" >&2; exit 1; }
 done
@@ -256,6 +256,8 @@ done
 # bqq 是取数唯一通道，退化实现会静默丢掉超时与缓存。
 # shellcheck disable=SC1091
 . "$ROOT/bin/lib/bq.sh" || { echo "❌ 外壳层缺失：bin/lib/bq.sh" >&2; exit 1; }
+# 负责人 @ 的取信号与读内容文件（change crash-owner-mention），L1 / L2 共用一份
+. "$ROOT/bin/lib/owner.sh" || { echo "❌ 外壳层缺失：bin/lib/owner.sh" >&2; exit 1; }
 bq_init
 # ⛔ EXIT trap 用**完成哨兵**判定成败，⚠️ 不能靠 `$?`——bash 3.2 在 `set -u` 未定义变量
 #    这条致命路径上，**进 trap 时 `$?` 已经是 0**（实测；普通命令失败时才是 1）。
@@ -2227,6 +2229,16 @@ while IFS=$'\t' read -r _up _ui; do
 done < <(printf '%s' "$TIERS_JSON" | jq -r '.[] | [.plat, .id] | @tsv' 2>/dev/null || true)
 TIERS_JSON="$(printf '%s' "$TIERS_JSON" | jq -c --argjson u "$_tier_urls" 'map(. + {url:($u[.id] // "")})')"
 
+# 负责人 @（change crash-owner-mention）：⛔ 只给 🚨 补——⏳ / 👀 不 @（design D4，每天 @ 一串人等于没人看）。
+# 条目自带 fix_subject（tier_classify 已取），故 fixmap 传 {}。失败时 owner_enrich 原样返回，不出 @。
+_own_urg="$(printf '%s' "$TIERS_JSON" | jq -c '[.[] | select(.tier == "urgent")]')"
+if [ "$(printf '%s' "$_own_urg" | jq 'length')" -gt 0 ]; then
+  _own_urg="$(owner_enrich "$_own_urg" '{}' "$IOS_CRASH_TBL" "$AND_CRASH_TBL")"
+  TIERS_JSON="$(printf '%s' "$TIERS_JSON" | jq -c --argjson o "$_own_urg" \
+    '($o | map({key:.id, value:.}) | from_entries) as $m | map(if .tier == "urgent" then ($m[.id] // .) else . end)')"
+  echo "  负责人：$(printf '%s' "$_own_urg" | jq -r '[.[] | "\(.id[0:8])→\(.owner_mod // "—")（\(.owner_src // "未判")）"] | join(" · ")')"
+fi
+
 # 卡片上的流水线说明：摘要里**除指标灯行之外**的全部（判定回退 / 内部构建 / MCP 与事实层降级 /
 # 发版判定不可得 / 性能停更 / 全版本口径的 issue 变化）。指标灯已在健康度面板逐格着色，⛔ 不再重复成行。
 CARD_NOTES="$(printf '%s\n' "$SUMMARY_MD" | grep -v '^$' \
@@ -2301,6 +2313,12 @@ CARD_JSON="$(jq -n \
              elif .life == "🆕新增" then "新增" elif .life == "🔁回归" then "回归" else "持续出现" end;
   # ⚠️ 尖括号换成 ‹›：`<init>` 被截断成 `<i` 后会被卡片 markdown 当标签吞掉
   def ttl: (if (.title // "") == "" then "（标题未取到）" else (.title | gsub("<"; "‹") | gsub(">"; "›") | if length > 48 then .[0:47] + "…" else . end) end);
+  # 负责人行（change crash-owner-mention）：未判出（无 owner_mod）不出这一行；兜底与「未配置」都要说出来
+  def who: if (.owner_mod // "") == "" then ""
+           else "\n👤 " + (if (.owner_id // "") != "" then "<at id=\(.owner_id)></at>" else "⚠️ 负责人未配置" end)
+                + g(" · \(.owner_mod)（\(if .owner_src == "兜底" then "归不到模块 · 兜底" else .owner_src end)"
+                    + (if .owner_note == "平台兜底" then " · 模块负责人未配置，转平台兜底" else "" end) + "）")
+           end;
   [$tiers[] | select(.tier == "urgent")] as $u
   | [$tiers[] | select(.tier == "release")] as $r
   | [$tiers[] | select(.tier == "watch")] as $w
@@ -2318,7 +2336,7 @@ CARD_JSON="$(jq -n \
             # 理由去掉标签已经说过的开头（「修了仍在」「新增 · 」…），避免「「新增」 新增 · …」这种重复
             [ $u[] | block("red-50";
                 "**\(pn) · \(ttl)** `\(.id[0:8])`\n<text_tag color=\u0027red\u0027>\(tagof)</text_tag> \(.why | sub("^(修了仍在：|新增 · |回归（曾消失又重现） · |暴涨 · |长期 · )"; ""))"
-                + (if (.by_ver // "") != "" then "\n" + g("7 天：" + .by_ver) else "" end); (.url // "")) ]
+                + (if (.by_ver // "") != "" then "\n" + g("7 天：" + .by_ver) else "" end) + who; (.url // "")) ]
             + [ $metric[] | block("red-50"; "**\(.title)**\n<text_tag color=\u0027red\u0027>\(.tag)</text_tag> \(.why)"; "") ]
           end)
        + (if ($r | length) == 0 then [] else
@@ -2383,7 +2401,8 @@ tier_md_list() { # $1=档(urgent|release|watch) → markdown 列表（空档输�
       (if (.url // "") != "" then "[\(.id[0:8])](\(.url))" else .id[0:8] end) +
       (if (.title // "") == "" then "" else " " + (.title | gsub("<"; "‹") | gsub(">"; "›") | if length > 48 then .[0:47] + "…" else . end) end) + " — \(.why)" +
       (if $t == "release" and (.fix_subject // "") != "" then "（修复：\(.fix_subject)）" else "" end) +
-      (if (.by_ver // "") != "" and $t != "watch" then "（\(.by_ver)）" else "" end)' 2>/dev/null || true
+      (if (.by_ver // "") != "" and $t != "watch" then "（\(.by_ver)）" else "" end) +
+      (if $t == "urgent" and (.owner_mod // "") != "" then "（👤 \(.owner_mod) · \(.owner_src)\(if (.owner_id // "") == "" then " · 负责人未配置" else "" end)）" else "" end)' 2>/dev/null || true
 }
 TIER_MD_URGENT="$(tier_md_list urgent)"
 _tm="$(printf '%s' "$TIER_METRIC" | jq -r '.[] | "- \(.title) — \(.tag)：\(.why)"' 2>/dev/null || true)"
@@ -3123,6 +3142,7 @@ tier_xml_paras() { # $1=档(urgent|release|watch)
       + " — " + (.why | @html)
       + (if $t == "release" and (.fix_subject // "") != "" then "（修复：" + (.fix_subject | @html) + "）" else "" end)
       + (if (.by_ver // "") != "" and $t != "watch" then "<span text-color=\"gray\">（" + (.by_ver | @html) + "）</span>" else "" end)
+      + (if $t == "urgent" and (.owner_mod // "") != "" then "<span text-color=\"gray\">（👤 " + ((.owner_mod + " · " + .owner_src + (if (.owner_id // "") == "" then " · 负责人未配置" else "" end)) | @html) + "）</span>" else "" end)
       + "</p>"' 2>/dev/null || true)"
   [ "$1" = urgent ] && metric="$(printf '%s' "$TIER_METRIC" | jq -r '.[] | "  <p><b>" + (.title | @html) + "</b> — " + (.tag | @html) + "：" + (.why | @html) + "</p>"' 2>/dev/null || true)"
   if [ -z "$items" ] && [ -z "$metric" ]; then

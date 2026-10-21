@@ -148,7 +148,7 @@ mkdir -p "$OUT_DIR"
 . "$ROOT/bin/lib/query.sh" # SQL 占位符替换唯一入口（q_render），漏传占位符当场失败
 # 核心层（纯函数），与 L1 共用同一份实现——此前 _fmt / _until_epoch / win_* / stale_days
 # 在两个脚本里各存了一份，其中 stale_days 逐字节相同。
-for _c in format verdict version cache fixrelease tier; do
+for _c in format verdict version cache fixrelease tier owner; do
   # shellcheck disable=SC1090
   . "$ROOT/bin/lib/core/${_c}.sh" || { echo "❌ 核心层缺失：bin/lib/core/${_c}.sh" >&2; exit 1; }
 done
@@ -156,6 +156,8 @@ done
 # 直连绕过 CRASH_REPORT_BQ_CACHE，L2 的三层等价性 diff 因此永远不为空。
 # shellcheck disable=SC1091
 . "$ROOT/bin/lib/bq.sh" || { echo "❌ 外壳层缺失：bin/lib/bq.sh" >&2; exit 1; }
+# 负责人 @ 的取信号与读内容文件（change crash-owner-mention），L1 / L2 共用一份
+. "$ROOT/bin/lib/owner.sh" || { echo "❌ 外壳层缺失：bin/lib/owner.sh" >&2; exit 1; }
 bq_init
 # ⛔ EXIT trap 用**完成哨兵**判定成败，⚠️ 不能靠 `$?`——bash 3.2 在 `set -u` 未定义变量
 #    这条致命路径上，**进 trap 时 `$?` 已经是 0**（实测；普通命令失败时才是 1）。
@@ -1543,6 +1545,22 @@ if [ "$WEEK_TIER_SRC" = model ]; then
   WEEK_URGENT="$(printf '%s' "$WEEK_URGENT" | jq -c --argjson fx "$FIX_PROGRESS" \
     'map(. as $x | . + {fixmark:(([$fx[] | select(.id == $x.id) | .mark][0]) // "")})' 2>/dev/null || printf '%s' "$WEEK_URGENT")"
 fi
+
+# 负责人 @ 与模块归属覆盖率（change crash-owner-mention，design D4 / D5）。
+# ⚠️ 平台键：周报条目用 ios/android，owner_enrich 内部换算。⛔ 归属走确定性规则，不让模型决定 @ 谁。
+_own_fm="$(jq -c '.mapped // {}' "$FIXMAP_FILE" 2>/dev/null || echo '{}')"
+_own_ios_tbl="$PROJECT.firebase_crashlytics.com_prime_dino_english_IOS_REALTIME"
+_own_and_tbl="$PROJECT.firebase_crashlytics.com_prime_dino_english_ANDROID_REALTIME"
+if [ "${WEEK_N_URGENT:-0}" -gt 0 ]; then
+  WEEK_URGENT="$(owner_enrich "$WEEK_URGENT" "$_own_fm" "$_own_ios_tbl" "$_own_and_tbl")"
+fi
+# 覆盖率：本周快照内全部 issue 按台数算「能归到具体模块」的占比。⛔ 只给分数不给百分比（样本小，百分比是伪精度）。
+WEEK_OWNER_COV=""
+OWNER_COV_MIN=10   # 某端受影响台数低于此值只给分数、不给补埋点建议（用户 2026-10-21）
+_own_all="$(jq -c '[("ios","android") as $k | (.[$k] // [])[]? | {plat:$k, id, users:(.users // 0)}]' "$SNAP_NEW" 2>/dev/null || echo '[]')"
+if [ "$(printf '%s' "$_own_all" | jq 'length')" -gt 0 ]; then
+  WEEK_OWNER_COV="$(owner_coverage_line "$(owner_coverage "$(owner_enrich "$_own_all" "$_own_fm" "$_own_ios_tbl" "$_own_and_tbl")")" "$OWNER_COV_MIN" 2>/dev/null || true)"
+fi
 # 卡片：三档 + 修复进度 + 本周变化 + 主力版本（change crash-report-attention-tiers，样稿 W2）
 WEEK_N_RELEASE_BAD="$(printf '%s' "$FIX_PROGRESS" | jq '[.[] | select(.status == "修了仍在" and .state != "CLOSED")] | length')"
 if [ "${WEEK_N_URGENT:-0}" -gt 0 ]; then HEADER_COLOR="red"; WEEK_VERDICT="本周必修 ${WEEK_N_URGENT} 项"
@@ -1599,7 +1617,7 @@ CARD_JSON="$(jq -n \
   --argjson nu "${WEEK_N_URGENT:-0}" --argjson nbad "${WEEK_N_RELEASE_BAD:-0}" --argjson nw "${WEEK_N_WATCH:-0}" \
   --argjson urg "$WEEK_URGENT" --argjson wat "$WEEK_WATCH" --argjson fix "$FIX_PROGRESS" \
   --arg srcn "$WEEK_SRC_NOTE" --arg cc "$WEEK_CHG_COUNTS" --arg ch "$WEEK_CHG_TABLE" --arg vn "$VERSION_NOTES_MD" \
-  --arg wow "$ADOPT_WOW_PLAIN" --arg nm "$NOTE_MD" \
+  --arg wow "$ADOPT_WOW_PLAIN" --arg nm "$NOTE_MD" --arg ocov "$WEEK_OWNER_COV" \
   --argjson rows "${ADOPT_JSON:-[]}" --argjson chd "$CHART_DRILL" --arg dt "${DRILL_TITLE:-}" --arg dn "$DRILL_NOTE" \
   --argjson chp95 "${CHART_P95:-[]}" '
   def g($s): "<font color=\u0027grey\u0027>" + $s + "</font>";
@@ -1622,6 +1640,12 @@ CARD_JSON="$(jq -n \
      elements:[{tag:"markdown", content:$md}]};
   # ⚠️ 尖括号换成 ‹›：`<init>` 被截断成 `<i` 后会被卡片 markdown 当标签吞掉（与日报同一处理）
   def ttl: (if (.title // "") == "" then "（标题未取到）" else (.title | gsub("<"; "‹") | gsub(">"; "›") | if length > 48 then .[0:47] + "…" else . end) end);
+  # 负责人行（change crash-owner-mention）：与日报同一写法；未判出不出这一行
+  def who: if (.owner_mod // "") == "" then ""
+           else "\n👤 " + (if (.owner_id // "") != "" then "<at id=\(.owner_id)></at>" else "⚠️ 负责人未配置" end)
+                + g(" · \(.owner_mod)（\(if .owner_src == "兜底" then "归不到模块 · 兜底" else .owner_src end)"
+                    + (if .owner_note == "平台兜底" then " · 模块负责人未配置，转平台兜底" else "" end) + "）")
+           end;
   def ptag: if (.priority // "") != "" then "<text_tag color=\u0027" + (if .priority == "P0" then "red" else "orange" end) + "\u0027>\(.priority)</text_tag> "
             else "<text_tag color=\u0027red\u0027>规则判定</text_tag> " end;
   [$fix[] | select(.status == "修了仍在" and .state != "CLOSED")] as $bad
@@ -1644,7 +1668,7 @@ CARD_JSON="$(jq -n \
                    + (if (.why // "") != "" then .why else "" end)
                    + (if (.users // 0) > 0 then " · \(.users) 人" else "" end)
                    + (if (.fixmark // "") != "" then "\n" + g("修复状态：" + .fixmark) else "" end)
-                   + (if (.action // "") != "" then "\n" + g("👉 " + .action) else "" end); (.url // "")) ]
+                   + (if (.action // "") != "" then "\n" + g("👉 " + .action) else "" end) + who; (.url // "")) ]
           end)
        + [{tag:"markdown", content:"**🔧 修复进度**", margin:"12px 0px 0px 0px"},
           {tag:"markdown", content:"⚠️ 修了仍在 **\($bad | length)**　🛠️ 已修未发版 **\($pend | length)**　📦 已发版待验 **\($wait | length)**　✅ 已关闭 **\($closed | length)**"}]
@@ -1655,6 +1679,7 @@ CARD_JSON="$(jq -n \
           end)
        + [{tag:"markdown", content:("**📌 本周变化**　" + $cc), margin:"12px 0px 0px 0px"}]
        + (if $ch == "" then [] else [panel("本周变化明细 " + g("· 点开看"); $ch)] end)
+       + (if $ocov == "" then [] else [{tag:"markdown", content:g($ocov), margin:"8px 0px 0px 0px"}] end)
        + (if ($wat | length) == 0 then [] else
             [{tag:"markdown", content:"**👀 观察**", margin:"12px 0px 0px 0px"},
              panel("观察 \($wat | length) 项 " + g("· 今天不用动");
@@ -1696,7 +1721,7 @@ CARD_JSON="$(jq -n \
           {tag:"markdown", content:"📄 [完整报告](__REPORT_URL__) · 📁 [全部报告](__FOLDER_URL__)"}])}}')"
 
 # 群消息 markdown（message.md）：与卡片同一份数据的文本形态
-WEEK_MD_URGENT="$(printf '%s' "$WEEK_URGENT" | jq -r '.[] | "- \(if (.priority // "") != "" then .priority + " " else "" end)\(if .plat == "ios" then "iOS" else "Android" end) \(if (.url // "") != "" then "[\(.id[0:8])](\(.url))" else .id[0:8] end) \((.title // "") | gsub("<"; "‹") | gsub(">"; "›") | if length > 48 then .[0:47] + "…" else . end) — \(.why // "")\(if (.action // "") != "" then "；👉 " + .action else "" end)\(if (.fixmark // "") != "" then "（修复状态：" + .fixmark + "）" else "" end)"' 2>/dev/null || true)"
+WEEK_MD_URGENT="$(printf '%s' "$WEEK_URGENT" | jq -r '.[] | "- \(if (.priority // "") != "" then .priority + " " else "" end)\(if .plat == "ios" then "iOS" else "Android" end) \(if (.url // "") != "" then "[\(.id[0:8])](\(.url))" else .id[0:8] end) \((.title // "") | gsub("<"; "‹") | gsub(">"; "›") | if length > 48 then .[0:47] + "…" else . end) — \(.why // "")\(if (.action // "") != "" then "；👉 " + .action else "" end)\(if (.fixmark // "") != "" then "（修复状态：" + .fixmark + "）" else "" end)\(if (.owner_mod // "") != "" then "（👤 \(.owner_mod) · \(.owner_src)\(if (.owner_id // "") == "" then " · 负责人未配置" else "" end)）" else "" end)"' 2>/dev/null || true)"
 [ -n "$WEEK_MD_URGENT" ] || WEEK_MD_URGENT="✅ 本周无必修"
 # ⚠️ 图标与 fix_mark（core/fixrelease.sh）一致，格式与「本周变化」行一致（数字加粗、全角空格）——用户 2026-10-11 要求统一
 WEEK_MD_FIX="$(printf '%s' "$FIX_PROGRESS" | jq -r '"⚠️ 修了仍在 **\([.[] | select(.status == "修了仍在" and .state != "CLOSED")] | length)**　🛠️ 已修未发版 **\([.[] | select(.status == "已修未发版" and .state != "CLOSED")] | length)**　📦 已发版待验 **\([.[] | select(.status == "已发版待验" and .state != "CLOSED")] | length)**　✅ 已关闭 **\([.[] | select(.state == "CLOSED")] | length)**"' 2>/dev/null || true)"
@@ -1709,6 +1734,7 @@ ${WEEK_MD_URGENT}
 
 **🔧 修复进度**：${WEEK_MD_FIX}
 **📌 本周变化**：${WEEK_CHG_COUNTS}
+${WEEK_OWNER_COV}
 
 $CHANGES_MD
 
@@ -1730,6 +1756,7 @@ REPORT="$STATE/reports/$DAY-weekly.md"
   printf '## 本周必修\n\n> %s\n\n%s\n\n' "$WEEK_SRC_NOTE" "$WEEK_MD_URGENT"
   printf '**🔧 修复进度**：%s\n\n' "$WEEK_MD_FIX"
   printf '**📌 本周变化**：%s\n\n' "$WEEK_CHG_COUNTS"
+  [ -n "$WEEK_OWNER_COV" ] && printf '%s\n\n' "$WEEK_OWNER_COV"
   printf '## 一、本周变化\n\n%s\n\n' "$CHANGES_MD"
   [ -n "$RECUR_MD" ] && printf '%s\n\n' "$RECUR_MD"
   [ -n "$RECUR_MD" ] && printf '> ⚠️ 「回归」指该 issue 在**上一轮基准日**（取基准里 `last` 的最大值，**不是「上周」**）无记录、本轮重新出现。判定窗口是崩溃段的滚动窗口——「消失」是**窗口内无事件**，⛔ 不等于「已修复」。⛔ 只给分数不给百分比：基准规模小（本轮 '"$SEEN_SIZE"' 项），百分比是伪精度。\n\n'
