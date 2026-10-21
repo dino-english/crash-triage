@@ -11,7 +11,8 @@ ROOT="$(cd "$SELF_DIR/../.." && pwd)"
 # shellcheck disable=SC1091
 . "$ROOT/bin/lib/core/fixrelease.sh"
 
-v() { h_run fix_release_verdict "$1" "$2" "$3"; }
+# 第 4 参 = 该端商店当前版本；缺省 1.8.2（2026-10-21 两端公开商店实测都是 1.8.2）
+v() { h_run fix_release_verdict "$1" "$2" "$3" "${4:-1.8.2}"; }
 st() { jq -r '"\(.status) old=\(.old_build_events) new=\(.new_build_events)"' <<<"$1"; }
 
 echo "── Android：修复还没发版，崩溃全在旧包上（8bc4b97e）──"
@@ -38,12 +39,12 @@ out="$(v '{"platform":"android","commit_epoch":1790581208,"release_ref":"V1.8.2"
          '[{"build":"182006","version":"1.8.2","first_seen":"1790500000","perf_on":"0","events":"3"}]' '[]')"
 h_assert_eq "已发版待验 old=3 new=0" "$(st "$out")" "⛔ 版本号够但首现早于提交 → 不可能含修复"
 
-echo "── Android：进了 main 但没有 tag → 退回「首现晚于提交」──"
+echo "── Android：进了 main 但没有 tag → 含修复退回「首现晚于提交」；⛔ 已上线不再认 main ──"
 fixmain='{"platform":"android","commit_epoch":1000,"release_ref":"main","fixed_in_version":null}'
 h_assert_eq "修了仍在 old=0 new=5" "$(st "$(v "$fixmain" '[{"build":"190001","version":"1.9.0","first_seen":"2000","perf_on":"0","events":"5"}]' '[]')")" \
   "首现晚于提交的包上有事件 → 修了仍在"
-h_assert_eq "已发版待验 old=5 new=0" "$(st "$(v "$fixmain" '[{"build":"182010","version":"1.8.2","first_seen":"500","perf_on":"0","events":"5"}]' '[]')")" \
-  "首现早于提交 → 旧包；进了 main 即已上线"
+h_assert_eq "已修未发版 old=5 new=0" "$(st "$(v "$fixmain" '[{"build":"182010","version":"1.8.2","first_seen":"500","perf_on":"0","events":"5"}]' '[]')")" \
+  "⛔ 没进任何 V* tag → 商店上不可能有含修复的版本（旧判据「进 main 即上线」已订正，crash-fix-store-version）"
 
 echo "── Android：已发版、修复后 0 事件 ──"
 h_assert_eq "已发版待验 old=0 new=0" \
@@ -75,5 +76,17 @@ echo "── 版本号按数字比较 ──"
 out="$(v '{"platform":"android","commit_epoch":1,"release_ref":"V1.9.0","fixed_in_version":"1.9.0"}' \
          '[{"build":"1100001","version":"1.10.0","first_seen":"2","perf_on":"0","events":"1"}]' '[]')"
 h_assert_eq "修了仍在 old=0 new=1" "$(st "$out")" "⛔ 1.10.0 ≥ 1.9.0（字符串比较会判反）"
+
+echo "── 已上线以商店为准（change crash-fix-store-version，2026-10-21 实测）──"
+# d0dcb015 等 6 条：V1.9.0 10-18 打 tag，Google Play 仍是 1.8.2——旧判据 10-19 起报「已发版待验」
+f190='{"platform":"android","commit_epoch":1,"release_ref":"V1.9.0","fixed_in_version":"1.9.0"}'
+h_assert_eq "已修未发版 old=0 new=0" "$(st "$(v "$f190" '[]' '[]' 1.8.2)")" "⛔ tag 已打、商店仍 1.8.2 → 未上线（10-19 的错分类）"
+h_assert_eq "已发版待验 old=0 new=0" "$(st "$(v "$f190" '[]' '[]' 1.9.0)")" "商店到 1.9.0 → 已上线"
+h_assert_eq "已发版待验 old=0 new=0" "$(st "$(v "$f190" '[]' '[]' 1.10.0)")" "⛔ 商店 1.10.0 ≥ 1.9.0（字符串比较会判反）"
+h_assert_eq "已修未发版 old=0 new=0" "$(st "$(v "$f190" '[]' '[]' '')")" "⛔ 商店版本为空 → 保守判未上线，不得当成已上线"
+# iOS：修复后首个上架包是 1.9.0，商店仍 1.8.2
+reli='[{"build":"1.9.0.5","version":"1.9.0","first_seen":"5000","perf_on":"12"},{"build":"1.8.2.9","version":"1.8.2","first_seen":"100","perf_on":"900"}]'
+h_assert_eq "已修未发版 old=0 new=0" "$(st "$(v "$fixi" '[]' "$reli" 1.8.2)")" "⛔ iOS 含修复的最低版本 1.9.0 > 商店 1.8.2 → 未上线"
+h_assert_eq "已发版待验 old=0 new=0" "$(st "$(v "$fixi" '[]' "$reli" 1.9.0)")" "iOS 商店到 1.9.0 → 已上线"
 
 h_summary

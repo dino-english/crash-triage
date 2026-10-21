@@ -11,34 +11,43 @@
 #   否则                          → 已修未发版
 #
 # 「含修复的包」与「已上线」按端可得的信号判（design D2）：
-#   iOS     含修复 = 首现晚于提交 且 上架包（perf_on>0）；已上线 = rel 清单里有首现晚于提交的
+#   iOS     含修复 = 首现晚于提交 且 上架包（perf_on>0）
 #           ⛔ 不用 tag（缺 v1.8.1/v1.8.2，修复多为 cherry-pick 不在 tag 祖先链上）
 #           ⛔ 内部包（perf_on=0）不算含修复：一次内测崩溃不得改判「修了仍在」（c3184f91 先例）
-#   Android 已上线 = release_ref 非空（进了 main 或某个 V* tag）
-#           含修复 = 版本号 ≥ fixed_in_version 且 首现晚于提交；fixed_in_version 为 null（进 main 无 tag）
+#   Android 含修复 = 版本号 ≥ fixed_in_version 且 首现晚于提交；fixed_in_version 为 null（进 main 无 tag）
 #           时退回「首现晚于提交」
-#           ⛔ 不用设备数门槛（用户决定 2026-10-06）
 #
-# 用法：fix_release_verdict <fix条目JSON> <该 issue 的 ev 行JSON数组> <rel 行JSON数组>
+# 「已上线」两端统一以**公开商店当前版本**为准（change crash-fix-store-version，2026-10-21）：
+#   已上线 = 商店版本 ≥ 含修复的最低版本
+#     Android 含修复的最低版本 = fixed_in_version（最早包含提交的 V* tag）；为 null（没进任何 tag）→ 未上线
+#     iOS     含修复的最低版本 = rel 清单里首现晚于提交的上架包的最低版本
+#   ⛔ 旧判据「进了 main / 打了 tag 即上线」已订正：2026-10-19 V1.9.0 打 tag 后 6 条修复被移出「等发版」，
+#      而 Google Play 上仍是 1.8.2（1.9.0 每天 1~3 台）——tag 是「代码发布」，不是「用户拿到」。
+#   ⛔ 商店版本不可得时**不调本函数**：调用方把该端标「发版判定不可得」（见 fix-release-status.sh）。
+#
+# 用法：fix_release_verdict <fix条目JSON> <该 issue 的 ev 行JSON数组> <rel 行JSON数组> <该端商店当前版本>
 #   fix 条目至少含 platform / commit_epoch，Android 另含 release_ref / fixed_in_version
 #   ev 行：{build, version, first_seen, perf_on, events}（数值可为字符串，bq json 输出即如此）
 # 输出：{"status":…, "old_build_events":N, "new_build_events":N}
 fix_release_verdict() {
-  jq -cn --argjson fix "$1" --argjson ev "$2" --argjson rel "$3" '
+  jq -cn --argjson fix "$1" --argjson ev "$2" --argjson rel "$3" --arg store "${4:-}" '
     # 版本号拆成数字数组比较（1.10.0 > 1.9.0）。⛔ 不从 versionCode 反推（末 3 位是 CI 序号）
     def vparts: tostring | split(".") | map(tonumber? // 0);
     def num: if . == null then 0 else tonumber end;
     ($fix.commit_epoch | num) as $ct |
+    # 商店版本为空 = 调用方违约（应已标不可得）；按「未上线」保守处理，⛔ 不得当成已上线
+    def onstore($minv): $store != "" and $minv != null and (($store | vparts) >= ($minv | vparts));
     ($fix.platform // "") as $p |
     (if $p == "android" then
        ($fix.fixed_in_version // null) as $fv |
        def contains_fix: (.first_seen | num) > $ct and
          (if $fv == null then true else ((.version | vparts) >= ($fv | vparts)) end);
-       { released: (($fix.release_ref // null) != null),
+       { released: onstore($fv),
          rows: ($ev | map(. + {fixed: contains_fix})) }
      else
        def contains_fix: (.first_seen | num) > $ct and (.perf_on | num) > 0;
-       { released: ($rel | map(select((.first_seen | num) > $ct and (.perf_on | num) > 0)) | length > 0),
+       { released: onstore([ $rel[] | select((.first_seen | num) > $ct and (.perf_on | num) > 0) | .version ]
+                           | sort_by(vparts) | .[0]),
          rows: ($ev | map(. + {fixed: contains_fix})) }
      end) as $j |
     ([$j.rows[] | select(.fixed)     | .events | num] | add // 0) as $new |

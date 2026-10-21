@@ -33,6 +33,8 @@ REPOS_SYNCED="${CRASH_REPORT_REPOS_SYNCED:-1}"
 . "$ROOT/bin/lib/query.sh" || { echo "❌ 外壳层缺失：bin/lib/query.sh" >&2; exit 1; }
 # shellcheck disable=SC1091
 . "$ROOT/bin/lib/core/fixrelease.sh" || { echo "❌ 核心层缺失：bin/lib/core/fixrelease.sh" >&2; exit 1; }
+# shellcheck disable=SC1091
+. "$ROOT/bin/lib/store.sh" || { echo "❌ 外壳层缺失：bin/lib/store.sh" >&2; exit 1; }
 # ⚠️ 承重墙：bq_init 的默认分支引用 ${TS}，本脚本不定义 TS——预设 BQ_ERRLOG 才不会死于 unbound variable。
 BQ_ERRLOG="$(dirname "$OUT")/fix-release-bq-stderr.log"
 bq_init
@@ -41,6 +43,9 @@ trap 'rm -f "$BQ_SQLTMP"; [ "${RUN_COMPLETED:-0}" = 1 ] || exit 1' EXIT
 
 MAPPED="$(jq -c '.mapped // {}' "$IN")"
 RESULTS='{}'      # {"<id>": {verdict…}}，只收判成功的
+# 「已上线」的真值：公开商店当前版本（change crash-fix-store-version）。每端只取一次。
+STORE_IOS="$(store_version ios)"; STORE_AND="$(store_version android)"
+echo "  商店当前版本：iOS ${STORE_IOS:-不可得} · Android ${STORE_AND:-不可得}" >&2
 UNAVAIL='[]'      # 取数失败的平台
 
 for p in ios android; do
@@ -53,6 +58,13 @@ for p in ios android; do
     | map("STRUCT(\"\(.key)\" AS id, TIMESTAMP_SECONDS(\(.value.commit_epoch | floor)) AS ct)")
     | join(", ")' <<<"$MAPPED")"
   [ -n "$fixes" ] || continue
+  sv="$STORE_IOS"; [ "$p" = android ] && sv="$STORE_AND"
+  # ⛔ 商店版本取不到 → 该端整端「发版判定不可得」，⛔ 不回落成任何推测信号（tag / main / 设备数都实测说反过）
+  if [ -z "$sv" ]; then
+    echo "  ⚠️ ${p} 商店版本取不到，该端保留时间规则结果并标注「发版判定不可得」" >&2
+    UNAVAIL="$(jq -c --arg p "$p" '. + [$p]' <<<"$UNAVAIL")"
+    continue
+  fi
   sql="$(q_render fix-release-builds.sql FIXES="$fixes" \
            SESS_RT_TABLE="$PROJECT.firebase_sessions.com_prime_dino_english_${T}_REALTIME" \
            SESS_TABLE="$PROJECT.firebase_sessions.com_prime_dino_english_${T}" \
@@ -72,14 +84,15 @@ for p in ios android; do
     [ -n "$id" ] || continue
     fix="$(jq -c --arg id "$id" '.[$id]' <<<"$MAPPED")"
     ev="$(jq -c --arg id "$id" '[.[] | select(.kind == "ev" and .issue_id == $id)]' <<<"$rows")"
-    v="$(fix_release_verdict "$fix" "$ev" "$rel")"
+    v="$(fix_release_verdict "$fix" "$ev" "$rel" "$sv")"
     RESULTS="$(jq -c --arg id "$id" --argjson v "$v" '. + {($id): $v}' <<<"$RESULTS")"
   done < <(jq -r --arg p "$p" 'to_entries[] | select(.value.platform == $p) | .key' <<<"$MAPPED")
 done
 
 tmp="$OUT.tmp.$$"
-jq --argjson res "$RESULTS" --argjson unavail "$UNAVAIL" --argjson synced "$([ "$REPOS_SYNCED" = 0 ] && echo false || echo true)" '
+jq --arg siso "$STORE_IOS" --arg sand "$STORE_AND" --argjson res "$RESULTS" --argjson unavail "$UNAVAIL" --argjson synced "$([ "$REPOS_SYNCED" = 0 ] && echo false || echo true)" '
   .release_unavailable = $unavail
+  | .store_versions = {ios: $siso, android: $sand}
   | .repos_synced = $synced
   | .mapped = ((.mapped // {}) | with_entries(
       .key as $id

@@ -39,7 +39,9 @@ fi
 EOF
 chmod +x "$T/bin/bq"
 
-run() { PATH="$T/bin:$PATH" CRASH_REPORT_ROOT="$ROOT" CRASH_REPORT_STATE_DIR="$T/state" \
+# 商店版本走覆盖（零网络）；缺省 = 2026-10-21 两端公开商店实测值
+STORES='{"ios":"1.8.2","android":"1.8.2"}'
+run() { PATH="$T/bin:$PATH" CRASH_REPORT_ROOT="$ROOT" CRASH_REPORT_STATE_DIR="$T/state" CRASH_REPORT_STORE_VERSIONS="$STORES" \
           bash "$ROOT/bin/fix-release-status.sh" "$T/in.json" "$T/out.json" 2>"$T/err"; }
 get() { jq -r --arg id "$1" ".mapped[\$id] | $2" "$T/out.json"; }
 
@@ -67,5 +69,13 @@ rm -f "$T/out.json"; FAKE_BQ_FAIL=ios,android CRASH_REPORT_REPOS_SYNCED=0 run; r
 h_assert_eq "2" "$rc" "rc=2"
 h_assert_eq "unavailable|unavailable|unavailable" "$(jq -r '[.mapped[].release_check] | join("|")' "$T/out.json")" "全部标 unavailable"
 h_assert_eq "false" "$(jq -r .repos_synced "$T/out.json")" "repos_synced=false 透传给呈现层（design D5）"
+
+echo "── ④ ⛔ 一端商店版本取不到（android）→ 该端不可得，另一端照判 ──"
+rm -f "$T/out.json"; STORES='{"ios":"1.8.2","android":""}'; run; rc=$?; STORES='{"ios":"1.8.2","android":"1.8.2"}'
+h_assert_eq "2" "$rc" "有一端不可得 → rc=2"
+h_assert_eq "修了仍在|unavailable" "$(get "$A" '"\(.status)|\(.release_check)"')" "⛔ 不回落成 tag / main 推测，保留时间规则并标不可得"
+h_assert_eq "已修未发版|ok" "$(get "$I" '"\(.status)|\(.release_check)"')" "iOS 照常判"
+h_assert_contains "$(cat "$T/err")" "android 商店版本取不到" "取不到要说出来"
+h_assert_eq '{"ios":"1.8.2","android":""}' "$(jq -c .store_versions "$T/out.json")" "商店版本写进产物供呈现与回溯"
 
 h_summary
