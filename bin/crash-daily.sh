@@ -891,8 +891,10 @@ done
 # 全版本 crash-free：回答「整体健不健康」。最新版那个回答「新版发得怎么样」——
 # 实测最新版 94.29% 基于 35 个会话，**没有统计意义**，却是卡片上唯一的 crash-free 数字。
 # 两个并列，各自标口径（design D4）。
-allver_crashfree() { # $1=crash表 $2=sessions表 → 「99.28」或空
-  local sql out cs se
+allver_crashfree() { # $1=crash表 $2=sessions表 → 「99.28<TAB>全版本致命事件数」或空
+  # ⚠️ 第二列供 MCP 快照印证「该端 OPEN 列表为空是真的没有」（见快照写入处 mcp_ok）——
+  #    ⛔ 不能拿第一列的「100.00」代替：那是四舍五入后的会话率，1 次崩溃也可能显示成 100.00。
+  local sql out cs se ev
   [ -n "$1" ] && [ -n "$2" ] || { printf ''; return 0; }
   # 版本过滤改成恒真，其余照用 crash-rate.sql（同一份 SQL，口径不会漂）。
   # ⛔ **不能整行删掉**：sessions 子查询里那行就是 `WHERE ...`，删了会留下 `FROM ... AND` 语法错误。
@@ -903,15 +905,16 @@ allver_crashfree() { # $1=crash表 $2=sessions表 → 「99.28」或空
          | sed -e 's|application.display_version IN (.*)|TRUE|g')"
   out="$(bqq csv "$sql" | tail -n +2 | head -1)" || return 0
   cs="$(printf '%s' "$out" | cut -d, -f4)"; se="$(printf '%s' "$out" | cut -d, -f2)"
+  ev="$(printf '%s' "$out" | cut -d, -f1)"
   { [ -n "$cs" ] && [ -n "$se" ] && [ "$se" != "0" ]; } || { printf ''; return 0; }
-  awk -v c="$cs" -v s="$se" 'BEGIN{printf "%.2f", 100 - c/s*100}'
+  awk -v c="$cs" -v s="$se" -v e="$ev" 'BEGIN{printf "%.2f\t%s", 100 - c/s*100, e}'
 }
 
 step "影响面维度（机型 / 系统版本 / 时段，仅最新 $VERSION_COUNT 版）"
 for v in $IOS_NEWEST; do collect_dims ios "$v" "$IOS_CRASH_TBL" "$SESS_IOS"; done
 for v in $AND_NEWEST; do collect_dims and "$v" "$AND_CRASH_TBL" "$SESS_AND"; done
-IOS_CF_ALL="$(allver_crashfree "$IOS_CRASH_TBL" "$SESS_IOS")"
-AND_CF_ALL="$(allver_crashfree "$AND_CRASH_TBL" "$SESS_AND")"
+IFS=$'\t' read -r IOS_CF_ALL IOS_FATAL_ALL <<< "$(allver_crashfree "$IOS_CRASH_TBL" "$SESS_IOS")"
+IFS=$'\t' read -r AND_CF_ALL AND_FATAL_ALL <<< "$(allver_crashfree "$AND_CRASH_TBL" "$SESS_AND")"
 echo "  全版本 crash-free：iOS ${IOS_CF_ALL:-—}% · Android ${AND_CF_ALL:-—}%"
 
 # ── 天级单日值：只跟踪最新 N 版（主力补充列不进 1d/历史，design D11 成本控制）──
@@ -1301,7 +1304,7 @@ fi
 _mcp_split() { # $1=平台键(ios|android) $2=本轮 MCP json $3=上一轮快照 $4=基准 json → "新增数<TAB>回归数"（-1 = 判不了）
   jq -rn --slurpfile c "$2" --slurpfile s "$3" --argjson seen "$4" --arg k "$1" '
     ($s[0][($k + "_ids")] // []) as $prev
-    | if ($prev | length) == 0 then "-1\t-1"
+    | if ($prev | length) == 0 and ((($s[0].mcp_ok // {})[$k]) != true) then "-1\t-1"
       else
         [ ($c[0][$k] // [])[] | select(.id as $i | $prev | index($i) | not) ] as $gone
         | "\(([$gone[] | select($seen[.id] == null)] | length))\t\(([$gone[] | select($seen[.id] != null)] | length))"
@@ -1358,10 +1361,18 @@ AND_ANR_RATE="$(mv_ and "$AND_ALERT_VER" errtype.anr_rate_pct)"   # iOS 无 ANR�
 if [ "$MCP_OK" = 1 ] && [ -f "$SNAP" ]; then
   IFS=$'\t' read -r NEW_IOS REGR_IOS <<< "$(_mcp_split ios     "$CRASH_JSON" "$SNAP" "$MCP_SEEN_JSON")"
   IFS=$'\t' read -r NEW_AND REGR_AND <<< "$(_mcp_split android "$CRASH_JSON" "$SNAP" "$MCP_SEEN_JSON")"
-  # ⛔ 「判不了」优先于其余分支：上一轮快照为空时任何分列都是假的。
-  if [ "${NEW_IOS:-0}" = "-1" ] || [ "${NEW_AND:-0}" = "-1" ]; then
-    add_alert "ℹ️ 本轮不分列 issue 变化：上一轮快照为空（多半是那轮 MCP 取数失败），⛔ 与之相比得出的「新增」全是假的"
-  elif [ "$MCP_LIFECYCLE_OK" != 1 ]; then
+  # ⛔ 「判不了」**按端**弃权（2026-10-21 订正）：原写法任一端为 -1 就两端一起不分列，
+  #    且文案断言「多半是 MCP 取数失败、新增全是假的」。09-26 / 10-10 生产日志实测 MCP 都成功，
+  #    只是 iOS 真的没有 OPEN FATAL——次日卡片把 BigQuery 已核实的真新增（3c8c9ac8 等）一并说成假的。
+  #    -1 现在只在「上一轮该端为空且未经 BigQuery 印证」时出现（见快照写入处 mcp_ok）。
+  _abst=""
+  if [ "${NEW_IOS:-0}" = "-1" ]; then _abst="iOS"; NEW_IOS=0; REGR_IOS=0; fi
+  if [ "${NEW_AND:-0}" = "-1" ]; then
+    if [ -n "$_abst" ]; then _abst="iOS 与 Android"; else _abst="Android"; fi
+    NEW_AND=0; REGR_AND=0
+  fi
+  [ -n "$_abst" ] && add_alert "ℹ️ ${_abst} 本轮不分列 MCP 口径的新增/回归：上一轮该端 MCP 列表为空、且 BigQuery 印证不了是真的没有（可能是那轮取数失败）——「本轮 issue 变化」一行走 BigQuery 基准，不受影响"
+  if [ "$MCP_LIFECYCLE_OK" != 1 ]; then
     # ⛔ 基准未建立时**不得分列**：此时「不在基准里」对所有 issue 都成立，分列出来的
     #    「新增」是伪判定。按 L2 同一套做法，本轮只报合计并说明分不了（1789add 那条原则：
     #    判定对象要看「答不答得了」）。下一轮起基准就有了。
@@ -3346,8 +3357,16 @@ jq -n --arg day "$DAY" \
   --argjson mcpprev "$MCP_SEEN_JSON" \
   --argjson cur "$(printf '%s' "$CUR_IDS" | jq -Rsc 'split("\n")|map(select(length>0))')" \
   --arg cut "$(day_ago "$HISTORY_KEEP")" \
+  --arg mok "$MCP_OK" --arg ifat "${IOS_FATAL_ALL:-}" --arg afat "${AND_FATAL_ALL:-}" \
   '{day:$day, versions:$vers,
     ios_ids:[($c[0].ios // [])[].id], android_ids:[($c[0].android // [])[].id],
+    # 该端 *_ids 可信否，供明日 _mcp_split 判「空 = 真的没有」还是「空 = 没取到」。
+    # ⛔ MCP 结果由模型写出、不分端报成败；单端为空时只认 BigQuery 全版本致命事件数为 0 的印证。
+    #    取不到印证（空串）一律 false → 明日弃权，⛔ 不得默认可信。
+    mcp_ok: {
+      ios:     ($mok == "1" and (((($c[0].ios // []) | length) > 0) or $ifat == "0")),
+      android: ($mok == "1" and (((($c[0].android // []) | length) > 0) or $afat == "0"))
+    },
     issue_seen: (
       ($prev | with_entries(select(.value >= $cut)))     # 超期清理：末次出现早于保留期起点即丢弃
       + ($cur | map({key:., value:$day}) | from_entries) # 本轮出现的刷成今天

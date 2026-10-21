@@ -47,6 +47,26 @@ h_assert_eq "-1	-1" "$(h_run _mcp_split android "$T/crash.json" "$T/snap-bare.js
 h_assert_eq "-1	-1" "$(h_run _mcp_split ios "$T/crash.json" "$T/snap-bare.json" '{"aaaaaaaa111122223333444455556666":"2026-08-01"}')" \
   "⑥ iOS 单独判定，不受 android 条目影响（该轮 ios 无上一轮数据 → 弃权）"
 
+# ⛔ 单端为空经 BigQuery 印证（mcp_ok=true）→ 照常分列（2026-10-21 订正）。
+#    原场景：09-26 / 10-10 MCP 成功、iOS 真的 0 个 OPEN FATAL，次日卡片却两端一起弃权，
+#    并把 BigQuery 已核实的真新增 3c8c9ac8 说成「全是假的」。
+cat > "$T/snap-ok.json" <<'JSON'
+{"day":"2026-10-10","ios_ids":[],"android_ids":["62f88f3900a1313c994871bf51c65f81"],
+ "mcp_ok":{"ios":true,"android":true}}
+JSON
+h_assert_eq "1	0" "$(h_run _mcp_split ios "$T/crash.json" "$T/snap-ok.json" "$SEEN")" \
+  "⑧ 上一轮 iOS 为空且已印证 → aaaaaaaa 计 1 新增，⛔ 不得弃权"
+h_assert_eq "1	1" "$(h_run _mcp_split android "$T/crash.json" "$T/snap-ok.json" "$SEEN")" \
+  "⑨ 另一端照旧：Android 1 新增 + 1 回归，不受 iOS 影响"
+# 反向：未印证（false）仍弃权——09-05 那类「模型说 OK、两端全空」的真故障必须继续拦住
+cat > "$T/snap-unok.json" <<'JSON'
+{"day":"2026-09-05","ios_ids":[],"android_ids":[],"mcp_ok":{"ios":false,"android":false}}
+JSON
+h_assert_eq "-1	-1" "$(h_run _mcp_split ios "$T/crash.json" "$T/snap-unok.json" "$SEEN")" \
+  "⑩ ⛔ 上一轮为空且未印证 → 仍弃权"
+h_assert_eq "-1	-1" "$(h_run _mcp_split android "$T/crash.json" "$T/snap-unok.json" "$SEEN")" \
+  "⑪ ⛔ 两端全空未印证（09-05 形态）→ 两端都弃权"
+
 # MCP 抓取失败（/dev/null）：⛔ 必须安静返回 0/0，不得触发 ERR trap
 h_assert_eq "0	0" "$(h_run _mcp_split android /dev/null "$T/snap.json" "$SEEN")" "⑦ 本轮无数据 → 0/0"
 h_assert_rc 0 _mcp_split android /dev/null "$T/snap.json" "$SEEN"
