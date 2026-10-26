@@ -26,6 +26,8 @@ webview	and	ou_441b57984a3232f87cb2a4b1bbe67617
 webview	ios	ou_275b0a10722e301f33cca460d19f80fd
 pay	and	ou_07dfda3433dbc8cdf55f4783808b6ecd
 pay	ios	ou_c8d5ce5a4a468bd439012b317d68dab8
+pag	and	ou_aa2ee8f85c013f8e0887e23109ff7f66
+pag	ios	ou_8ae48f5c310b080f77b65211d8ade871
 crash_fallback	and	ou_aa2ee8f85c013f8e0887e23109ff7f66
 crash_fallback	ios	ou_8ae48f5c310b080f77b65211d8ade871
 platform_fallback	and	ou_5536eda75a97567574bed37c5ecff1c4
@@ -50,6 +52,7 @@ monitor_maintainer	ios	ou_2a99454a1726190d6f36083549341005
 - 第 3 序：**明显属于某模块的 SDK 归该模块**（用户 2026-10-21 认可），归属不明的第三方 SDK 才落 `crash_fallback`。
 - ⛔ Android `current_screen = MainActivity` 不提供信息，规则表里不得有能命中它的正则。
 - ⛔ **责任帧为 THIRD_PARTY 时不用页面信号**（2026-10-21 回放订正）：`4ade82c7` / `ed3883b1` 是 PAG 的 `nativeFinalize`（GC 回收线程），崩时停在 `CommonWebActivity` 是巧合，按页面会 @ webview，而同一崩溃拆出的 `29d4790c` 落兜底——三条互相矛盾。SDK 规则没认领的第三方崩溃一律兜底，与负责人表「第三方 SDK → crash_fallback」一致。
+- **pag 单列**（用户 2026-10-26：「pag 可以单独开，先放兜底」）：首周兜底 13 次 @ 里 5 次是 PAG。规则按近 30 天 6 个 PAG FATAL/ANR 的责任帧实测写——scope `pag`、自家帧 `DinoPAGView`、SDK 帧 `^libpag ` / `org.libpag.`；负责人暂与 `crash_fallback` 同人，换人只改 `owners.tsv`。
 - 规则是**内容**：放 `notes/module-rules.tsv`（`信号 <TAB> 正则 <TAB> 模块键`，信号 ∈ `scope / own / lib / screen`），改规则不改代码。
 
 ### D3 负责人解析与兜底

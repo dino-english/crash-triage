@@ -8,8 +8,9 @@
 #     screen —— 崩溃事件 custom key `current_screen` 的众数（⛔ 责任帧为 THIRD_PARTY 时不用：GC / 回收线程上的 SDK 崩溃与当前页面无关）
 #   都不命中 → crash_fallback
 #
-# ⛔ 宁落兜底不猜模块：错 @ 比不 @ 更伤信任。灰色项（media / pag / radio / designsystem /
+# ⛔ 宁落兜底不猜模块：错 @ 比不 @ 更伤信任。灰色项（media / radio / designsystem /
 #    LINE SDK）2026-10-21 起草时**刻意不映射**，确认后再加。
+#    pag 2026-10-26 用户确认单列（首周兜底 13 次 @ 里 5 次是 PAG）；规则按近 30 天 6 个 PAG FATAL/ANR 的责任帧实测写。
 # ⛔ 不得写出能命中 Android `MainActivity` 的 screen 规则（单 Activity 架构，该值不带信息）。
 # 依据：2026-10-21 近 30 天 65 个 FATAL/ANR issue 实测。
 scope	^(tts|asr|ai|voice|speech|soe)$	voice
@@ -19,15 +20,18 @@ scope	^(account|login|auth)$	account
 scope	^(startup|launch|splash)$	startup
 scope	^(webview|h5)$	webview
 scope	^(network|net|api)$	core_network
+scope	^pag$	pag
 own	feature\.dinoclass|classsdk|DinoClass	dinoclass
 own	core\.ai\.|\.asr\.|\.tts\.	voice
 own	feature\.account|\.login\.	account
 own	feature\.pay\.|Paywall|Billing	pay
 own	core\.network\.	core_network
 own	Splash|AppLaunch	startup
+own	DinoPAGView	pag
 lib	CognitiveServices\.Speech|qcloudsoe|TAIOral	voice
 lib	billingclient|StoreKit	pay
 lib	chromium|WebKit	webview
+lib	^libpag |org\.libpag\.	pag
 screen	^(DinoClass|DC[A-Z]|TeacherSelection)	dinoclass
 screen	Login|Account|Register|SignIn	account
 screen	Paywall|Purchase|Subscribe|Payment	pay

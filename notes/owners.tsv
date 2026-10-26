@@ -22,6 +22,8 @@ webview	and	ou_441b57984a3232f87cb2a4b1bbe67617
 webview	ios	ou_275b0a10722e301f33cca460d19f80fd
 pay	and	ou_07dfda3433dbc8cdf55f4783808b6ecd
 pay	ios	ou_c8d5ce5a4a468bd439012b317d68dab8
+pag	and	ou_aa2ee8f85c013f8e0887e23109ff7f66
+pag	ios	ou_8ae48f5c310b080f77b65211d8ade871
 crash_fallback	and	ou_aa2ee8f85c013f8e0887e23109ff7f66
 crash_fallback	ios	ou_8ae48f5c310b080f77b65211d8ade871
 platform_fallback	and	ou_5536eda75a97567574bed37c5ecff1c4
