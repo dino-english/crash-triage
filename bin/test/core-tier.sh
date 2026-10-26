@@ -101,17 +101,29 @@ assert_eq "暴涨 · 未修复 · 7 天 2 台" "$(tier_classify '[{"plat":"andro
 
 # priorities_validate（design D2）
 _t_ids='["8bc4b97e887ce32a7fada8b4fd2abc29","181010225a8f7695edf124ff32b9c406"]'
-assert_eq "false|priorities.json 缺失" "$(priorities_validate '' "$_t_ids" | jq -r '"\(.ok)|\(.reason)"')" "文件缺失 → 回落"
-assert_eq "false|priorities.json 不是合法 JSON" "$(priorities_validate '[{"issue_id":' "$_t_ids" | jq -r '"\(.ok)|\(.reason)"')" "非法 JSON → 回落"
-assert_eq "false|priorities.json 顶层不是数组" "$(priorities_validate '{"a":1}' "$_t_ids" | jq -r '"\(.ok)|\(.reason)"')" "顶层不是数组 → 回落"
+assert_eq "false|priorities.json 缺失" "$(priorities_validate '' "$_t_ids" "$_t_ids" | jq -r '"\(.ok)|\(.reason)"')" "文件缺失 → 回落"
+assert_eq "false|priorities.json 不是合法 JSON" "$(priorities_validate '[{"issue_id":' "$_t_ids" "$_t_ids" | jq -r '"\(.ok)|\(.reason)"')" "非法 JSON → 回落"
+assert_eq "false|priorities.json 顶层不是数组" "$(priorities_validate '{"a":1}' "$_t_ids" "$_t_ids" | jq -r '"\(.ok)|\(.reason)"')" "顶层不是数组 → 回落"
 _t_p='[{"issue_id":"181010225A8F7695EDF124FF32B9C406","platform":"iOS","priority":"p0","action":"先取符号化样本","why":"影响量最高"},
  {"issue_id":"8bc4b97e887ce32a7fada8b4fd2abc29","platform":"android","priority":"P1","action":"入口校验 Channel ID","why":"启动即崩"},
  {"issue_id":"ffffffffffffffffffffffffffffffff","platform":"android","priority":"P0","action":"x","why":"模型编造的 id"},
  {"issue_id":"8bc4b97e","platform":"android","priority":"P0","action":"短 id 不收","why":""},
  {"issue_id":"8bc4b97e887ce32a7fada8b4fd2abc29","platform":"android","priority":"P9","action":"","why":"非法优先级"}]'
-_t_pv="$(priorities_validate "$_t_p" "$_t_ids")"
+_t_pv="$(priorities_validate "$_t_p" "$_t_ids" "$_t_ids")"
 assert_eq "true|3|181010225a8f7695edf124ff32b9c406:P0:ios 8bc4b97e887ce32a7fada8b4fd2abc29:P1:android" \
   "$(printf '%s' "$_t_pv" | jq -r '"\(.ok)|\(.dropped)|" + ([.items[] | "\(.id):\(.priority):\(.plat)"] | join(" "))')" \
   "大小写归一；快照外 id / 短 id / 非法优先级逐条剔除不作废整份；按 P0→P1 排序"
-assert_eq "true|0|0" "$(priorities_validate '[]' "$_t_ids" | jq -r '"\(.ok)|\(.dropped)|\(.items | length)"')" \
+assert_eq "true|0|0" "$(priorities_validate '[]' "$_t_ids" "$_t_ids" | jq -r '"\(.ok)|\(.dropped)|\(.items | length)"')" \
   "空数组合法（是否回落由调用方按「快照非空」判）"
+# 窗口约束（change crash-priorities-window-gate）：P0/P1 只认数据层快照；只在分析层快照里的降 P2 进 👀
+# 形态取自 2026-10-26 周报：29d4790c 末次事件 10-18 03:15 UTC，早于数据层窗口起点 10-18 21:40 UTC
+_t_win='["8bc4b97e887ce32a7fada8b4fd2abc29"]'
+_t_ids2='["8bc4b97e887ce32a7fada8b4fd2abc29","29d4790cd79b65c503b166bc99d0b3db","04deebf6aaaaaaaaaaaaaaaaaaaaaaaa"]'
+_t_p2='[{"issue_id":"29d4790cd79b65c503b166bc99d0b3db","platform":"android","priority":"P1","action":"定位 PAG 所有权","why":"PAG finalizer超时"},
+ {"issue_id":"8bc4b97e887ce32a7fada8b4fd2abc29","platform":"android","priority":"P0","action":"入口校验","why":"启动即崩"},
+ {"issue_id":"04deebf6aaaaaaaaaaaaaaaaaaaaaaaa","platform":"ios","priority":"P2","action":"","why":"旧包单例"}]'
+assert_eq "true|0|1|8bc4b97e:P0:启动即崩 29d4790c:P2:本周窗口内无事件 · 原判 P1 04deebf6:P2:旧包单例" \
+  "$(priorities_validate "$_t_p2" "$_t_ids2" "$_t_win" | jq -r '"\(.ok)|\(.dropped)|\(.demoted)|" + ([.items[] | "\(.id[0:8]):\(.priority):\(.why)"] | join(" "))')" \
+  "窗口外 P1 → P2 且改写理由、不计 dropped；窗内 P0 不动；P2 本就不在窗内也不算降级"
+assert_eq "0" "$(priorities_validate "$_t_p2" "$_t_ids2" "$_t_ids2" | jq -r '.demoted')" \
+  "全在窗内 → 不降级"

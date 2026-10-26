@@ -82,16 +82,20 @@ tier_classify() {
 # priorities_validate：周报分析层优先级契约的校验（design D2）。
 #   $1 = priorities.json 原文（文件缺失时传空串）
 #   $2 = 本轮快照里出现过的完整 issue id 数组 JSON（数据层 ∪ 分析层快照）
-# → {ok, reason, dropped, items:[{plat, id, priority, action, why}]}，items 按 P0→P2 排序
+#   $3 = 数据层快照的完整 issue id 数组 JSON（与「本周变化」同一滚动 7×24h 窗）
+# → {ok, reason, dropped, demoted, items:[{plat, id, priority, action, why}]}，items 按 P0→P2 排序
 # 校验：顶层数组；每条 issue_id 为 32 位小写十六进制**且在快照里**（防编造）；priority ∈ P0/P1/P2；
 #       platform ∈ ios/android。不合规的条目剔除并计入 dropped，⛔ 不让单条坏数据作废整份。
 #       action / why 超长截断不报错（模型常写长句，截断比丢弃信息量大）。
+# ⚠️ P0/P1 不在 $3 里 → 降为 P2（计入 demoted，不计 dropped）：分析层快照来自 topIssues，API 按**自然日**取窗
+#    （≈8 天），周一 05:30 +08 跑时比数据层多出近一整天。2026-10-26 实测 3 条末次事件早于窗口的 issue
+#    被排进 P1 并 @ 了人，同卡「本周变化」却标 ✅ 消失。⛔ 不剔除：模型的信号保留在 👀，只是不派活。
 priorities_validate() {
-  jq -cn --arg raw "$1" --argjson ids "$2" '
+  jq -cn --arg raw "$1" --argjson ids "$2" --argjson win "$3" '
     (try ($raw | fromjson) catch null) as $p
-    | if $raw == "" then {ok:false, reason:"priorities.json 缺失", dropped:0, items:[]}
-      elif $p == null then {ok:false, reason:"priorities.json 不是合法 JSON", dropped:0, items:[]}
-      elif ($p | type) != "array" then {ok:false, reason:"priorities.json 顶层不是数组", dropped:0, items:[]}
+    | if $raw == "" then {ok:false, reason:"priorities.json 缺失", dropped:0, demoted:0, items:[]}
+      elif $p == null then {ok:false, reason:"priorities.json 不是合法 JSON", dropped:0, demoted:0, items:[]}
+      elif ($p | type) != "array" then {ok:false, reason:"priorities.json 顶层不是数组", dropped:0, demoted:0, items:[]}
       else
         [ $p[] | select(type == "object")
           | {id:((.issue_id // "") | tostring | ascii_downcase),
@@ -103,7 +107,10 @@ priorities_validate() {
                             and (.priority == "P0" or .priority == "P1" or .priority == "P2")
                             and (.plat == "ios" or .plat == "android"))
                    | select(.id as $i | $ids | index($i)) ] as $okk
-        | {ok:true, reason:"", dropped:(($p | length) - ($okk | length)), items:($okk | sort_by(.priority))}
+        | [ $okk[] | if .priority != "P2" and (.id as $i | $win | index($i) | not)
+                     then . + {priority:"P2", why:"本周窗口内无事件 · 原判 \(.priority)", demoted:true} else . end ] as $out
+        | {ok:true, reason:"", dropped:(($p | length) - ($okk | length)),
+           demoted:([$out[] | select(.demoted)] | length), items:($out | map(del(.demoted)) | sort_by(.priority))}
       end'
 }
 

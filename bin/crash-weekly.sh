@@ -1445,21 +1445,30 @@ PRIO_FILE="$OUT_DIR/analysis/priorities.json"
 _wk_ids="$( { jq -c '[(.ios // [])[]?.id, (.android // [])[]?.id]' "$SNAP_NEW" 2>/dev/null || true
               jq -c '[(.ios // [])[]?.id, (.android // [])[]?.id]' "$OUT_DIR/analysis/snapshot.json" 2>/dev/null || true; } \
   | jq -cs 'add // [] | map(select(. != null)) | unique' 2>/dev/null || echo '[]')"
+# 数据层快照的 id：P0/P1 只认它（与「本周变化」同一窗口，见 priorities_validate 第 3 参）
+_wk_win_ids="$(jq -c '[(.ios // [])[]?.id, (.android // [])[]?.id] | map(select(. != null)) | unique' "$SNAP_NEW" 2>/dev/null || echo '[]')"
 WEEK_TIER_SRC="rule"; WEEK_TIER_WHY=""
 WEEK_URGENT='[]'; WEEK_WATCH='[]'
-_wk_title_of() { # $1=平台键 $2=完整 id → 标题（快照里没有则空）
-  jq -r --arg k "$1" --arg i "$2" '(.[$k] // [])[]? | select(.id == $i) | .title // empty' "$SNAP_NEW" 2>/dev/null | head -1 || true
+_wk_title_of() { # $1=平台键 $2=完整 id → 标题（数据层快照没有则取分析层快照，都没有则空）
+  { jq -r --arg k "$1" --arg i "$2" '(.[$k] // [])[]? | select(.id == $i) | .title // empty' "$SNAP_NEW" 2>/dev/null || true
+    jq -r --arg k "$1" --arg i "$2" '(.[$k] // [])[]? | select(.id == $i) | .title // empty' "$OUT_DIR/analysis/snapshot.json" 2>/dev/null || true; } \
+    | head -1 || true
 }
 _wk_users_of() { # $1=平台键 $2=完整 id → 受影响用户（快照里没有则 0）
   jq -r --arg k "$1" --arg i "$2" '[(.[$k] // [])[]? | select(.id == $i) | .users // 0][0] // 0' "$SNAP_NEW" 2>/dev/null || echo 0
 }
 if [ "$ANALYSIS_OK" = "1" ]; then
-  PRIO_JSON="$(priorities_validate "$(cat "$PRIO_FILE" 2>/dev/null || true)" "$_wk_ids")"
+  PRIO_JSON="$(priorities_validate "$(cat "$PRIO_FILE" 2>/dev/null || true)" "$_wk_ids" "$_wk_win_ids")"
   if [ "$(printf '%s' "$PRIO_JSON" | jq -r '.ok')" = "true" ] \
      && { [ "$(printf '%s' "$PRIO_JSON" | jq '.items | length')" -gt 0 ] || [ "$(printf '%s' "$_wk_ids" | jq 'length')" = 0 ]; }; then
     WEEK_TIER_SRC="model"
     _pd="$(printf '%s' "$PRIO_JSON" | jq -r '.dropped')"
     [ "${_pd:-0}" -gt 0 ] 2>/dev/null && WEEK_TIER_WHY="已剔除 ${_pd} 条不合规或快照外的条目"
+    _pdm="$(printf '%s' "$PRIO_JSON" | jq -r '.demoted')"
+    if [ "${_pdm:-0}" -gt 0 ] 2>/dev/null; then
+      _pdm_sep=""; [ -n "$WEEK_TIER_WHY" ] && _pdm_sep=" · "
+      WEEK_TIER_WHY="${WEEK_TIER_WHY}${_pdm_sep}${_pdm} 条本周窗口内无事件，降为观察"
+    fi
   else
     WEEK_TIER_WHY="$(printf '%s' "$PRIO_JSON" | jq -r 'if .ok then "校验后为空而本周快照非空" else .reason end')"
   fi
