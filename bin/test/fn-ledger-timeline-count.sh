@@ -14,6 +14,7 @@ ROOT="$(cd "$SELF_DIR/../.." && pwd)"
 . "$SELF_DIR/harness.sh"
 
 h_load "$ROOT/bin/deliver.sh" sync_ledger _lark_write_ok || { h_summary; exit 1; }
+. "$ROOT/bin/lib/lark.sh"   # 被测函数经 lk 调 "${LK[@]}"（F68）；整文件 source：h_load 抽不到顶层的 LK_RETRY_DELAYS
 
 TMPD="$(mktemp -d)"
 trap 'rm -rf "$TMPD"' EXIT

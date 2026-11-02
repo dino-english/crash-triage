@@ -50,6 +50,10 @@ LARK_PROFILE="$CACHE_NS"
 # hermes/openclaw 上下文下 lark-cli 走 Agent 工作区配置，没有命名 profile（见 deliver.sh 注释）
 [ -n "${HERMES_HOME:-}${OPENCLAW_HOME:-}" ] && LARK_PROFILE=""
 LK=(lark-cli); [ -n "$LARK_PROFILE" ] && LK=(lark-cli --profile "$LARK_PROFILE")
+# 限流重试与 deliver.sh 同一份（F68：2026-11-02 卡片撞 429 失败后，紧接着的告警卡也没发出去）。
+# 告警器不能因为共享库缺失就哑掉——缺了退回裸调。
+# shellcheck disable=SC1091
+. "$SELF_DIR/lib/lark.sh" 2>/dev/null || lk() { "${LK[@]}" "$@"; }
 
 case "$SOURCE" in
   daily)   SRC_NAME="L1 日报";;
@@ -117,7 +121,7 @@ TMP="$(mktemp)"; printf '%s' "$CARD" > "$TMP"
 case "$CHAT_ID" in ou_*) RECIP=(--user-id "$CHAT_ID");; *) RECIP=(--chat-id "$CHAT_ID");; esac
 # 幂等键 = run_id + 环节 + 步骤：同一次运行里同一处反复失败不会刷屏
 KEY="$(printf 'alert-%s-%s-%s' "${RUN_ID:-none}" "$SOURCE" "${STEP:-x}" | tr -c 'A-Za-z0-9-' '-' | head -c 50)"
-if "${LK[@]}" im +messages-send "${RECIP[@]}" --msg-type interactive \
+if lk im +messages-send "${RECIP[@]}" --msg-type interactive \
      --content "$(cat "$TMP")" --idempotency-key "$KEY" --as "$LARK_AS" --format json >/dev/null 2>&1; then
   echo "  📣 已发送告警到 $CHAT_ID"
 else

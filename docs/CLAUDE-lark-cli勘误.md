@@ -25,6 +25,13 @@
   手工排查时若要复现生产行为，用 `--profile crash-triage`；
   ⚠️ 生产机普通 ssh 下 `profile list` 是空的，但 cron 跑在 hermes 上下文里、走的是另一份配置——
   **「我 ssh 上去看到的」不等于「cron 跑的时候用的」**。
+  ⚠️ 补（2026-11-02 实测）：生产机 hermes 上下文（`HERMES_HOME=~/.hermes`，即 cron 那份）的应用是 `cli_aaf7d7fc…`，
+  **不是** `crash-triage`（`cli_aaf7b44…`）。open_id 按应用隔离——私聊自测拿 `crash-triage` 下的 open_id 去发，
+  报 `99992361 open_id cross app`。要用该应用下的 id：机器人身份列正式群成员
+  （`lark-cli api GET /open-apis/im/v1/chats/<oc_…>/members --params '{"member_id_type":"open_id"}'`）按名字取。
+  ⚠️ 机器人身份读不回私聊（`+chat-messages-list --user-id` 只认用户身份），私聊卡片的读回要人看。
+- **错误 JSON 走 stderr，rc=1**（2026-11-02 实测）。文档已删 `3380003`，不存在 / 不可访问 `3380002`（fetch 与 overwrite 同码）；
+  令牌端限流 `429` + `"subtype": "rate_limit"` + `retryable: true`，日报机上很常见——一律经 `bin/lib/lark.sh` 的 `lk` 调用（F68）。
 - **`docs +fetch` 取正文的 jq 路径是 `.data.document.content`**，不是 `.content`（后者恒为 `null`）。
 - ⛔ **`.data.document.content` 的值是 DocxXML 文本，不是块结构 JSON**（2026-08-20 实测，一次踩三处）。所有 scope（`outline` / `section` / `keyword`）都一样。想拿 block id 必须**解析 XML 标签**，在 JSON 里 `jq` 找 `type=="table"` / 遍历 `.. | objects` 永远落空：
   - 标题：`grep -oE '<h[1-6] id="[^"]*">标题文本<'`

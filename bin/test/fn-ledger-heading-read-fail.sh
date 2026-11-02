@@ -11,6 +11,7 @@ ROOT="${CRASH_REPORT_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}"
 . "$ROOT/bin/test/harness.sh"
 json_only() { cat; }   # deliver.sh 里的单行辅助函数 h_load 抽不了，退化为直通（照抄 fn-lark-write-result.sh）
 h_load "$ROOT/bin/deliver.sh" _lark_write_ok _ledger_fingerprint _ledger_heading_id _ledger_replace_table sync_ledger
+. "$ROOT/bin/lib/lark.sh"   # 被测函数经 lk 调 "${LK[@]}"（F68）；整文件 source：h_load 抽不到顶层的 LK_RETRY_DELAYS
 
 T="$(mktemp -d)"; CALLS="$T/calls"; N="$T/n"
 LARK_AS=bot; DRY_RUN=0

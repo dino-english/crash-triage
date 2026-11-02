@@ -20,6 +20,7 @@ ROOT="$CRASH_REPORT_ROOT"
 # shellcheck disable=SC1091
 . "$ROOT/bin/lib/core/cache.sh" || { echo "❌ 核心层缺失：bin/lib/core/cache.sh" >&2; exit 1; }
 . "$ROOT/bin/lib/card.sh"       || { echo "❌ 缺失：bin/lib/card.sh" >&2; exit 1; }
+. "$ROOT/bin/lib/lark.sh"       || { echo "❌ 缺失：bin/lib/lark.sh" >&2; exit 1; }
 STATE="${CRASH_REPORT_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/crash-triage}"
 # PATH 来源，见 crash-daily.sh 同处注释。
 # else 兜底是随改名一起补的：本脚本原本只有 if、没有 else，文件缺失时就直接吃 cron 的最小 env，
@@ -162,17 +163,17 @@ ensure_folder() { # $1=文件夹名 $2=父 token（空 = 云空间根） → std
   fi
   # 先按名字找现成的，找不到才建——否则每天多一个同名文件夹
   if [ -n "$parent" ]; then
-    out="$("${LK[@]}" drive files list --folder-token "$parent" --page-size 200 --as "$LARK_AS" --format json 2>&1)" || out=''
+    out="$(lk drive files list --folder-token "$parent" --page-size 200 --as "$LARK_AS" --format json 2>&1)" || out=''
   else
-    out="$("${LK[@]}" drive files list --page-size 200 --as "$LARK_AS" --format json 2>&1)" || out=''
+    out="$(lk drive files list --page-size 200 --as "$LARK_AS" --format json 2>&1)" || out=''
   fi
   tok="$(printf '%s' "$out" | json_only | jq -r --arg n "$name" \
     'first(.. | objects | select((.name? // "") == $n and (.type? // "") == "folder") | .token) // empty' 2>/dev/null || true)"
   if [ -z "$tok" ]; then
     if [ -n "$parent" ]; then
-      out="$("${LK[@]}" drive +create-folder --name "$name" --folder-token "$parent" --as "$LARK_AS" --format json 2>&1)" || true
+      out="$(lk drive +create-folder --name "$name" --folder-token "$parent" --as "$LARK_AS" --format json 2>&1)" || true
     else
-      out="$("${LK[@]}" drive +create-folder --name "$name" --as "$LARK_AS" --format json 2>&1)" || true
+      out="$(lk drive +create-folder --name "$name" --as "$LARK_AS" --format json 2>&1)" || true
     fi
     tok="$(printf '%s' "$out" | json_only | jq -r 'first(.. | objects | select(has("token")) | .token) // empty' 2>/dev/null || true)"
     # +create-folder 的返回体只给 url 不给 token（实测），从 URL 末段兜底取——
@@ -206,9 +207,9 @@ create_xml_doc() { # $1=xml 文件 $2=父目录 token（可空） → stdout: UR
     printf 'https://example.invalid/docx/DRYRUN'; return 0
   fi
   if [ -n "$folder" ]; then
-    out="$(cd "$(dirname "$file")" && "${LK[@]}" docs +create --content "@$(basename "$file")" --parent-token "$folder" --as "$LARK_AS" --format json 2>&1)" || true
+    out="$(cd "$(dirname "$file")" && lk docs +create --content "@$(basename "$file")" --parent-token "$folder" --as "$LARK_AS" --format json 2>&1)" || true
   else
-    out="$(cd "$(dirname "$file")" && "${LK[@]}" docs +create --content "@$(basename "$file")" --as "$LARK_AS" --format json 2>&1)" || true
+    out="$(cd "$(dirname "$file")" && lk docs +create --content "@$(basename "$file")" --as "$LARK_AS" --format json 2>&1)" || true
   fi
   url="$(printf '%s' "$out" | json_only | jq -r 'first(.. | objects | select(has("url")) | .url) // empty' 2>/dev/null || true)"
   [ -n "$url" ] || { echo "  ⚠️ XML 建档失败，回退 markdown 导入：$(printf '%s' "$out" | json_only | jq -r '.error.message // "未知"' 2>/dev/null)" >&2; return 1; }
@@ -226,10 +227,10 @@ import_doc() { # $1=本地文件 $2=文档标题 $3=目标文件夹 token（可�
   fi
   # 用 cwd 相对路径调用：lark-cli 的若干上传类命令拒绝绝对路径
   if [ -n "$folder" ]; then
-    out="$(cd "$(dirname "$file")" && "${LK[@]}" drive +import --file "$(basename "$file")" --type docx --name "$name" --folder-token "$folder" --as "$LARK_AS" --format json 2>&1)" \
+    out="$(cd "$(dirname "$file")" && lk drive +import --file "$(basename "$file")" --type docx --name "$name" --folder-token "$folder" --as "$LARK_AS" --format json 2>&1)" \
       || fail "导入失败（${name}）：$out"
   else
-  out="$(cd "$(dirname "$file")" && "${LK[@]}" drive +import --file "$(basename "$file")" --type docx --name "$name" --as "$LARK_AS" --format json 2>&1)" \
+  out="$(cd "$(dirname "$file")" && lk drive +import --file "$(basename "$file")" --type docx --name "$name" --as "$LARK_AS" --format json 2>&1)" \
     || fail "导入失败（${name}）：$out"
   fi
   url="$(printf '%s' "$out" | json_only | jq -r 'first(.. | objects | select(has("url")) | .url) // empty' 2>/dev/null || true)"
@@ -238,7 +239,7 @@ import_doc() { # $1=本地文件 $2=文档标题 $3=目标文件夹 token（可�
     [ -n "$ticket" ] || fail "导入未返回 url 也未返回 ticket（${name}）：$out"
     for tries in 1 2 3 4 5 6; do
       sleep 5
-      out="$("${LK[@]}" drive +task_result --scenario import --ticket "$ticket" --as "$LARK_AS" --format json 2>&1)" || true
+      out="$(lk drive +task_result --scenario import --ticket "$ticket" --as "$LARK_AS" --format json 2>&1)" || true
       url="$(printf '%s' "$out" | json_only | jq -r 'first(.. | objects | select(has("url")) | .url) // empty' 2>/dev/null || true)"
       [ -n "$url" ] && break
     done
@@ -298,7 +299,7 @@ folder_url() { # $1=文件夹 token $2=同租户的任一文档 URL
 # 固定文档原地覆盖：URL 不变，不再每天产生一份新文档 + 一堆孤儿。
 # doc_id 传文档 URL（浏览器里复制的那串）最省事；传裸 token 时用 DOC_URL_BASE 拼回 URL。
 DOC_URL_BASE="${CRASH_REPORT_DOC_URL_BASE:-}"
-overwrite_doc() { # $1=本地文件 $2=doc_id（URL 或 token） $3=标题（仅日志） $4=格式(markdown|xml) → stdout: URL
+overwrite_doc() { # $1=本地文件 $2=doc_id（URL 或 token） $3=标题（仅日志） $4=格式(markdown|xml) → stdout: URL；rc 0=已覆盖 / 1=未覆盖 / 3=文档已删或不存在
   local file="$1" doc="$2" name="$3" fmt="${4:-markdown}" url
   [ -s "$file" ] || fail "待覆盖的本地文件为空：$file"
   case "$doc" in
@@ -306,28 +307,33 @@ overwrite_doc() { # $1=本地文件 $2=doc_id（URL 或 token） $3=标题（仅
     *)     [ -n "$DOC_URL_BASE" ] || fail "doc_id 是裸 token（${doc}），请设 CRASH_REPORT_DOC_URL_BASE 或改传完整 URL"
            url="${DOC_URL_BASE%/}/$doc";;
   esac
+  # ⚠️ URL 无论成败都输出，成败只看 rc：固定文档覆盖失败时，调用方要靠它**原样保留**那份文档（F69）。
+  printf '%s' "$url"
   if [ "$DRY_RUN" = "1" ]; then
     echo "  [dry-run] lark-cli docs +update --command overwrite --doc $doc --doc-format $fmt --content @$file" >&2
-    printf '%s' "$url"; return 0
+    return 0
   fi
   # ⛔ **退出码 0 还不够，必须判 result**（F41，2026-09-22 实测：身份无权限时
   #    返回 ok:true / rc=0 / result:"failed"，文档 revision 一动没动）。
   #    旧写法把输出丢进 /dev/null，于是「调用成功、文档没改」会打出「♻️ 原地覆盖」+ 一个
   #    指向**陈旧内容**的 URL——读者点进去看到的是昨天那份，而链接与日志都说今天已更新。
-  #    ⚠️ 判失败后走既有的 `return 1` 分支（改为新建一份）：宁可多一份可见的新文档，
-  #    也不要一个说谎的覆盖。
+  #    ⚠️ 失败时怎么办由 publish_doc 按键决定（F69）：按日期的文档重建一份；
+  #    固定文档只有「已删 / 不存在」才重建，其余失败原样保留，⛔ 不得换掉群里钉着的那份。
+  # ⚠️ 失败必须带 lark-cli 原文：2026-11-02 索引页覆盖失败只留下一句「覆盖失败」，原因再也查不到。
   local _owout
-  if ! _owout="$(cd "$(dirname "$file")" && "${LK[@]}" docs +update --command overwrite --doc "$doc" --doc-format "$fmt" \
+  if ! _owout="$(cd "$(dirname "$file")" && lk docs +update --command overwrite --doc "$doc" --doc-format "$fmt" \
         --content "@$(basename "$file")" --as "$LARK_AS" --format json 2>&1)"; then
-    echo "  ⚠️ 覆盖失败（${name}），改为新建一份" >&2; return 1
+    echo "  ⚠️ 覆盖失败（${name}）：$(printf '%s' "$_owout" | json_only | jq -rc '.error.message // empty' 2>/dev/null || true)" >&2
+    # 3380002 = 不存在 / 无权访问，3380003 = 已删除（2026-11-02 对已删文档与伪造 token 实测，fetch 与 overwrite 同码）
+    if printf '%s' "$_owout" | grep -Eq '"code": *338000[23]([^0-9]|$)'; then return 3; fi
+    return 1
   fi
   if ! _lark_write_ok "$_owout"; then
-    echo "  ⚠️ 覆盖调用成功但**文档未发生变更**（${name}），改为新建一份" >&2
+    echo "  ⚠️ 覆盖调用成功但**文档未发生变更**（${name}）" >&2
     echo "     $(printf '%s' "$_owout" | json_only | jq -rc '.data.warnings // []' 2>/dev/null || true)" >&2
     return 1
   fi
   echo "  ♻️ $name → ${url}（原地覆盖）" >&2
-  printf '%s' "$url"
 }
 # ⛔ **只有永久固定的资源才提示回填**（索引页 / 台账 / 根文件夹——它们的键不带日期）。
 #    日报周报按 `daily-<日期>` / `weekly-<日期>` 键**每天/每周都会新建一份**，
@@ -356,9 +362,21 @@ publish_doc() { # $1=本地文件 $2=标题 $3=doc_id(可空) $4=文件夹 token
   # 显式配置 > 自动记忆 > 新建
   [ -z "$fixed" ] && [ -n "$key" ] && fixed="$(doc_get "$key")"
   if [ -n "$fixed" ]; then
-    u="$(overwrite_doc "$1" "$fixed" "$2" "$fmt" || true)"
-    [ -n "$u" ] && { printf '%s' "$u"; return 0; }
-    echo "  ↳ 覆盖不成（文档可能已被删），重建一份" >&2
+    # 退出码随输出带出来（「URL\n<rc>」）：`|| _orc=$?` 写在 $( ) 外面会在 errtrace 下触发 ERR trap
+    local _orc=0
+    u="$(overwrite_doc "$1" "$fixed" "$2" "$fmt" || printf '\n%s' "$?")"
+    case "$u" in (*$'\n'*) _orc="${u##*$'\n'}"; u="${u%%$'\n'*}";; esac
+    [ "$_orc" -eq 0 ] && { printf '%s' "$u"; return 0; }
+    # ⛔ 固定文档（索引页）覆盖失败 ≠ 该换一份（F69）。2026-11-02 补投时索引页覆盖失败，
+    #    这里照旧新建一份并 doc_put——docs.json 从此指向新文档，群里钉着的那份停在当天，
+    #    要人手改回 docs.json 再删孤儿。只有确认文档没了（rc=3）才配重建换键。
+    if [ "$_orc" -ne 3 ] && [ -n "$u" ] && is_fixed_resource_key "$key"; then
+      echo "  ⚠️ ${2} 本轮未更新：保留原文档、不新建、不改 docs.json（群里钉着这个链接），下次跑批重试" >&2
+      printf '%s' "$u"; return 0
+    fi
+    u=""
+    if [ "$_orc" -eq 3 ]; then echo "  ↳ 文档已删或不存在，重建一份" >&2
+    else echo "  ↳ 覆盖不成，重建一份" >&2; fi
   fi
   if [ "$fmt" = xml ]; then u="$(create_xml_doc "$1" "${4:-}" || true)"; fi
   [ -n "$u" ] || u="$(import_doc "$fb" "$2" "${4:-}")"
@@ -382,7 +400,7 @@ send_card() { # $1=card.json
   # ou_ 是人（私聊，首次部署验证用），oc_ 是群——两者走不同的 flag
   local recip
   case "$CHAT_ID" in ou_*) recip=(--user-id "$CHAT_ID");; *) recip=(--chat-id "$CHAT_ID");; esac
-  "${LK[@]}" im +messages-send \
+  lk im +messages-send \
     "${recip[@]}" \
     --msg-type interactive \
     --content "$(cat "$card")" \
@@ -499,10 +517,10 @@ _ledger_heading_id() { # $1=doc $2=标题文本 → stdout: block id；rc 0=找�
   for scope in outline keyword; do
     outline=""
     if [ "$scope" = outline ]; then
-      outline="$("${LK[@]}" docs +fetch --doc "$doc" --scope outline --max-depth 6 \
+      outline="$(lk docs +fetch --doc "$doc" --scope outline --max-depth 6 \
                   --as "$LARK_AS" --format json 2>&1)" || return 2
     else
-      outline="$("${LK[@]}" docs +fetch --doc "$doc" --scope keyword --keyword "$text" \
+      outline="$(lk docs +fetch --doc "$doc" --scope keyword --keyword "$text" \
                   --detail with-ids --as "$LARK_AS" --format json 2>&1)" || return 2
     fi
     content="$(printf '%s' "$outline" | json_only \
@@ -565,7 +583,7 @@ _ledger_fingerprint() { # stdin → "<数据行数>:<8 位 id 集合>:<表头>:<
 
 _ledger_replace_table() { # $1=doc $2=heading_id $3=内容文件 $4=格式 $5=日志标签 → 0成功/1失败
   local doc="$1" hid="$2" f="$3" fmt="${4:-markdown}" label="$5" section tid
-  section="$("${LK[@]}" docs +fetch --doc "$doc" --scope section --start-block-id "$hid" \
+  section="$(lk docs +fetch --doc "$doc" --scope section --start-block-id "$hid" \
               --detail with-ids --as "$LARK_AS" --format json 2>&1)" || section=""
   tid="$(printf '%s' "$section" | json_only | jq -r '.data.document.content // ""' 2>/dev/null \
     | grep -oE '<table id="[^"]*"' | head -1 | sed -E 's/^<table id="([^"]*)"/\1/' || true)"
@@ -578,7 +596,7 @@ _ledger_replace_table() { # $1=doc $2=heading_id $3=内容文件 $4=格式 $5=�
   # ⚠️ **不逐字比对**：取回的 markdown 带 <fragment> 包裹，链接与转义还有往返差异，
   #    实测同一份内容两边差 386 字符。改用**扛得住往返的指纹**：数据行数 + 表内 8 位 id 集合。
   local _cur _fp_cur _fp_want
-  _cur="$("${LK[@]}" docs +fetch --doc "$doc" --scope range --start-block-id "$tid" --end-block-id "$tid" \
+  _cur="$(lk docs +fetch --doc "$doc" --scope range --start-block-id "$tid" --end-block-id "$tid" \
           --doc-format markdown --as "$LARK_AS" --format json 2>/dev/null \
           | json_only | jq -r '.data.document.content // ""' 2>/dev/null || true)"
   _fp_cur="$(printf '%s' "$_cur" | _ledger_fingerprint)"
@@ -588,7 +606,7 @@ _ledger_replace_table() { # $1=doc $2=heading_id $3=内容文件 $4=格式 $5=�
     return 0
   fi
   local _out
-  if ! _out="$(cd "$(dirname "$f")" && "${LK[@]}" docs +update --command block_replace \
+  if ! _out="$(cd "$(dirname "$f")" && lk docs +update --command block_replace \
         --doc "$doc" --block-id "$tid" --doc-format "$fmt" \
         --content "@$(basename "$f")" --as "$LARK_AS" --format json 2>&1)"; then
     echo "  ❌ 台账同步失败：block_replace「${label}」出错（block-id=${tid}），中止（不退化为 overwrite）" >&2
@@ -635,7 +653,7 @@ sync_ledger() { # $1=doc_id  $2=FATAL现状表文件  $3=表格式(xml|markdown)
       #    旧写法照样打 ✅，而文档 revision 一动没动。⚠️ 下面 append 时间线那段一直是对的，
       #    **这里是同一目的的第二份实现漏了那一步**（F1）。
       local _bsout
-      if ! _bsout="$(cd "$(dirname "$full_file")" && "${LK[@]}" docs +update --command append \
+      if ! _bsout="$(cd "$(dirname "$full_file")" && lk docs +update --command append \
             --doc "$doc" --doc-format markdown --content "@$(basename "$full_file")" \
             --as "$LARK_AS" --format json 2>&1)"; then
         echo "  ❌ 台账首次同步失败：append 全文出错，中止（不退化为 overwrite）" >&2
@@ -678,7 +696,7 @@ sync_ledger() { # $1=doc_id  $2=FATAL现状表文件  $3=表格式(xml|markdown)
   # ⛔ grep -c 无匹配返回 1，`|| true` 不可省（F31）。
   if [ -s "$tl_file" ]; then
     _tlout=""
-    if _tlout="$(cd "$(dirname "$tl_file")" && "${LK[@]}" docs +update --command append \
+    if _tlout="$(cd "$(dirname "$tl_file")" && lk docs +update --command append \
           --doc "$doc" --doc-format "$tl_fmt" --content "@$(basename "$tl_file")" \
           --as "$LARK_AS" --format json 2>&1)" && _lark_write_ok "$_tlout"; then
       echo "  ✅ 台账变更时间线已追加（$(grep -c . "$tl_file" || true) 行）" >&2
