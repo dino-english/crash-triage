@@ -297,6 +297,9 @@ agent_text() {
 # ⛔ `branch -a:*` 也是写口子：2026-10-30 实测 `git branch -a -m 旧 新`、`-M`、`-c` 都执行成功（改名、复制分支）。
 #    所以只放精确的 `branch -a`（列分支）和 `branch -a --contains:*`——后者接 -m/-c/-D/--set-upstream-to 时
 #    git 一律报 usage 拒绝（同日实测）。
+# 「修复提交进了哪些分支」模型会换着写：`--all --contains` / `-r --contains` / `-C 仓库 branch --contains`，
+#    10-31 ~ 11-02 生产跑批每次都被拒、fix 分支信息静默缺失（F52）。这三种同属 `--contains` 列表模式，
+#    2026-11-02 实测接 -m/-M/-c/-D/-d/--delete/--set-upstream-to 一律 usage 拒绝，故放行。
 # --disallowedTools：Agent 工具不受 --allowedTools 约束，模型曾派子 agent 开 worktree 隔离，
 # 在业务仓库里建 git worktree（09-11 起，10-05 一次三个）——违反「只读业务仓库」。
 run_agent() { # $1=尝试序号；输出同时进 stdout（跑批日志）与 agent-<N>.log（事后排查）
@@ -312,10 +315,13 @@ run_agent() { # $1=尝试序号；输出同时进 stdout（跑批日志）与 ag
       "Read" "Write" "Grep" "Glob" \
       "Bash(git log:*)" "Bash(git show:*)" \
       "Bash(git branch -a)" "Bash(git branch -a --contains:*)" "Bash(git branch --show-current)" "Bash(git branch --contains:*)" \
+      "Bash(git branch --all --contains:*)" "Bash(git branch -r --contains:*)" \
       "Bash(git -C $IOS_REPO log:*)" "Bash(git -C $IOS_REPO show:*)" "Bash(git -C $IOS_REPO status:*)" \
       "Bash(git -C $IOS_REPO branch -a)" "Bash(git -C $IOS_REPO branch -a --contains:*)" "Bash(git -C $IOS_REPO branch --show-current)" \
+      "Bash(git -C $IOS_REPO branch --all --contains:*)" "Bash(git -C $IOS_REPO branch -r --contains:*)" "Bash(git -C $IOS_REPO branch --contains:*)" \
       "Bash(git -C $AND_REPO log:*)" "Bash(git -C $AND_REPO show:*)" "Bash(git -C $AND_REPO status:*)" \
       "Bash(git -C $AND_REPO branch -a)" "Bash(git -C $AND_REPO branch -a --contains:*)" "Bash(git -C $AND_REPO branch --show-current)" \
+      "Bash(git -C $AND_REPO branch --all --contains:*)" "Bash(git -C $AND_REPO branch -r --contains:*)" "Bash(git -C $AND_REPO branch --contains:*)" \
     --disallowedTools "Agent" "Task" "EnterWorktree" "ExitWorktree" \
     --mcp-config "$ROOT/bin/mcp.json" \
     --output-format stream-json --verbose \
