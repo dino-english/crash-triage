@@ -1,0 +1,380 @@
+{
+ "h|apiA|mean|10|4": {
+  "hits": 16,
+  "per_day": 0.53,
+  "sigs": 13,
+  "must": [
+   true,
+   true
+  ]
+ },
+ "h|apiA|mean|10|3": {
+  "hits": 18,
+  "per_day": 0.6,
+  "sigs": 14,
+  "must": [
+   true,
+   true
+  ]
+ },
+ "h|apiA|mean|10|5": {
+  "hits": 15,
+  "per_day": 0.5,
+  "sigs": 12,
+  "must": [
+   true,
+   true
+  ]
+ },
+ "h|apiA|mean|15|4": {
+  "hits": 8,
+  "per_day": 0.27,
+  "sigs": 7,
+  "must": [
+   false,
+   true
+  ]
+ },
+ "h|apiA|mean|20|4": {
+  "hits": 6,
+  "per_day": 0.2,
+  "sigs": 6,
+  "must": [
+   false,
+   true
+  ]
+ },
+ "h|apiA|mean|10|6": {
+  "hits": 13,
+  "per_day": 0.43,
+  "sigs": 11,
+  "must": [
+   false,
+   true
+  ]
+ },
+ "h|apiA|median|10|4": {
+  "hits": 17,
+  "per_day": 0.57,
+  "sigs": 14,
+  "must": [
+   true,
+   true
+  ]
+ },
+ "h|apiA|median|10|3": {
+  "hits": 21,
+  "per_day": 0.7,
+  "sigs": 14,
+  "must": [
+   true,
+   true
+  ]
+ },
+ "h|apiA|median|10|5": {
+  "hits": 17,
+  "per_day": 0.57,
+  "sigs": 14,
+  "must": [
+   true,
+   true
+  ]
+ },
+ "h|apiA|median|15|4": {
+  "hits": 8,
+  "per_day": 0.27,
+  "sigs": 7,
+  "must": [
+   false,
+   true
+  ]
+ },
+ "h|apiA|median|20|4": {
+  "hits": 6,
+  "per_day": 0.2,
+  "sigs": 6,
+  "must": [
+   false,
+   true
+  ]
+ },
+ "h|apiA|median|10|6": {
+  "hits": 14,
+  "per_day": 0.47,
+  "sigs": 11,
+  "must": [
+   true,
+   true
+  ]
+ },
+ "d|apiA|mean|10|3": {
+  "hits": 21,
+  "per_week": 4.9,
+  "sigs": 17,
+  "must": [
+   true,
+   true
+  ]
+ },
+ "d|apiA|mean|20|3": {
+  "hits": 10,
+  "per_week": 2.33,
+  "sigs": 8,
+  "must": [
+   true,
+   true
+  ]
+ },
+ "d|apiA|mean|20|4": {
+  "hits": 8,
+  "per_week": 1.87,
+  "sigs": 7,
+  "must": [
+   false,
+   true
+  ]
+ },
+ "d|apiA|mean|30|3": {
+  "hits": 8,
+  "per_week": 1.87,
+  "sigs": 7,
+  "must": [
+   true,
+   true
+  ]
+ },
+ "d|apiA|mean|50|3": {
+  "hits": 2,
+  "per_week": 0.47,
+  "sigs": 2,
+  "must": [
+   true,
+   true
+  ]
+ },
+ "d|apiA|mean|30|2": {
+  "hits": 11,
+  "per_week": 2.57,
+  "sigs": 7,
+  "must": [
+   true,
+   true
+  ]
+ },
+ "h|apiB|mean|10|4": {
+  "hits": 40,
+  "per_day": 1.33,
+  "sigs": 20,
+  "must": [
+   true,
+   true
+  ]
+ },
+ "h|apiB|mean|10|3": {
+  "hits": 64,
+  "per_day": 2.13,
+  "sigs": 27,
+  "must": [
+   true,
+   true
+  ]
+ },
+ "h|apiB|mean|10|5": {
+  "hits": 33,
+  "per_day": 1.1,
+  "sigs": 16,
+  "must": [
+   true,
+   true
+  ]
+ },
+ "h|apiB|mean|15|4": {
+  "hits": 23,
+  "per_day": 0.77,
+  "sigs": 9,
+  "must": [
+   false,
+   true
+  ]
+ },
+ "h|apiB|mean|20|4": {
+  "hits": 20,
+  "per_day": 0.67,
+  "sigs": 8,
+  "must": [
+   false,
+   true
+  ]
+ },
+ "h|apiB|mean|10|6": {
+  "hits": 26,
+  "per_day": 0.87,
+  "sigs": 14,
+  "must": [
+   false,
+   true
+  ]
+ },
+ "h|apiB|median|10|4": {
+  "hits": 50,
+  "per_day": 1.67,
+  "sigs": 22,
+  "must": [
+   true,
+   true
+  ]
+ },
+ "h|apiB|median|10|3": {
+  "hits": 87,
+  "per_day": 2.9,
+  "sigs": 32,
+  "must": [
+   true,
+   true
+  ]
+ },
+ "h|apiB|median|10|5": {
+  "hits": 45,
+  "per_day": 1.5,
+  "sigs": 20,
+  "must": [
+   true,
+   true
+  ]
+ },
+ "h|apiB|median|15|4": {
+  "hits": 28,
+  "per_day": 0.93,
+  "sigs": 9,
+  "must": [
+   false,
+   true
+  ]
+ },
+ "h|apiB|median|20|4": {
+  "hits": 25,
+  "per_day": 0.83,
+  "sigs": 8,
+  "must": [
+   false,
+   true
+  ]
+ },
+ "h|apiB|median|10|6": {
+  "hits": 38,
+  "per_day": 1.27,
+  "sigs": 15,
+  "must": [
+   true,
+   true
+  ]
+ },
+ "d|apiB|mean|10|3": {
+  "hits": 68,
+  "per_week": 15.87,
+  "sigs": 41,
+  "must": [
+   true,
+   true
+  ]
+ },
+ "d|apiB|mean|20|3": {
+  "hits": 39,
+  "per_week": 9.1,
+  "sigs": 23,
+  "must": [
+   true,
+   true
+  ]
+ },
+ "d|apiB|mean|20|4": {
+  "hits": 27,
+  "per_week": 6.3,
+  "sigs": 18,
+  "must": [
+   false,
+   true
+  ]
+ },
+ "d|apiB|mean|30|3": {
+  "hits": 27,
+  "per_week": 6.3,
+  "sigs": 17,
+  "must": [
+   true,
+   true
+  ]
+ },
+ "d|apiB|mean|50|3": {
+  "hits": 11,
+  "per_week": 2.57,
+  "sigs": 6,
+  "must": [
+   true,
+   true
+  ]
+ },
+ "d|apiB|mean|30|2": {
+  "hits": 59,
+  "per_week": 13.77,
+  "sigs": 24,
+  "must": [
+   true,
+   true
+  ]
+ },
+ "d|flow|mean|10|3": {
+  "hits": 413,
+  "per_week": 96.37,
+  "sigs": 113,
+  "must": [
+   false,
+   false
+  ]
+ },
+ "d|flow|mean|20|3": {
+  "hits": 308,
+  "per_week": 71.87,
+  "sigs": 82,
+  "must": [
+   false,
+   false
+  ]
+ },
+ "d|flow|mean|20|4": {
+  "hits": 216,
+  "per_week": 50.4,
+  "sigs": 76,
+  "must": [
+   false,
+   false
+  ]
+ },
+ "d|flow|mean|30|3": {
+  "hits": 275,
+  "per_week": 64.17,
+  "sigs": 74,
+  "must": [
+   false,
+   false
+  ]
+ },
+ "d|flow|mean|50|3": {
+  "hits": 213,
+  "per_week": 49.7,
+  "sigs": 59,
+  "must": [
+   false,
+   false
+  ]
+ },
+ "d|flow|mean|30|2": {
+  "hits": 390,
+  "per_week": 91.0,
+  "sigs": 86,
+  "must": [
+   false,
+   false
+  ]
+ }
+}
