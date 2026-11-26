@@ -148,7 +148,7 @@ mkdir -p "$OUT_DIR"
 . "$ROOT/bin/lib/query.sh" # SQL 占位符替换唯一入口（q_render），漏传占位符当场失败
 # 核心层（纯函数），与 L1 共用同一份实现——此前 _fmt / _until_epoch / win_* / stale_days
 # 在两个脚本里各存了一份，其中 stale_days 逐字节相同。
-for _c in format verdict version cache fixrelease tier owner; do
+for _c in format verdict version cache fixrelease tier owner diag; do
   # shellcheck disable=SC1090
   . "$ROOT/bin/lib/core/${_c}.sh" || { echo "❌ 核心层缺失：bin/lib/core/${_c}.sh" >&2; exit 1; }
 done
@@ -158,6 +158,8 @@ done
 . "$ROOT/bin/lib/bq.sh" || { echo "❌ 外壳层缺失：bin/lib/bq.sh" >&2; exit 1; }
 # 负责人 @ 的取信号与读内容文件（change crash-owner-mention），L1 / L2 共用一份
 . "$ROOT/bin/lib/owner.sh" || { echo "❌ 外壳层缺失：bin/lib/owner.sh" >&2; exit 1; }
+# 技术诊断日聚合的取数与本地存储（change crash-tech-diagnostics），L1 / L2 共用一份
+. "$ROOT/bin/lib/diag.sh" || { echo "❌ 外壳层缺失：bin/lib/diag.sh" >&2; exit 1; }
 bq_init
 # ⛔ EXIT trap 用**完成哨兵**判定成败，⚠️ 不能靠 `$?`——bash 3.2 在 `set -u` 未定义变量
 #    这条致命路径上，**进 trap 时 `$?` 已经是 0**（实测；普通命令失败时才是 1）。
@@ -1754,6 +1756,34 @@ $(adopt_md)
 MSG_END
 )"
 
+# ── 技术诊断报错（change crash-tech-diagnostics）─────────────────────────
+# 本周 / 上周 / 前 4 周都从本地日聚合（$STATE/diag/daily.jsonl）算，缺的日先补；jq 确定性计算，⛔ 不进 claude -p 分析层。
+# ⛔ 取数失败不让周报失败（不走 fail），也不冒充「无报错」：DIAG_W_OK=0 时这一节写「取数失败」。
+step "技术诊断报错"
+DIAG_W_DAY="${CRASH_REPORT_DIAG_DAY:-$(TZ=Asia/Kuala_Lumpur date +%Y-%m-%d)}"   # 跑批日 D；覆盖只供回放测试
+DIAG_W_OK=0; DIAG_W='{}'
+DIAG_W_NEW_MIN=10      # 「本周新出现」的单日峰值下限（同 L0 的小时下限量级）；标题与计算共用这一个值
+DIAG_W_TOP_N=10
+_drc=0
+diag_daily_ensure "$(_diag_day_add "$DIAG_W_DAY" -1)" 34 60000000000 || _drc=$?
+if [ "$_drc" -eq 0 ]; then
+  # 版本口径 = 周报自己的主力版本（窗口 top2 ∪ 当日 top1），与二 / 三 / 四 / 五段同一份
+  _dw_vers="$(trap - ERR; jq -cn --arg i "${IOS_TOP2_VERS:-}" --arg a "${AND_TOP2_VERS:-}" \
+    '{IOS: [$i | splits("\\s+") | select(. != "")], ANDROID: [$a | splits("\\s+") | select(. != "")]}')" || _dw_vers='{}'
+  # ⚠️ 35 天约 3 MB：管道喂 stdin，⛔ 不作参数传（ARG_MAX）。
+  # ⛔ `$( )` 内先 `trap - ERR`：errtrace 下子 shell 继承 ERR trap，外层 if 接不住（审查 S1）
+  if DIAG_W="$(trap - ERR; diag_daily_rows "$(_diag_day_add "$DIAG_W_DAY" -35)" "$(_diag_day_add "$DIAG_W_DAY" -1)" \
+                 | diag_weekly "$DIAG_W_DAY" "$_dw_vers" "$DIAG_W_TOP_N" "$DIAG_W_NEW_MIN" "$DIAG_DAILY_MIN")"; then
+    DIAG_W_OK=1
+    echo "  技术诊断本周：头部 $(jq '.top | length' <<<"$DIAG_W") 行 · 新出现 $(jq '.new | length' <<<"$DIAG_W") · 持续高位 $(jq '.high | length' <<<"$DIAG_W")"
+  else
+    DIAG_W='{}'; echo "  ⚠️ 技术诊断周计算失败，周报这一节降级为「取数失败」"
+  fi
+else
+  echo "  ⚠️ 技术诊断取数失败（rc=${_drc}），周报这一节降级为「取数失败」"
+fi
+audit diag "技术诊断报错" "$(jq -cn --arg d "$DIAG_W_DAY" --argjson ok "$DIAG_W_OK" '{day:$d,ok:($ok==1)}')"
+
 REPORT="$STATE/reports/$DAY-weekly.md"
 {
   printf '# 崩溃周报 · %s %s\n\n' "$DAY" "$WEEK_TAG"
@@ -1847,6 +1877,43 @@ REPORT="$STATE/reports/$DAY-weekly.md"
   #    split-fix-list.py 用 `^##\s*.*修复清单` 定位段落，把 `## 四、修复清单` 降成三级会让它
   #    静默失效（找不到就原样返回，退出码 0、无告警）。序号重排的收益是排版，风险是断掉一条
   #    无告警的下游依赖，不划算（design D2）。
+  # 七、技术诊断报错（change crash-tech-diagnostics）：放在分析层附录之前，⛔ 一至六段编号不动
+  if [ "$DIAG_W_OK" != 1 ]; then
+    printf '\n## 七、技术诊断报错\n\n> ⚠️ **取数失败**：本节本周缺失——⛔ 不是「无报错」。详见日志与审计事件 `diag`。\n'
+  else
+    printf '\n## 七、技术诊断报错（%s ～ %s）\n\n' "$(jq -r '.week[0]' <<<"$DIAG_W")" "$(jq -r '.week[1]' <<<"$DIAG_W")"
+    printf '%s\n' "> 来源 GA4 app_diagnostic；接口类 = api_result（物理请求）的 target × code，排除 2xx 与空 code；流程类 = diagnostic_id × reason，只取 tech_fail。纯脚本确定性计算，⛔ 不经模型、不判断根因。"
+    printf '%s\n\n' "> ⚠️ 数字是**日均受影响设备**（7 天日值之和 / 7，设备按 user_pseudo_id 去重）——周内去重设备数不能由日数相加得到。上周 = $(jq -r '.prev | join(" ～ ")' <<<"$DIAG_W")。"
+    printf '### 头部签名（全版本合计环比，附主力版本分布）\n\n'
+    printf '%s\n\n' "> 环比按签名合计（跨平台、跨版本），⛔ 不按版本算——新版本上周还没放量，按版本算会得出上万百分比的假激增。「主力版本分布」只列本报告的主力版本。"
+    if [ "$_dw_vers" = '{"IOS":[],"ANDROID":[]}' ] || [ "$_dw_vers" = '{}' ]; then
+      printf '> ⚠️ **主力版本不可得**：「主力版本分布」一列为空不代表这些版本无报错。\n\n'
+    fi
+    if [ "$(jq '.top | length' <<<"$DIAG_W")" -gt 0 ]; then
+      printf '| 类 | 签名 | 本周日均 | 上周日均 | 环比 | 主力版本分布（本周日均） |\n|---|---|---|---|---|---|\n'
+      # ⚠️ 签名来自数据：`|` 会撑破 md 表格（周报走 md2docx 对外交付），换成「/」
+      jq -r '.top[] | "| \(if .kind == "api" then "接口" else "流程" end) | \(.sig | gsub("[|]"; "/")) | \(.this_avg) | \(.prev_avg) | \(if .wow == null then "上周无" elif .wow > 0 then "+\(.wow)%" else "\(.wow)%" end) | \(if (.by_ver | length) == 0 then "主力版本无" else (.by_ver | map("\(.plat) \(.ver) \(.this_avg)") | join(" · ")) end) |"' <<<"$DIAG_W"
+      printf '\n'
+    else
+      printf '（本周无技术诊断报错）\n\n'
+    fi
+    printf '### 本周新出现（前 4 周未出现、本周单日峰值 ≥%s 台，全版本）\n\n' "$DIAG_W_NEW_MIN"
+    if [ "$(jq '.new | length' <<<"$DIAG_W")" -gt 0 ]; then
+      printf '| 类 | 签名 | 首次出现 | 本周单日峰值 | 本周日均 |\n|---|---|---|---|---|\n'
+      jq -r '.new[] | "| \(if .kind == "api" then "接口" else "流程" end) | \(.sig | gsub("[|]"; "/")) | \(.first) | \(.peak) | \(.this_avg) |"' <<<"$DIAG_W"
+      printf '\n'
+    else
+      printf '无\n\n'
+    fi
+    printf '### 持续高位（接口类，本周与上周日均都 ≥%s 台，全版本）\n\n' "$DIAG_DAILY_MIN"
+    if [ "$(jq '.high | length' <<<"$DIAG_W")" -gt 0 ]; then
+      printf '| 签名 | 本周日均 | 上周日均 |\n|---|---|---|\n'
+      jq -r '.high[] | "| \(.sig | gsub("[|]"; "/")) | \(.this_avg) | \(.prev_avg) |"' <<<"$DIAG_W"
+      printf '\n'
+    else
+      printf '无\n\n'
+    fi
+  fi
   if [ "$ANALYSIS_OK" = "1" ] && [ -s "$TRIAGE_REPORT" ]; then
     printf '\n## 分析层 · 根因分析（模型产出，**未经人工复核**）\n\n'
     awk 'h==0 && /^# /{h=1; next} {print}' "$TRIAGE_REPORT"

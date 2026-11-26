@@ -58,6 +58,8 @@ if [ -f "$W/crash-daily.sh" ]; then
 else
   echo "  ⚠️ 未找到 wrapper，尚未安装定时任务（跑 bin/install.sh）"
 fi
+# L0 每小时诊断告警（change crash-tech-diagnostics）的 wrapper 由 install.sh 生成，update.sh 不生成
+[ -f "$W/diag-hourly.sh" ] || echo "  ℹ️ 未找到 diag-hourly wrapper（L0 未启用；启用时跑 bin/install.sh 生成）"
 
 say "自检"
 bash "$SELF_DIR/check-scripts.sh"

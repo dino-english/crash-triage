@@ -10,6 +10,7 @@
 #   ALERT_RUN_ID   告警携带的 run id（L1 传 RUN_ID，L2 传 TS）
 #   ALERT_FLAG     去重标记文件路径（各链路一个，避免互相压制）
 #   HEALTH_FILE    健康状态文件路径
+#   ALERT_TO       可选：失败告警的投递目标（设了才传 alert.sh --to，空值 = 不发；只有 L0 用）
 #
 # 这四项是 crash-daily.sh 与 crash-weekly.sh 之间**仅有的**差异；
 # 此前为了这三处不同，整整 5 个函数各存了一份，改一处漏一处只是时间问题
@@ -42,8 +43,11 @@ alert_once() { # $1=step $2=message $3=rc
   [ -x "$ROOT/bin/alert.sh" ] || return 0
   # 输出一律走 stderr：ERR trap 可能在命令替换里触发，告警文案打到 stdout 会被当成取数结果
   # captured 进变量（2026-08-21：`printf: 📣 已发送告警到 oc_…: invalid number`）。
+  # ALERT_TO：调用方**设了**（哪怕是空值）就显式传 --to，空值 = 不发（L0 用；L1 / L2 不设，行为不变）
+  local _to=()
+  [ -n "${ALERT_TO+x}" ] && _to=(--to "$ALERT_TO")
   "$ROOT/bin/alert.sh" --source "$ALERT_SOURCE" --severity error --step "$1" \
-    --message "$2" --rc "${3:-1}" --run-id "$ALERT_RUN_ID" --log "$LOG" >&2 || true
+    --message "$2" --rc "${3:-1}" --run-id "$ALERT_RUN_ID" --log "$LOG" ${_to[@]+"${_to[@]}"} >&2 || true
 }
 
 # 失败位置：脚本实际跑在 bash 3.2（macOS 系统 bash，`#!/usr/bin/env bash` → /bin/bash）。

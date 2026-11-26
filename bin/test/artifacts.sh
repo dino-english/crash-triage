@@ -20,6 +20,7 @@ artifacts_baseline_files() {
   cat <<'EOF'
 health-daily.json
 health.json
+health-diag.json
 metrics-history.jsonl
 perf-history.jsonl
 daily-snapshot.json
@@ -33,10 +34,14 @@ EOF
 # 目录形态的基准：事实层缓存与台账本地源。
 # ⚠️ issues/ 极易漏：CLAUDE.md 写它「永久保留不参与清理」，读起来像与跑批无关，
 #    实则每次跑批都写；不还原则第二次跑批缓存已热，两次走不同代码分支。
+# ⚠️ diag/ 是 L0 每小时告警的运行数据（小时聚合、coverage、去重状态，change crash-tech-diagnostics）：
+#    丢了会触发 ~20 GB 的 7 天回填、去重状态丢失会对正在持续的激增重发一张卡。登记进来，
+#    L1 / L2 的等价性跑批前后会备份还原它，并能看出 L1 / L2 有没有意外改写它。
 artifacts_baseline_dirs() {
   cat <<'EOF'
 issues
 ledger
+diag
 EOF
 }
 

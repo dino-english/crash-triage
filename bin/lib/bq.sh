@@ -63,7 +63,7 @@ _bqq_audit() { # $1=format $2=SQL文本 $3=cache标记 $4=行数 $5=秒 $6=rc
 
 bqq() { # $1=csv|json  $2=SQL文本 → stdout；超时返回 124，失败返回 bq 退出码
   local rc=0 ck="" _t0=$SECONDS
-  if [ -n "$BQ_CACHE" ]; then
+  if [ -n "$BQ_CACHE" ] && [ -z "${BQ_DRY_RUN:-}" ]; then
     ck="$BQ_CACHE/$(printf '%s|%s' "$1" "$2" | shasum -a 256 | cut -c1-32)"
     [ -s "$ck" ] && { cat "$ck"; _bqq_audit "$1" "$2" hit 0 0 0; return 0; }
   fi
@@ -72,14 +72,19 @@ bqq() { # $1=csv|json  $2=SQL文本 → stdout；超时返回 124，失败返回
   # ⛔ 不要用「_bqq_raw() { bqq "$@"; } + 重定义 bqq」那种包装做缓存：
   #    bash 在**调用时**解析函数名，_bqq_raw 会调到新的 bqq 上 → 无限递归。
   #    实测第一条查询就挂死，整跑卡在「选表」。读写都放同一个函数里。
+  # 两个可选上限，只有 L0 设；L1 / L2 不设，命令行与改前逐字节相同：
+  #   BQ_MAX_BYTES：单条查询的计费字节上限，超了 BigQuery 直接拒绝执行、不计费（每小时无人值守，防 SQL 写错扫全库）。
+  #   BQ_MAX_ROWS：返回行数上限。⛔ `bq query` 默认只返回 **100 行**且不报错——L0 的小时聚合一天上百行，
+  #     不设就被静默截断（2026-11-26 回填验收「写入 100 行」两次才发现）。
+  #   BQ_DRY_RUN=1：只估扫描字节不执行（大回填执行前先报字节数用），输出是 bq 的一行估算文字。
   out="$(run_with_timeout "$BQ_TIMEOUT" \
-    bash -c 'exec bq query --use_legacy_sql=false --format="$1" < "$2"' \
-    _ "$1" "$BQ_SQLTMP" 2>>"$BQ_ERRLOG")" || rc=$?
+    bash -c 'exec bq query --use_legacy_sql=false --format="$1" ${3:+--maximum_bytes_billed="$3"} ${4:+--max_rows="$4"} ${5:+--dry_run} < "$2"' \
+    _ "$1" "$BQ_SQLTMP" "${BQ_MAX_BYTES:-}" "${BQ_MAX_ROWS:-}" "${BQ_DRY_RUN:-}" 2>>"$BQ_ERRLOG")" || rc=$?
   if [ "$rc" -eq 124 ]; then
     echo "  ⏱️ bq 查询超时 ${BQ_TIMEOUT}s，按缺数降级（详见 $(basename "${BQ_ERRLOG}")）" >&2
   fi
   # 只缓存成功的查询——把失败/超时的空结果缓存下来等于把故障固化
-  [ -n "$ck" ] && [ "$rc" -eq 0 ] && printf '%s\n' "$out" > "$ck"
+  [ -n "$ck" ] && [ "$rc" -eq 0 ] && [ -z "${BQ_DRY_RUN:-}" ] && printf '%s\n' "$out" > "$ck"
   _bqq_audit "$1" "$2" "$([ -n "$BQ_CACHE" ] && echo miss || echo off)" \
     "$(printf '%s' "$out" | grep -c . || true)" "$((SECONDS - _t0))" "$rc"
   printf '%s\n' "$out"
@@ -95,3 +100,11 @@ bqq() { # $1=csv|json  $2=SQL文本 → stdout；超时返回 124，失败返回
 #    iOS   BACKGROUND↔"0"=1068 · FOREGROUND↔"1"=14   Android FOREGROUND↔"true"=162 · BACKGROUND↔"false"=11
 # ⚠️ 放 bin/lib/bq.sh 而非 core：core 要求 env -i 可调用且不依赖外层，这是取数层的 SQL 片段。
 SQL_FG_NORM="COALESCE(NULLIF(process_state, 'UNKNOWN_PROCESS_STATE'), CASE LOWER(IFNULL((SELECT value FROM UNNEST(custom_keys) WHERE key = 'app_foreground' LIMIT 1), '')) WHEN 'true' THEN 'FOREGROUND' WHEN '1' THEN 'FOREGROUND' WHEN 'false' THEN 'BACKGROUND' WHEN '0' THEN 'BACKGROUND' ELSE NULL END)"
+
+# ── 技术诊断接口类签名的过滤谓词（change crash-tech-diagnostics）──────────────────
+# ⛔ **全仓唯一定义**。diag-hourly.sql（L0）与 diag-daily.sql（L1 / L2）都用 {{DIAG_API_PRED}} 引用——
+#    口径写进两份 SQL 就是失效模式 F1，check-scripts 抓不到 SQL 里的重复。
+# 作用在已抽出 did / code 列的 CTE 上：只用 api_result（物理请求，⛔ 不与 api_request_result 相加），
+# code 非空且非 2xx（spec「技术诊断报错签名口径」）。
+# shellcheck disable=SC2034  # 由 L0 / L1 / L2 渲染 SQL 时读取
+SQL_DIAG_API_PRED="did = 'api_result' AND IFNULL(code, '') != '' AND NOT REGEXP_CONTAINS(code, r'^http_2\\d\\d\$')"

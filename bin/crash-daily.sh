@@ -246,7 +246,7 @@ else
 fi
 # 核心层（纯函数）。不依赖任何全局，加载顺序任意；缺失则整跑失败——
 # 这些是阈值判定与格式化的唯一实现，退化版本会静默产出错误数字，比直接失败危险得多。
-for _c in format verdict version cache fixrelease tier owner; do
+for _c in format verdict version cache fixrelease tier owner diag; do
   # shellcheck disable=SC1090
   . "$ROOT/bin/lib/core/${_c}.sh" || { echo "❌ 核心层缺失：bin/lib/core/${_c}.sh" >&2; exit 1; }
 done
@@ -258,6 +258,8 @@ done
 . "$ROOT/bin/lib/bq.sh" || { echo "❌ 外壳层缺失：bin/lib/bq.sh" >&2; exit 1; }
 # 负责人 @ 的取信号与读内容文件（change crash-owner-mention），L1 / L2 共用一份
 . "$ROOT/bin/lib/owner.sh" || { echo "❌ 外壳层缺失：bin/lib/owner.sh" >&2; exit 1; }
+# 技术诊断日聚合的取数与本地存储（change crash-tech-diagnostics），L1 / L2 共用一份
+. "$ROOT/bin/lib/diag.sh" || { echo "❌ 外壳层缺失：bin/lib/diag.sh" >&2; exit 1; }
 bq_init
 # ⛔ EXIT trap 用**完成哨兵**判定成败，⚠️ 不能靠 `$?`——bash 3.2 在 `set -u` 未定义变量
 #    这条致命路径上，**进 trap 时 `$?` 已经是 0**（实测；普通命令失败时才是 1）。
@@ -1598,6 +1600,41 @@ IFS=$'\t' read -r TIER_N_URGENT TIER_N_RELEASE TIER_N_WATCH <<< "$(tier_counts "
 TIER_N_URGENT=$(( ${TIER_N_URGENT:-0} + $(printf '%s' "$TIER_METRIC" | jq 'length') ))
 echo "  三档：🚨 ${TIER_N_URGENT} · ⏳ ${TIER_N_RELEASE:-0} · 👀 ${TIER_N_WATCH:-0}"
 
+# ── 技术诊断报错（change crash-tech-diagnostics）─────────────────────────
+# 前一完整 MYT 日的 GA4 app_diagnostic 签名聚合；只进文档「五、技术诊断报错」与（激增日 / 取数失败时）卡片一行。
+# ⛔ 取数失败不得让日报失败（`|| _drc=$?`，不走 fail），也不得冒充「无报错」：DIAG_OK=0 时文档与卡片都写「取数失败」。
+# ⛔ 原有崩溃 / 性能 / 放量各段零改动：本节的数据只从这里流向它自己的渲染点。
+step "技术诊断报错"
+DIAG_DAY="${CRASH_REPORT_DIAG_DAY:-$(TZ=Asia/Kuala_Lumpur date -v-1d +%Y-%m-%d)}"   # 覆盖只供回放测试
+DIAG_OK=0; DIAG_EV='[]'; DIAG_SPIKES='[]'
+# ⚠️ 当日 + 前 7 天的行写文件、走 stdin 喂核心层：约 0.7 MB，作参数传会撞 ARG_MAX（见 core/diag.sh）
+DIAG_ROWS_FILE="$TMP/diag-rows.json"
+_drc=0
+diag_daily_ensure "$DIAG_DAY" 7 60000000000 || _drc=$?   # 7 天回填最多 8 张表 × ~4.3 GB
+# 本节版本集 = 日报其他按版本分列的表同一份列集合（最新 N 版 ∪ 性能可得版 ∪ 主力补充列，IOS_COLS / AND_COLS）。
+# ⚠️ 只用最新 N 版时，iOS 最新两版常是内部包（11-26：2.2.0 只有 4 个会话、2.1.2 无诊断数据），
+#    这一节 iOS 整段为空——读者会读成「iOS 无报错」，而用户实际都在主力版 2.1.1 上。
+DIAG_VERS="$(trap - ERR; jq -cn --arg i "$IOS_COLS" --arg a "$AND_COLS" \
+  '{IOS: [$i | splits("\\s+") | select(. != "")], ANDROID: [$a | splits("\\s+") | select(. != "")]}')" || DIAG_VERS='{}'
+DIAG_TOP_N="${CRASH_REPORT_DIAG_TOP_N:-15}"
+: > "$TMP/diag-api.csv"; : > "$TMP/diag-flow.csv"
+# ⛔ 判定与两张表**在这里一起算完**再定 DIAG_OK：卡片那一行、文档那一节、审计事件三处必须同一个结论
+#    （审查 G4：表格渲染曾放在卡片之后，渲染失败时卡片像平稳、文档却写取数失败）。
+# ⛔ 每个 `$( )` 内先 `trap - ERR`：errtrace 下子 shell 继承 ERR trap，外层 if / || 接不住（审查 S1）。
+if [ "$_drc" -eq 0 ] \
+   && diag_daily_rows "$(_diag_day_add "$DIAG_DAY" -7)" "$DIAG_DAY" > "$DIAG_ROWS_FILE" \
+   && DIAG_EV="$(trap - ERR; diag_evaluate_days "$DIAG_DAY" "$DIAG_DAILY_MIN" "$DIAG_DAILY_MULT" < "$DIAG_ROWS_FILE")" \
+   && DIAG_SPIKES="$(trap - ERR; jq -c '[ .[] | select(.verdict == "spike") ]' <<<"$DIAG_EV")" \
+   && diag_daily_table "$DIAG_DAY" api "$DIAG_VERS" "$DIAG_TOP_N" "$DIAG_EV" < "$DIAG_ROWS_FILE" > "$TMP/diag-api.csv" \
+   && diag_daily_table "$DIAG_DAY" flow "$DIAG_VERS" "$DIAG_TOP_N" "$DIAG_EV" < "$DIAG_ROWS_FILE" > "$TMP/diag-flow.csv"; then
+  DIAG_OK=1
+  echo "  技术诊断 ${DIAG_DAY}：签名 $(jq length <<<"$DIAG_EV") 个，日级激增 $(jq length <<<"$DIAG_SPIKES") 个"
+else
+  DIAG_EV='[]'; DIAG_SPIKES='[]'; : > "$TMP/diag-api.csv"; : > "$TMP/diag-flow.csv"
+  echo "  ⚠️ 技术诊断 ${DIAG_DAY} 取数或计算失败（取数 rc=${_drc}），本节降级为「取数失败」"
+fi
+audit diag "技术诊断报错" "$(jq -cn --arg d "$DIAG_DAY" --argjson ok "$DIAG_OK" --argjson sp "$(jq length <<<"$DIAG_SPIKES")" '{day:$d,ok:($ok==1),spikes:$sp}')"
+
 SUMMARY_MD="$ALERTS"
 add_summary() { [ -n "$1" ] && SUMMARY_MD="${SUMMARY_MD:+$SUMMARY_MD
 }$1"; return 0; }
@@ -2257,6 +2294,35 @@ if [[ "$DAY" < "$JUDGE_CHANGE_NOTE_UNTIL" ]] || [ "$DAY" = "$JUDGE_CHANGE_NOTE_U
 }${_jcn}"
 fi
 
+# 技术诊断报错（change crash-tech-diagnostics）：⛔ 只在日级激增或取数失败时加一行，平稳日卡片与改前逐字节一致。
+DIAG_CARD_LINE=""
+if [ "$DIAG_OK" != 1 ]; then
+  DIAG_CARD_LINE="⚠️ 技术诊断报错 ${DIAG_DAY:5} 取数失败——不是「无报错」，见 [日报](__DETAIL_URL__)「五、技术诊断报错」"
+elif [ "$(jq length <<<"$DIAG_SPIKES")" -gt 0 ]; then
+  DIAG_CARD_LINE="$(trap - ERR; jq -r --arg d "${DIAG_DAY:5}" '
+    "🚨 技术诊断报错激增（" + $d + "）：" + (.[0].sig | gsub("<"; "＜")) + " 全版本 " + (.[0].devices | tostring) + " 台（前 7 日均值 "
+    + (.[0].baseline | tostring) + "）" + (if length > 1 then "，另有 " + ((length - 1) | tostring) + " 个签名" else "" end)
+    + " · 见 [日报](__DETAIL_URL__)「五、技术诊断报错」"' <<<"$DIAG_SPIKES")" \
+    || DIAG_CARD_LINE="⚠️ 技术诊断报错 ${DIAG_DAY:5} 有日级激增但卡片行渲染失败，见 [日报](__DETAIL_URL__)「五、技术诊断报错」"
+fi
+[ -n "$DIAG_CARD_LINE" ] && CARD_NOTES="${CARD_NOTES:+$CARD_NOTES
+}${DIAG_CARD_LINE}"
+# L0 停摆可见（change crash-tech-diagnostics）：L0 启用后（health-diag.json 存在）超过 3 小时没跑或最近一次失败 → 卡片一行。
+# ⚠️ last_run 是 L0 按本机时区写的 TS（YYYYmmdd-HHMMSS），这里同样按本机时区解析——两边同一台机器，时区一致。
+DIAG_L0_LINE=""
+if [ -s "$STATE/health-diag.json" ]; then
+  _l0_ok="$(trap - ERR; jq -r '.ok | tostring' "$STATE/health-diag.json" 2>/dev/null)" || _l0_ok=""
+  _l0_err="$(trap - ERR; jq -r '.error // ""' "$STATE/health-diag.json" 2>/dev/null)" || _l0_err=""
+  _l0_last="$(trap - ERR; date -j -f '%Y%m%d-%H%M%S' "$(jq -r '.last_run // ""' "$STATE/health-diag.json" 2>/dev/null)" +%s 2>/dev/null)" || _l0_last=""
+  # 读不出（损坏 / 字段缺失）按失败报，⛔ 不按 0 秒算出「已 49 万小时没跑」这种误导数字
+  if [ -z "$_l0_ok" ] || [ -z "$_l0_last" ]; then
+    _l0_ok=false; _l0_err="health-diag.json 读不出或缺字段"; _l0_last="$(date +%s)"
+  fi
+  DIAG_L0_LINE="$(diag_l0_line "$_l0_ok" "$_l0_err" "$_l0_last" "$(date +%s)" 10800)"
+fi
+if [ -n "$DIAG_L0_LINE" ]; then CARD_NOTES="${CARD_NOTES:+$CARD_NOTES
+}${DIAG_L0_LINE}"; fi
+
 if [ "${TIER_N_URGENT:-0}" -gt 0 ]; then HEADER_COLOR="red"; HEADER_VERDICT="${TIER_N_URGENT} 项需开发处理"
 elif [ "${TIER_N_RELEASE:-0}" -gt 0 ]; then HEADER_COLOR="orange"; HEADER_VERDICT="今日无需开发处理"
 else HEADER_COLOR="green"; HEADER_VERDICT="今日无需开发处理"; fi
@@ -2842,6 +2908,10 @@ XMLPY
 }
 
 step "生成日报文档"
+# 技术诊断报错两张表：CSV 已在「技术诊断报错」一步算好（md / xml 两个渲染点共用，⛔ 不各算一遍）
+DIAG_HEAD='平台,版本,签名,设备,用户,前 7 日均值,激增'
+DIAG_NOTE="来源 GA4 app_diagnostic，${DIAG_DAY} 全天（MYT），版本列同本报告其他按版本分列的表（最新 ${VERSION_COUNT} 版 + 主力补充列：iOS $(printf '%s' "$IOS_COLS" | tr '\n' ' ' | sed 's/ *$//') · Android $(printf '%s' "$AND_COLS" | tr '\n' ' ' | sed 's/ *$//')），按受影响设备降序取前 ${DIAG_TOP_N}。接口类 = api_result（物理请求）的 target × code，排除 2xx 与空 code；流程类 = diagnostic_id × reason，只取 tech_fail。设备按 user_pseudo_id 去重，用户按 user_id 去重（访客不计）。「前 7 日均值」是同平台同版本同签名的前 7 天均值。「激增」按签名级（跨平台、跨版本相加）判：≥${DIAG_DAILY_MIN} 台且 ≥${DIAG_DAILY_MULT}× 前 7 天均值；流程类未回测，不判。只给数字，不判断根因。"
+
 REPORT="$STATE/reports/$DAY-daily.md"
 {
   printf '# 崩溃 & 性能日报 · %s\n\n' "$DAY"
@@ -2993,6 +3063,15 @@ REPORT="$STATE/reports/$DAY-daily.md"
   printf -- '- **ANR**：仅 Android（iOS 系统层无此概念，数据源不产出该 `error_type`；iOS 的卡顿信号见冻结率与慢帧）。ANR 率 = ANR 事件数 / 会话数，与崩溃率同分母、内部可比；**与 Google Play 的「用户感知 ANR 率」（日活用户分母）口径不同，不可直接对照商店门槛判定是否达标**。\n'
   printf -- '- **NON_FATAL**：双端数字**不可比**——非致命异常由客户端主动上报（`recordError` / `recordException`），覆盖多少取决于埋了多少收口点，不代表哪一端更稳。\n'
   printf -- '- **error_type 三类**：`is_fatal = TRUE` 等价于 `error_type = FATAL`；ANR 与 NON_FATAL 的 `is_fatal` 均为 FALSE，故崩溃次数 / 崩溃率 / 受影响安装三项**不含**这两类，各自单独成行。\n'
+  printf '## 五、技术诊断报错（%s）\n\n' "$DIAG_DAY"
+  if [ "$DIAG_OK" != 1 ]; then
+    printf '> ⚠️ **取数失败**：本节今日缺失——⛔ 不是「无报错」。详见日志与审计事件 `diag`。\n\n'
+  else
+    printf '> %s\n\n' "$DIAG_NOTE"
+    [ "$DIAG_VERS" = '{"IOS":[],"ANDROID":[]}' ] && printf '> ⚠️ **版本集不可得**（最新版本清单为空），下面两张表为空不代表「无报错」。\n\n'
+    printf '### 接口类（target × code）\n\n'; md_csv_table "$TMP/diag-api.csv" "$DIAG_HEAD"
+    printf '### 流程类（diagnostic_id × reason）\n\n'; md_csv_table "$TMP/diag-flow.csv" "$DIAG_HEAD"
+  fi
   printf '\n---\n本报告自动生成，不含根因与修复方案。需要定位请跑 `firebase-crash-triage`。\n'
 } > "$REPORT"
 echo "--- 报告已生成：$REPORT ---"
@@ -3284,6 +3363,15 @@ build_report_xml() {
     printf '  <p>环比：卡片「对比」列 = 最新版 − 上一版；本节 DoD/WoW = 同版本天级单日值。两者口径不同，不可混读。</p>\n'
     printf '  <p>数据截止：性能 %s · 放量 %s · 崩溃 %s</p>\n' "$DATA_UNTIL" "$ADOPTION_UNTIL" "$CRASH_UNTIL"
     printf '</callout>\n'
+    printf '<h1>五、技术诊断报错（%s）</h1>\n' "$DIAG_DAY"
+    if [ "$DIAG_OK" != 1 ]; then
+      printf '<callout background-color="light-red"><p>⚠️ <b>取数失败</b>：本节今日缺失——⛔ 不是「无报错」。详见日志与审计事件 diag。</p></callout>\n'
+    else
+      printf '<callout background-color="light-blue"><p>%s</p></callout>\n' "$(printf '%s' "$DIAG_NOTE" | xesc)"
+      [ "$DIAG_VERS" = '{"IOS":[],"ANDROID":[]}' ] && printf '<callout background-color="light-red"><p>⚠️ <b>版本集不可得</b>（最新版本清单为空），下面两张表为空不代表「无报错」。</p></callout>\n'
+      printf '<h2>接口类（target × code）</h2>\n'; xml_csv_table "$TMP/diag-api.csv" "$DIAG_HEAD" '1,2,3,4,5,6,7'
+      printf '<h2>流程类（diagnostic_id × reason）</h2>\n'; xml_csv_table "$TMP/diag-flow.csv" "$DIAG_HEAD" '1,2,3,4,5,6,7'
+    fi
     printf '<p><span text-color="gray">本报告自动生成，不含根因与修复方案。需要定位请跑 firebase-crash-triage。</span></p>\n'
   } > "$REPORT_XML"
 }

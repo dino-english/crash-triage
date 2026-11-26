@@ -115,6 +115,27 @@ WRAP
   chmod +x "$w"
   ok "wrapper $w"
 done
+# L0 每小时诊断告警（change crash-tech-diagnostics）。⚠️ 不导出 CRASH_REPORT_CHAT_ID：
+# L0 的投递目标只认 $STATE/local.env 里的 CRASH_REPORT_DIAG_ALERT_CHAT_ID，未设置就不投递（不回落日报群）。
+w="$HERMES_SCRIPTS/diag-hourly.sh"
+cat > "$w" <<WRAP
+#!/usr/bin/env bash
+# 由 crash-triage 的 install.sh 生成，勿手改；改配置请重跑 install.sh / update.sh。
+# stdout 保持为空：hermes --no-agent 会把 stdout 原样投递，告警卡片由脚本自己用 lark-cli 发。
+export HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
+export CRASH_REPORT_ROOT="$ROOT"
+export CRASH_REPORT_STATE_DIR="$STATE"
+export CRASH_REPORT_LARK_PROFILE="$PROFILE"
+exec bash "$ROOT/bin/diag-hourly.sh" >/dev/null 2>&1 < /dev/null
+WRAP
+chmod +x "$w"
+ok "wrapper $w"
+if hermes cron list 2>/dev/null | grep -q 'diag-hourly'; then
+  ok "diag-hourly cron 已存在"
+else
+  todo "L0 每小时诊断告警（需维护者同意后再注册；投递目标写 \$STATE/local.env 的 CRASH_REPORT_DIAG_ALERT_CHAT_ID）："
+  echo "     hermes cron create '5 * * * *' --name diag-hourly --no-agent --script diag-hourly.sh"
+fi
 if hermes cron list 2>/dev/null | grep -q 'crash-daily'; then
   ok "cron 已存在（如需改时间用 hermes cron edit）"
 else

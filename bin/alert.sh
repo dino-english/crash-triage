@@ -7,7 +7,10 @@
 #
 # 用法：
 #   alert.sh --source daily --step "查询崩溃数据" --message "bq 不可用" \
-#            [--severity error|warn] [--run-id X] [--log /path] [--rc 1] [--hint "建议动作"]
+#            [--severity error|warn] [--run-id X] [--log /path] [--rc 1] [--hint "建议动作"] [--to <ou_/oc_>]
+#   --to：显式指定投递目标，压过 CRASH_REPORT_ALERT_CHAT_ID / CRASH_REPORT_CHAT_ID；**给了空值就跳过不发**。
+#        L0 诊断告警用它：L0 的失败告警必须跟诊断告警走同一个目标，⛔ 不得回落到日报群
+#       （生产机 local.env 的 CRASH_REPORT_CHAT_ID 是正式群）。
 #
 # 设计约束：**告警自身失败绝不能影响主流程**——所有错误吞掉，恒退出 0。
 set -uo pipefail
@@ -27,7 +30,7 @@ if ! command -v lark-cli >/dev/null 2>&1; then
 fi
 export PATH
 
-SOURCE="未知"; STEP=""; MESSAGE=""; SEVERITY="error"; RUN_ID=""; LOGF=""; RC=""; HINT=""
+SOURCE="未知"; STEP=""; MESSAGE=""; SEVERITY="error"; RUN_ID=""; LOGF=""; RC=""; HINT=""; TO=""; TO_SET=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --source) SOURCE="$2"; shift 2;;
@@ -38,11 +41,16 @@ while [ $# -gt 0 ]; do
     --log) LOGF="$2"; shift 2;;
     --rc) RC="$2"; shift 2;;
     --hint) HINT="$2"; shift 2;;
+    --to) TO="$2"; TO_SET=1; shift 2;;
     *) shift;;
   esac
 done
 
 CHAT_ID="${CRASH_REPORT_ALERT_CHAT_ID:-${CRASH_REPORT_CHAT_ID:-}}"
+if [ "$TO_SET" = 1 ]; then
+  CHAT_ID="$TO"
+  [ -n "$CHAT_ID" ] || { echo "alert: --to 为空（调用方未配置投递目标），跳过" >&2; exit 0; }
+fi
 [ -n "$CHAT_ID" ] || { echo "alert: 未设置 CRASH_REPORT_ALERT_CHAT_ID / CRASH_REPORT_CHAT_ID，跳过" >&2; exit 0; }
 LARK_AS="${CRASH_REPORT_LARK_AS:-bot}"
 CACHE_NS="${CRASH_REPORT_LARK_PROFILE:-crash-triage}"
@@ -60,6 +68,7 @@ case "$SOURCE" in
   weekly)  SRC_NAME="L2 周报";;
   deliver) SRC_NAME="投递";;
   agent)   SRC_NAME="Agent 取数";;
+  diag)    SRC_NAME="L0 诊断告警";;
   *)       SRC_NAME="$SOURCE";;
 esac
 if [ "$SEVERITY" = warn ]; then
