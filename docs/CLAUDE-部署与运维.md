@@ -134,7 +134,7 @@ $STATE/                          # ${XDG_STATE_HOME:-~/.local/state}/crash-triag
 | `health-daily.json` / `health.json` / `health-diag.json` | L1 / L2 / L0 的健康状态 |
 | `diag/hourly.jsonl` + `coverage.json` | L0 的小时聚合（签名 × 平台 × 版本，保留 15 天）与「各 UTC 日取自哪张表、何时取」。丢了不致命：下次运行自动回填前 7 天（约 20 GB，⛔ 不当作基线 0），但**费钱**——换机时一起带走 |
 | `diag/alerted.json` | L0 去重状态 `{签名: {sent, first, last}}`。丢了 → 正在持续的激增会再发一张卡 |
-| `diag/daily.jsonl` + `daily-coverage.json` | L1 / L2 的技术诊断日聚合（全版本，保留 60 天）。L1 每天重取前一日、缺历史自动补；周报「前 4 周未出现」靠它。生产机首次启用前一次性回填 28 天（维护者 2026-11-26 批准，执行前先报 dry-run 字节数：`bash bin/diag-backfill.sh 28 --dry-run`） |
+| `diag/daily.jsonl` + `daily-coverage.json` | L1 / L2 的技术诊断日聚合（全版本，保留 60 天）。L1 每天重取前一日、缺历史自动补；周报「前 4 周未出现」靠它。生产机首次启用前一次性回填 **35 天**，覆盖周报「前 4 周」：维护者 2026-11-26 批准，执行前先报 dry-run 字节数 `bash bin/diag-backfill.sh 35 --dry-run`。2026-11-26 已执行，实际计费 47.41 GB，写入 19507 行 |
 | `ledger/dispositions.json` | issue 处置结论（`issue_id` → `{first_seen, disposition, note}`，键跨 `error_type` 统一）。⛔ **不可重算的人工资产**：人工独占写入，跑批只读、前后逐字节一致。**L2 收尾自动落副本到 `backup/dispositions/`**（内容变化时才落，落后 `cmp` 校验；失败只告警不中止跑批）。⚠️ 它防的是误覆写 / 误删 / 损坏，⛔ **防不住整台机器丢失**——异地那一层仍靠人工 scp。⚠️ 它是 NON_FATAL 现状表人工结论的**唯一**存续途径——那张表是按受影响安装取头部的滚动榜单，旧做法「从上一版表格解析再写回」在行掉榜时就把结论丢了。⛔ 不在 `$STATE` 里就等于永久丢失，**必须与 `last-snapshot.json` 同级纳入备份**（`git clean -xfd` / 换机都会抹掉）。文件缺失 → 降级渲染 + 标注；⛔ 内容损坏 → 台账本轮不更新且整跑非零退出，绝不以空结论覆写 |
 
 旧口径周报归档 `ledger/weekly-index.jsonl` 由 `build_index()` 读时与 `report-index.jsonl` 合并，避免历史断链。
@@ -233,11 +233,11 @@ bash bin/check-scripts.sh
 FACT_CACHE_BASELINE=<跑批前的 issues 快照目录> bash bin/test/assert-fact-cache.sh
 
 # 运维
-hermes cron list                                # 两个 job 的调度 / 上次状态
-hermes cron edit 92d0ff92e222 --schedule '0 7 * * *'   # 改时间（job id 见 list）
+hermes cron list                                # 三个 job（crash-daily / crash-weekly / diag-hourly）的调度 / 上次状态
+hermes cron edit 72f0850e6688 --schedule '0 7 * * *'   # 改时间（这是 crash-daily；job id 见 list 与上方调度表）
 hermes cron pause <job_id>                      # 停掉
 STATE="${XDG_STATE_HOME:-$HOME/.local/state}/crash-triage"
-cat "$STATE/health-daily.json"                  # L1；L2 是 health.json
+cat "$STATE/health-daily.json"                  # L1；L2 是 health.json，L0 是 health-diag.json
 ls -t "$STATE/logs" | head                      # 日志保留 60 天
 sqlite3 ~/.hermes/cron/executions.db \
   "SELECT job_id,status,claimed_at,finished_at FROM executions ORDER BY claimed_at DESC LIMIT 5;"

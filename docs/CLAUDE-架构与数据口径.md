@@ -498,7 +498,8 @@ CardKit v2 的 `table` 组件字段只有 `rows` / `page_size` / `row_height` / 
   - 单张日表 0.7 GB（11-01）～ 4.3 GB（11-23）。
   - L0 每次 0～2.8 GB，约 33 GB / 天。
   - L1 每天约 5.5 GB（两张表）。
-  - 28 天回填 44.1 GB（11-26 估）。
+  - 35 天回填：生产机 2026-11-26 实际计费 47.41 GB（dry-run 也是 47.41 GB）。28 天估为 44.1 GB。
+  - 上面的单次区间是 dry-run 的估算。上线后的实际计费字节取自 BigQuery 作业记录 `INFORMATION_SCHEMA.JOBS_BY_USER`，记在 `openspec/changes/crash-tech-diagnostics/tasks.md` 第 8.4 条。
 
 ## 台账口径（change `crash-ledger-l2-ownership`，2026-08-19 完成）
 

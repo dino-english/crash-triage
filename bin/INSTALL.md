@@ -149,6 +149,8 @@ bash bin/setup.sh                        # 两个路径都不用设，setup 自�
 | `CRASH_REPORT_STATE_DIR` | 否 | 运行数据目录。默认 `${XDG_STATE_HOME:-~/.local/state}/crash-triage` |
 | `CRASH_REPORT_CHAT_ID` | 是 | 目标群 `oc_655033f1f85fa04f9eac25d56f056fc9`；**首次部署建议先填自己的 `ou_xxx` 私聊验证几轮再换群** |
 | `CRASH_REPORT_DRY_RUN` | 否 | `1` = 只打印不发送。首次务必用它跑 |
+| `CRASH_REPORT_DIAG_MIN` / `CRASH_REPORT_DIAG_MULT` | 否 | L0 小时级激增阈值：受影响设备下限，默认 `10`；对前 7 天同小时均值的倍数，默认 `4`。回测定稿值，改前先重跑回测（`openspec/changes/crash-tech-diagnostics/backtest/`） |
+| `CRASH_REPORT_DIAG_TOP_N` | 否 | 日报「技术诊断报错」一节每类取前几行，默认 `15` |
 | `CRASH_REPORT_DIAG_ALERT_CHAT_ID` | 否 | L0 诊断告警的投递目标（`ou_` 私聊或 `oc_` 群）。⚠️ **只从 `$STATE/local.env` 读**，命令行 / wrapper 里设了也会被忽略；未设置 → L0 照常计算、不投递，⛔ 不回落 `CRASH_REPORT_CHAT_ID`。首周填「Dino AI 客服测试」群（`oc_706585b425aa175d888509b372deaebe`，群里唯一的真人是维护者）（维护者 2026-11-26 定，原定私聊） |
 | `AGENT_CMD` | 否 | L2 用的 agent 命令，默认 `claude`；可换 cursor / codex |
 | `CRASH_REPORT_VERSION_COUNT` | 否 | 日报统计的**最新版本个数**，默认 `2` |
@@ -252,7 +254,7 @@ hermes cron create '5 * * * *'  --name diag-hourly  --no-agent --script diag-hou
 
 ```bash
 hermes cron list | grep -A3 crash
-# 期望两个 job，enabled=True，next_run_at 是下一个预定时刻
+# 期望三个 job（crash-daily / crash-weekly / diag-hourly），enabled=True，next_run_at 是下一个预定时刻
 ```
 
 **确认真的跑得起来**（推荐在首次部署时做一次）：把调度临时改到几分钟后，等 ticker 自行触发，再改回来——这是唯一能验证「调度器 → wrapper → 主脚本 → 投递」整条链路的方式。
@@ -316,7 +318,7 @@ cat "${XDG_STATE_HOME:-$HOME/.local/state}/crash-triage/health-daily.json" # L1
 
 **排查「报告没出现」**：
 
-1. `hermes cron list` 看两个 job 的 enabled / next_run_at；`sqlite3 ~/.hermes/cron/executions.db "SELECT job_id,status,claimed_at,error FROM executions ORDER BY claimed_at DESC LIMIT 5;"` 看实际执行结果
+1. `hermes cron list` 看三个 job（crash-daily / crash-weekly / diag-hourly）的 enabled / next_run_at；`sqlite3 ~/.hermes/cron/executions.db "SELECT job_id,status,claimed_at,error FROM executions ORDER BY claimed_at DESC LIMIT 5;"` 看实际执行结果
 2. 看 `logs/` 最新一份日志
 3. 最常见原因按概率排序：① PATH 问题（换过 node/brew 位置后没重跑 `setup.sh`）② gcloud/firebase 凭证失效 ③ BigQuery 当日数据未同步
 
