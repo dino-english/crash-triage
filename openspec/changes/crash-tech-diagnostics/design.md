@@ -72,7 +72,7 @@ GA4 表的日期边界按 property 时区切分，实施时先核实 property �
 
 ## Risks / Trade-offs
 
-- [阈值没在真实环境跑过，首周误报未知] → 首周只发维护者私聊；一周后按实际命中记录决定是否改发群（观察项，到期日 2026-12-04）。
+- [阈值没在真实环境跑过，首周误报未知] → 首周只发「Dino AI 客服测试」群（维护者 2026-11-26 由私聊改定；群里唯一的真人是维护者）；一周后按实际命中记录决定是否改发群（观察项，到期日 2026-12-04）。
 - [实时表 schema 或字段名随客户端版本变化，签名突然消失] → 某签名族连续 2 小时完全无数据而前 7 天同小时有数据时，告警写成「数据缺失」而不是「平稳」（spec：检查失败不冒充平稳）。
 - [BigQuery 费用] → 单次查询经 `bqq` 设扫描上限（`BQ_MAX_BYTES`，超了 BigQuery 拒绝执行、不计费）。首周费用汇总从 `region-asia-southeast1.INFORMATION_SCHEMA.JOBS_BY_USER` 按查询文本取实际计费字节，报给维护者。
   - 原写法「审计事件流记录每次字节数」没有实现：`bq query` 的输出里没有字节数（审查 G2）。
@@ -87,8 +87,8 @@ GA4 表的日期边界按 property 时区切分，实施时先核实 property �
 1. 开发机（维护者 Mac，`$STATE/local.env` 指向私聊）实现、回测、整跑 `NO_DELIVER`、实发私聊并读回产物。
 2. 维护者同意后合并，日报机 `update.sh` 更新代码。接下来每一步都要维护者同意，完整清单见 `.claude/skills/deploy-prod/`「首次启用 L0」：
    - L1 / L2 日聚合一次性回填 35 天：先跑 `bin/diag-backfill.sh 35 --dry-run` 报字节数，批准后执行；
-   - 在日报机 `$STATE/local.env` 写 `CRASH_REPORT_DIAG_ALERT_CHAT_ID`（维护者私聊，要用日报机应用下的 open_id）；
-   - `install.sh` 生成 diag-hourly 包装脚本（注意它会同时重写 L1 / L2 的包装，先 export 生产群 ID）；
+   - 在日报机 `$STATE/local.env` 写 `CRASH_REPORT_DIAG_ALERT_CHAT_ID`（2026-11-26 维护者定为「Dino AI 客服测试」群；改发私聊的话要用日报机应用下的 open_id）；
+   - 生成 diag-hourly 包装脚本：⛔ 只执行 `install.sh` 里生成这一份的那一段。整体跑会把 `HERMES_HOME` 补进生产机 L1 / L2 的包装，那两份现在没有这一行；
    - 注册 `diag-hourly` cron。
 3. 回退：`hermes cron pause <diag-hourly job id>` 停 L0；日报 / 周报的新增一节随代码回退 `git revert` 后 `update.sh`。L0 只写 `$STATE/diag/`，删掉即可，不影响 L1 / L2 基准。
 

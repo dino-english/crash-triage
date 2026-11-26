@@ -20,4 +20,8 @@ bq/hermes 需先 `. $S/path.env; export PATH`。
    查任何可疑数字：`jq -c 'select(.payload.sql=="<某>.sql")' $A` 给出表/窗口/行数/耗时/rc。
 4. **台账同步**（仅周一 L2 后）：核对飞书台账 `TtpwdhgKroMH1DxJumojTflrppz`——
    FATAL 现状表未被扰动、NON_FATAL 表正确替换、变更时间线历史未丢（sync_ledger 全程不 overwrite）。
-5. 失败排查入口：`ls -t $S/logs | head` + `$S/runs/<日期>/L{1,2}/latest/`。
+5. **L0 每小时诊断告警**（2026-11-26 起，job id `01c4ed7d509e`）：
+   - `jq -c . $S/health-diag.json`：`ok:true`，且 `last_run` 在最近 1 小时内。`ok:false` 且 `error` 以「数据缺失」开头时，先查 GA4 实时表是不是停更了。
+   - `sqlite3 ~/.hermes/cron/executions.db "SELECT status,claimed_at FROM executions WHERE job_id='01c4ed7d509e' ORDER BY claimed_at DESC LIMIT 6;"` 应该每小时一条。
+   - 命中记录看 `tail $S/diag/hits.jsonl`。日报卡片上出现「L0 … 没有运行 / 最近一次失败」那一行时，从这一项开始查。
+6. 失败排查入口：`ls -t $S/logs | head` + `$S/runs/<日期>/L{1,2}/latest/`。

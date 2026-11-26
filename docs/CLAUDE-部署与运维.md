@@ -29,15 +29,17 @@ STATE="${CRASH_REPORT_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/crash-tri
 |---|---|---|---|
 | `crash-daily` | `72f0850e6688` | `30 8 * * *` | `~/.hermes/scripts/crash-daily.sh` |
 | `crash-weekly` | `6d834f1f6da5` | `30 5 * * 1` | `~/.hermes/scripts/crash-weekly.sh` |
-| `diag-hourly`（L0） | 未注册（需维护者同意） | `5 * * * *` | `~/.hermes/scripts/diag-hourly.sh` |
+| `diag-hourly`（L0） | `01c4ed7d509e`（2026-11-26 注册） | `5 * * * *` | `~/.hermes/scripts/diag-hourly.sh` |
 
 **L0 每小时诊断告警**（change `crash-tech-diagnostics`）：
 - 注册：`hermes cron create '5 * * * *' --name diag-hourly --no-agent --script diag-hourly.sh`；包装脚本由 `install.sh` 生成（⚠️ `update.sh` 不生成，只在缺失时提示）。整点后 5 分钟跑，判定上一个完整 MYT 小时。
 - 投递目标**只认** `$STATE/local.env` 的 `CRASH_REPORT_DIAG_ALERT_CHAT_ID`，未设置 → 照常计算、不投递、日志写原因，⛔ 不回落日报群。L0 自身失败的告警卡也只发这个目标，且只在「上次成功 → 本次失败」时发一次（标记 `$STATE/diag/.alerted-failure`，下次成功才删）。
-- 回退：`hermes cron pause <diag-hourly job id>` 停 L0；L0 只写 `$STATE/diag/` 里的小时聚合 / 去重状态与 `health-diag.json`，⛔ 不碰 L1 / L2 的基准。停用后这些文件留着无害；彻底撤掉就删 `diag/hourly.jsonl`、`coverage.json`、`alerted.json`、`hits.jsonl`（⚠️ `daily*.json*` 是 L1 / L2 的日聚合，不要一起删）。
+- 回退：`hermes cron pause 01c4ed7d509e` 停 L0；L0 只写 `$STATE/diag/` 里的小时聚合 / 去重状态与 `health-diag.json`，⛔ 不碰 L1 / L2 的基准。停用后这些文件留着无害；彻底撤掉就删 `diag/hourly.jsonl`、`coverage.json`、`alerted.json`、`hits.jsonl`（⚠️ `daily*.json*` 是 L1 / L2 的日聚合，不要一起删）。
 - **数据缺失**（本小时与上一小时都没有接口类数据，而前 7 天同小时有）时：发一张橙色「数据缺失」卡（6 小时去重），之后**非零退出**、`health-diag.json` 写 `ok:false`，不再叠加一张泛化的失败卡。spec 对这种情况的要求是「检查失败不冒充平稳」。
 - **L0 停摆由 L1 卡片兜底**：`health-diag.json` 存在且超过 3 小时没跑、最近一次失败或读不出时，日报卡片加一行。cron 停了或锁残留时，L0 自己发不出任何告警。
-- 首周（至 2026-12-04）只发维护者私聊。`$STATE/diag/hits.jsonl` 记每次命中，`evals.jsonl` 记每小时接近阈值的签名（用来量化晚到事件的影响），到期一起汇总报维护者，由维护者决定是否改发群。
+- 首周（至 2026-12-04）发「Dino AI 客服测试」群（`oc_706585b425aa175d888509b372deaebe`，群里唯一的真人是维护者），维护者 2026-11-26 定（原定私聊；生产机 `local.env` 已写）。`$STATE/diag/hits.jsonl` 记每次命中，`evals.jsonl` 记每小时接近阈值的签名（用来量化晚到事件的影响），到期一起汇总报维护者，由维护者决定是否改发群。
+
+⚠️ **生产机包装脚本与 `install.sh` 模板不一致**（2026-11-26 上线 L0 时发现，是既有情况）：模板生成的 crash-daily / crash-weekly 包装会 `export HERMES_HOME`，生产机现有的那两份没有这一行。整体重跑 `install.sh` 会把这一行补进去，日报 / 周报发卡用的应用身份可能跟着变（有 `HERMES_HOME` 时 lark-cli 用 `~/.lark-cli/hermes/config.json` 的应用「Dino AI Data Assistant」）。⛔ 没核实之前不要在生产机整体跑 `install.sh`；只生成某一个包装时，抽出 `install.sh` 里对应那一段单独执行（L0 就是这么装的，见 `.claude/skills/deploy-prod/`）。
 
 **改调度**：`hermes cron edit <job id> --schedule "<cron 表达式>"`（改完 `hermes cron list` 核对 `Next run`）。
 ⚠️ 非交互 ssh 里必须先 `. ~/.local/state/crash-triage/path.env; export PATH`，否则 `hermes` 不在 PATH，
@@ -186,7 +188,7 @@ scp dino911@dino911s-mac-mini:.local/state/crash-triage/ledger/dispositions.json
 
 | | L0 诊断告警 `diag-hourly.sh` | L1 日报 `crash-daily.sh` | L2 周报 `crash-weekly.sh` |
 |---|---|---|---|
-| 定时 | 每小时 :05（Hermes cron，**待注册**） | 每天 08:30（Hermes cron） | 每周一 05:30（Hermes cron） |
+| 定时 | 每小时 :05（Hermes cron，2026-11-26 起） | 每天 08:30（Hermes cron） | 每周一 05:30（Hermes cron） |
 | 数据源 | GA4 `app_diagnostic`（当天实时表） | BigQuery（crashlytics / sessions / performance）+ GA4 `app_diagnostic` 一节 | BigQuery（`fetch-snapshot-bq.sh`）+ git 反查 + GA4 `app_diagnostic` 一节 |
 | 用不用模型 | 否 | 否（`fetch-snapshot.sh` light 对照除外） | **数据层否**；仅分析层（`report.md` 根因/方案）用模型，失败只降级 |
 | 职责 | 接口类签名每小时激增告警，只给分布不给结论 | **高频数据呈现**，不做分析、不碰结论 | **分析与结论沉淀** |

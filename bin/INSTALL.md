@@ -149,7 +149,7 @@ bash bin/setup.sh                        # 两个路径都不用设，setup 自�
 | `CRASH_REPORT_STATE_DIR` | 否 | 运行数据目录。默认 `${XDG_STATE_HOME:-~/.local/state}/crash-triage` |
 | `CRASH_REPORT_CHAT_ID` | 是 | 目标群 `oc_655033f1f85fa04f9eac25d56f056fc9`；**首次部署建议先填自己的 `ou_xxx` 私聊验证几轮再换群** |
 | `CRASH_REPORT_DRY_RUN` | 否 | `1` = 只打印不发送。首次务必用它跑 |
-| `CRASH_REPORT_DIAG_ALERT_CHAT_ID` | 否 | L0 诊断告警的投递目标（`ou_` 私聊或 `oc_` 群）。⚠️ **只从 `$STATE/local.env` 读**，命令行 / wrapper 里设了也会被忽略；未设置 → L0 照常计算、不投递，⛔ 不回落 `CRASH_REPORT_CHAT_ID`。首周只填维护者私聊（维护者 2026-11-26 定） |
+| `CRASH_REPORT_DIAG_ALERT_CHAT_ID` | 否 | L0 诊断告警的投递目标（`ou_` 私聊或 `oc_` 群）。⚠️ **只从 `$STATE/local.env` 读**，命令行 / wrapper 里设了也会被忽略；未设置 → L0 照常计算、不投递，⛔ 不回落 `CRASH_REPORT_CHAT_ID`。首周填「Dino AI 客服测试」群（`oc_706585b425aa175d888509b372deaebe`，群里唯一的真人是维护者）（维护者 2026-11-26 定，原定私聊） |
 | `AGENT_CMD` | 否 | L2 用的 agent 命令，默认 `claude`；可换 cursor / codex |
 | `CRASH_REPORT_VERSION_COUNT` | 否 | 日报统计的**最新版本个数**，默认 `2` |
 | `CRASH_REPORT_MIN_SESSIONS` | 否 | 版本候选门槛（低于此会话数的版本不进清单），默认 `5` |

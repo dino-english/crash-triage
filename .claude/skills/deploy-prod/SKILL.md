@@ -22,9 +22,12 @@ description: 部署到生产机 Mac mini——合入 main、ssh 执行 update.sh
 
 1. **一次性回填日聚合**（维护者 2026-11-26 批准 35 天）。先跑 `bash bin/diag-backfill.sh 35 --dry-run`，把打印出来的字节数报给维护者，同意后去掉 `--dry-run` 再跑。
    - ⛔ 不跑这一步的话，L2 冷启动要补 35 张表，会超出它 60 GB 的计费上限，周报这一节就会显示「取数失败」。
-2. **写投递目标**：在 `$STATE/local.env` 里写 `export CRASH_REPORT_DIAG_ALERT_CHAT_ID="ou_<维护者在日报机应用下的 open_id>"`。首周只填私聊。⚠️ open_id 按应用隔离，开发机上的那个不能直接拿来用。
-3. **生成包装脚本**：`bash bin/install.sh`。⚠️ 它会同时重写 crash-daily / crash-weekly 的包装脚本，`CRASH_REPORT_CHAT_ID` 取自当前环境——先 `export CRASH_REPORT_CHAT_ID=oc_655033f1f85fa04f9eac25d56f056fc9`（生产群）再跑，跑完 diff 一遍旧包装确认只多了 diag-hourly。
-4. **注册 cron**：`hermes cron create '5 * * * *' --name diag-hourly --no-agent --script diag-hourly.sh`，然后把 job id 补进 docs/CLAUDE-部署与运维.md 的调度表。
+2. **写投递目标**：在 `$STATE/local.env` 里写 `export CRASH_REPORT_DIAG_ALERT_CHAT_ID="oc_706585b425aa175d888509b372deaebe"`——首周发「Dino AI 客服测试」群（维护者 2026-11-26 定；群里唯一的真人是维护者，日报机发卡的「Dino AI Data Assistant」在群里）。✅ 2026-11-26 已写，原文件备份为 `local.env.bak-20261126`。
+   - 以后要改发私聊，得用维护者在日报机应用下的 open_id。⚠️ open_id 按应用隔离，开发机上的那个不能直接用；做法是日报机上 `HERMES_HOME=~/.hermes lark-cli im +chat-members-list --chat-id <群> --as bot`，在 users 列表里找本人。
+3. **生成包装脚本**：⛔ **不要整体跑 `install.sh`**。生产机现有的 crash-daily / crash-weekly 包装没有 `export HERMES_HOME`，模板里有，整体跑会把它补进去，日报 / 周报发卡的应用身份可能跟着变（2026-11-26 上线时发现，未核实前不动）。
+   - 正确做法：先 `cp -Rp ~/.hermes/scripts ~/.hermes/scripts.bak-<日期>`，再用 python 从 `bin/install.sh` 截出 `w="$HERMES_SCRIPTS/diag-hourly.sh"` 到 `ok "wrapper $w"` 之间那一段，设好 `ROOT` / `STATE` / `PROFILE` / `HERMES_SCRIPTS` 后执行。
+   - 执行完 `cmp` 两份旧包装，必须未变。✅ 2026-11-26 按这个做法装好。
+4. **注册 cron**：`hermes cron create '5 * * * *' --name diag-hourly --no-agent --script diag-hourly.sh`，然后把 job id 补进 docs/CLAUDE-部署与运维.md 的调度表。✅ 2026-11-26 已注册，job id `01c4ed7d509e`。注册前先 `env -i HOME=$HOME /bin/bash ~/.hermes/scripts/diag-hourly.sh` 手动跑一次首跑，有问题当场就能看到。
 5. **首跑核验**：看 `cat $STATE/health-diag.json`。首跑会自动回填 L0 前 7 天（约 20 GB，按 design 走，不另批）。
 6. **观察项**：2026-12-04 汇总 `diag/hits.jsonl` 与 `diag/evals.jsonl`，再从 `INFORMATION_SCHEMA.JOBS_BY_USER` 取实际费用，一起报维护者。
 

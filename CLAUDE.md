@@ -18,7 +18,7 @@ bash bin/install.sh              # 一键装机；更新用 bin/update.sh
 bash bin/check-scripts.sh        # 改脚本后必跑（十项检查）
 FACT_CACHE_BASELINE=<跑批前快照目录> bash bin/test/assert-fact-cache.sh
 hermes cron list                 # 调度运维；改时间 edit / 停 pause
-cat "$STATE/health-daily.json"   # L1 健康（L2 是 health.json）；日志在 $STATE/logs
+cat "$STATE/health-daily.json"   # L1 健康（L2 是 health.json，L0 是 health-diag.json）；日志在 $STATE/logs
 ```
 
 没有单元测试。验收链：`check-scripts.sh` → DRY RUN → 抽查数值对 Firebase 控制台（INSTALL.md §6）。

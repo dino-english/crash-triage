@@ -3,7 +3,7 @@
 ## 0. 拍板
 
 - [x] 0.1 技术诊断进 crash-triage（日报、周报、每小时告警三者同源），support 侧只做回答时用的查询（维护者 2026-11-26 选「全放 crash-triage」） @lead
-- [x] 0.2 每小时告警首周只发维护者私聊（维护者 2026-11-26 选「先发你私聊一周」） @lead
+- [x] 0.2 每小时告警首周只发维护者私聊（维护者 2026-11-26 选「先发你私聊一周」） @lead。⚠️ **2026-11-26 上线时维护者改定**：首周发「Dino AI 客服测试」群（`oc_706585b425aa175d888509b372deaebe`，群里唯一的真人是维护者），生产机 `local.env` 已写；日报机经真实 `alert.sh --to` 实发测试卡到该群读回确认送达（`om_x100b7f499b3944aceeea113934a7b21`），卡内 @ crash-triage 应用的维护人 open_id 被飞书换算为日报机应用下的身份、正常渲染——跨应用 @ 不导致发送失败
 - [x] 0.3 日报机 `bq` 可读 GA4 实时表、实时表无明显延迟（2026-11-26 11:23 实测，见 design Context） @lead
 
 ## 1. 口径核实与回测（先测再搭，结论写回 design 决策 3、4）
@@ -80,7 +80,7 @@
 ## 7. 文档
 
 - [x] 7.1 `docs/CLAUDE-架构与数据口径.md` 新增「技术诊断报错」一节：签名口径、`api_result` 与 `api_request_result` 不可相加、基线与阈值（回测结论）、为什么流程类不进 L0 @lead。**2026-11-26 完成**：新增「技术诊断报错」一节（签名口径、两类不可相加、UTC 时区与选表、bq 默认 100 行截断、阈值与回测结论、流程类为何不进 L0、版本过滤在渲染层、费用）
-- [x] 7.2 `docs/CLAUDE-部署与运维.md`：调度表加 `diag-hourly`、运行数据布局加 `$STATE/diag/`、回退命令 @lead。**2026-11-26 完成**：调度表加 `diag-hourly`（job id 待注册后补）、注册 / 回退命令、`$STATE/diag/` 布局与各文件丢失后果、链路对照表加 L0 一列
+- [x] 7.2 `docs/CLAUDE-部署与运维.md`：调度表加 `diag-hourly`、运行数据布局加 `$STATE/diag/`、回退命令 @lead。**2026-11-26 完成**：调度表加 `diag-hourly`（job id 待注册后补）、注册 / 回退命令、`$STATE/diag/` 布局与各文件丢失后果、链路对照表加 L0 一列（✅ 上线后已补 `01c4ed7d509e`）
 - [x] 7.3 `bin/INSTALL.md`、`bin/local.env.example` 加 `CRASH_REPORT_DIAG_ALERT_CHAT_ID`（示例值用占位符，⛔ 不写真实 open_id） @impl-worker。**2026-11-26 完成**（⚠️ 未派发：几分钟能做完，按委派规则「不派的情形 ①」由 lead 做）：INSTALL.md §0 / §5 / §7.3 与 local.env.example 加 `CRASH_REPORT_DIAG_ALERT_CHAT_ID`，示例值为占位符
 - [x] 7.4 `CLAUDE.md` 首段「两条独立链路」改为三条 @lead。**2026-11-26 完成**
 
@@ -93,6 +93,16 @@
 - [x] 8.5 对 `bin/` 全部 diff 做对抗审查（bash 3.2、跨进程边界、口径标注三类镜头），问题清单回 lead 复核 @crash-reviewer。**2026-11-26 完成**（crash-reviewer 审查后 lead 复核）：S1（`$( )` 内失败触发 ERR trap → L1 / L2 降级路径发假故障卡，可能进正式群）已复现并修复（`trap - ERR`），新增 `fn-diag-daily-fail.sh` 双向测试；G1 计费上限放宽；G2 字节数改从 INFORMATION_SCHEMA 取；G3（推测：hh:05 判定时数据不全）改为记 `evals.jsonl` 首周量化，未改判定；G4 表格渲染提前、三处结论一致；G5 日聚合写锁；G6 L0 失败卡写具体原因并加夹具场景；建议项（空版本集提示、阈值单处定义、`|` / `<` 转义、锁年龄上限、临时文件清理）已改。审查指出的「取数失败时卡片加一行」与 spec 字面冲突，按「缺数可见」改 spec，已报维护者
 
 ## Workflow follow-up
+
+**上线记录（2026-11-26，每一步都经维护者同意）**：
+- 合并推送：super / origin 都到 `4987c43`。
+- 日报机 `update.sh`：自检全过；`setup.sh 失败` 是已登记的假故障，`path.env` 未被改动。
+- 35 天回填：dry-run 47.41 GB，实际计费 47,406,120,960 字节，写入 19507 行。
+- `local.env` 追加 `CRASH_REPORT_DIAG_ALERT_CHAT_ID`：首周发「Dino AI 客服测试」群，备份为 `local.env.bak-20261126`。经真实 `alert.sh --to` 实发测试卡到该群，读回确认送达。
+- L0 包装脚本：只执行 `install.sh` 里生成这一份的那一段；L1 / L2 两份包装与备份 `cmp` 一致。
+- `env -i` 首跑 rc=0：判定 14:00，无激增；自动回填 7 天小时基线 2235 行。
+- 注册 cron `diag-hourly`（`01c4ed7d509e`），首个定时运行在 16:05。
+
 
 - 合并、推送、日报机 `update.sh`、注册 `diag-hourly` cron、写日报机 `$STATE/local.env`：每一步都要维护者同意。
 - 观察项（不挡归档）：2026-12-04 汇总首周 L0 命中记录与实际 BigQuery 费用报维护者，由维护者定是否改发群；改发群是投递目标变更，不需另开 change。
