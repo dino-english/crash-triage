@@ -14,7 +14,7 @@ description: 部署到生产机 Mac mini——合入 main、ssh 执行 update.sh
    - `git rev-parse --short HEAD` = 预期 sha；`/bin/bash bin/check-scripts.sh` 全绿
    - `stat path.env`：mtime 未被本次动过（setup.sh 缺工具时先退出不写盘）
    - 工具可达：`. ~/.local/state/crash-triage/path.env; export PATH` 后逐个 `command -v node claude npx bq lark-cli jq`
-   - cron 在位：同上 PATH 后 `hermes cron list`（**别 head 截断**，crash 两个 job 在列表后面）
+   - cron 在位：同上 PATH 后 `hermes cron list`（**别 head 截断**，crash 三个 job——crash-daily / crash-weekly / diag-hourly——在列表后面）
 
 ## 首次启用 L0 / 技术诊断（change `crash-tech-diagnostics`，⛔ 每一步先问维护者）
 
