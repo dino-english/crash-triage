@@ -27,6 +27,15 @@ cat "$STATE/health-daily.json"   # L1 健康（L2 是 health.json，L0 是 healt
 
 ### 跑批与调试
 
+- ⛔ **本仓有 PreToolUse 钩子** `.claude/hooks/guard.py`，主会话和子 agent 都经过它。它把下面几条 ⛔ 做成了机制：
+  - R1 跑批期间改 `bin/**`；
+  - R2 用默认信号杀跑批；
+  - R3 整跑设短超时；
+  - R4 在日报机手工跑 L1 / L2；
+  - R5 循环里用 `pgrep -f`。
+
+  被拦下就按提示改写，⛔ 不绕过。改规则后跑 `bin/test/fn-claude-guard.sh`（双向测试，`ps` 用桩）。
+
 - ⚠️ DRY_RUN 打完卡片预览就 exit 0，**跑不到 build_index / manifest**——验索引页用 NO_DELIVER
 - ⚠️ **整跑要 5 分钟以上，别设短超时**——进程被信号杀掉会触发 ERR trap，把「被杀」当故障告警发进群
 - ⚠️ `hermes cron run` 手工触发**总打印 `Ran now: failed`**，与成败无关——以 executions.db 与脚本日志为准
@@ -117,3 +126,7 @@ OpenSpec 驱动（`openspec/`，schema `spec-driven`）。**动手改脚本前�
 | 飞书固定资源（租户 / 文件夹 token / 固定 URL） | bin/INSTALL.md §12 |
 | 设计/审计报告内容（模块 · 指标 · 维度 · 排版） | .claude/skills/crash-report-design/ 与 crash-report-analyst agent |
 | 人工深度定位某个崩溃 | firebase-crash-triage skill |
+| 生产出问题：日报 / 周报没发、卡片异常、收到失败 / 数据缺失卡、卡片报 L0 停摆 | 派 `crash-oncall` agent（只读排障，处置交回主会话） |
+| 上线之后、一批改动之后：文档和代码、日报机现场还对得上吗 | 派 `crash-docs-auditor` agent（**上线后必派**；它按「值」全仓核对，现场优先） |
+| 补测试、做双向测试、查「全绿但测不到」的夹具 | 派 `crash-test-engineer` agent（只写 `bin/test/`，不改业务代码） |
+| 审 `bin/` 的 diff | 派 `crash-reviewer` agent |
