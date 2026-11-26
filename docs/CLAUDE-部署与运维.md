@@ -23,12 +23,21 @@ STATE="${CRASH_REPORT_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/crash-tri
 
 ## 调度：Hermes cron（launchd 为备选）
 
-**实际调度器是 Hermes cron**（`~/.hermes/cron/jobs.json`），两个 job 都是 `no_agent=true` + `script`：
+**实际调度器是 Hermes cron**（`~/.hermes/cron/jobs.json`），job 都是 `no_agent=true` + `script`：
 
 | job | job id | 调度 | 包装脚本 |
 |---|---|---|---|
 | `crash-daily` | `72f0850e6688` | `30 8 * * *` | `~/.hermes/scripts/crash-daily.sh` |
 | `crash-weekly` | `6d834f1f6da5` | `30 5 * * 1` | `~/.hermes/scripts/crash-weekly.sh` |
+| `diag-hourly`（L0） | 未注册（需维护者同意） | `5 * * * *` | `~/.hermes/scripts/diag-hourly.sh` |
+
+**L0 每小时诊断告警**（change `crash-tech-diagnostics`）：
+- 注册：`hermes cron create '5 * * * *' --name diag-hourly --no-agent --script diag-hourly.sh`；包装脚本由 `install.sh` 生成（⚠️ `update.sh` 不生成，只在缺失时提示）。整点后 5 分钟跑，判定上一个完整 MYT 小时。
+- 投递目标**只认** `$STATE/local.env` 的 `CRASH_REPORT_DIAG_ALERT_CHAT_ID`，未设置 → 照常计算、不投递、日志写原因，⛔ 不回落日报群。L0 自身失败的告警卡也只发这个目标，且只在「上次成功 → 本次失败」时发一次（标记 `$STATE/diag/.alerted-failure`，下次成功才删）。
+- 回退：`hermes cron pause <diag-hourly job id>` 停 L0；L0 只写 `$STATE/diag/` 里的小时聚合 / 去重状态与 `health-diag.json`，⛔ 不碰 L1 / L2 的基准。停用后这些文件留着无害；彻底撤掉就删 `diag/hourly.jsonl`、`coverage.json`、`alerted.json`、`hits.jsonl`（⚠️ `daily*.json*` 是 L1 / L2 的日聚合，不要一起删）。
+- **数据缺失**（本小时与上一小时都没有接口类数据，而前 7 天同小时有）时：发一张橙色「数据缺失」卡（6 小时去重），之后**非零退出**、`health-diag.json` 写 `ok:false`，不再叠加一张泛化的失败卡。spec 对这种情况的要求是「检查失败不冒充平稳」。
+- **L0 停摆由 L1 卡片兜底**：`health-diag.json` 存在且超过 3 小时没跑、最近一次失败或读不出时，日报卡片加一行。cron 停了或锁残留时，L0 自己发不出任何告警。
+- 首周（至 2026-12-04）只发维护者私聊。`$STATE/diag/hits.jsonl` 记每次命中，`evals.jsonl` 记每小时接近阈值的签名（用来量化晚到事件的影响），到期一起汇总报维护者，由维护者决定是否改发群。
 
 **改调度**：`hermes cron edit <job id> --schedule "<cron 表达式>"`（改完 `hermes cron list` 核对 `Next run`）。
 ⚠️ 非交互 ssh 里必须先 `. ~/.local/state/crash-triage/path.env; export PATH`，否则 `hermes` 不在 PATH，
@@ -97,6 +106,9 @@ $STATE/                          # ${XDG_STATE_HOME:-~/.local/state}/crash-triag
 │                                （其余仍是人手放的：corrupt-issues-* 是隔离区不是备份）
 ├── logs/                        保留 60 天，**整目录按 mtime 清**（含 bq-stderr-<TS>.log）
 ├── publish/                     每次运行 rm -rf 重建的投递目录
+├── diag/                        技术诊断（change crash-tech-diagnostics），见下表
+│   ├── hourly.jsonl / coverage.json / alerted.json / hits.jsonl / last-*.json   L0 每小时告警
+│   └── daily.jsonl / daily-coverage.json                                        L1 / L2 的日聚合
 ├── path.env                     setup.sh 探测生成（只有 PATH），install.sh / update.sh 每次覆写
 ├── local.env                    机器本地配置（CRASH_REPORT_CHAT_ID），**人手写，脚本永不覆写**
 └── *.json                       基准文件，**保持顶层不动**（见下表）
@@ -117,7 +129,10 @@ $STATE/                          # ${XDG_STATE_HOME:-~/.local/state}/crash-triag
 | `folders.json` | 目录 token 缓存，按 profile 隔离 |
 | `report-index.jsonl` | 历次日报/周报的飞书文档 URL，索引页据此渲染归档表；**不可再生**（飞书端无法枚举本 bot 文档），2026-08-20 从仓库移入 |
 | `last-snapshot.json` | L2 变化检测基准；**首跑无基准时只建基线不报新增**（否则刷一屏「新增」）。⚠️ **提升在 `NO_DELIVER` 闸门之前**（`crash-weekly.sh:624`），所以「跑两次对比产物」这个验收方法在 L2 上不成立——第二次会看到零变化。测试前先备份它 |
-| `health-daily.json` / `health.json` | L1 / L2 的健康状态 |
+| `health-daily.json` / `health.json` / `health-diag.json` | L1 / L2 / L0 的健康状态 |
+| `diag/hourly.jsonl` + `coverage.json` | L0 的小时聚合（签名 × 平台 × 版本，保留 15 天）与「各 UTC 日取自哪张表、何时取」。丢了不致命：下次运行自动回填前 7 天（约 20 GB，⛔ 不当作基线 0），但**费钱**——换机时一起带走 |
+| `diag/alerted.json` | L0 去重状态 `{签名: {sent, first, last}}`。丢了 → 正在持续的激增会再发一张卡 |
+| `diag/daily.jsonl` + `daily-coverage.json` | L1 / L2 的技术诊断日聚合（全版本，保留 60 天）。L1 每天重取前一日、缺历史自动补；周报「前 4 周未出现」靠它。生产机首次启用前一次性回填 28 天（维护者 2026-11-26 批准，执行前先报 dry-run 字节数：`bash bin/diag-backfill.sh 28 --dry-run`） |
 | `ledger/dispositions.json` | issue 处置结论（`issue_id` → `{first_seen, disposition, note}`，键跨 `error_type` 统一）。⛔ **不可重算的人工资产**：人工独占写入，跑批只读、前后逐字节一致。**L2 收尾自动落副本到 `backup/dispositions/`**（内容变化时才落，落后 `cmp` 校验；失败只告警不中止跑批）。⚠️ 它防的是误覆写 / 误删 / 损坏，⛔ **防不住整台机器丢失**——异地那一层仍靠人工 scp。⚠️ 它是 NON_FATAL 现状表人工结论的**唯一**存续途径——那张表是按受影响安装取头部的滚动榜单，旧做法「从上一版表格解析再写回」在行掉榜时就把结论丢了。⛔ 不在 `$STATE` 里就等于永久丢失，**必须与 `last-snapshot.json` 同级纳入备份**（`git clean -xfd` / 换机都会抹掉）。文件缺失 → 降级渲染 + 标注；⛔ 内容损坏 → 台账本轮不更新且整跑非零退出，绝不以空结论覆写 |
 
 旧口径周报归档 `ledger/weekly-index.jsonl` 由 `build_index()` 读时与 `report-index.jsonl` 合并，避免历史断链。
@@ -167,19 +182,19 @@ scp dino911@dino911s-mac-mini:.local/state/crash-triage/ledger/dispositions.json
 
 ## 链路对照（拆分前 CLAUDE.md「这是什么」全表）
 
-两条独立链路（详见 [bin/INSTALL.md](bin/INSTALL.md) §0）：
+三条独立链路（详见 [bin/INSTALL.md](bin/INSTALL.md) §0）：
 
-| | L1 日报 `crash-daily.sh` | L2 周报 `crash-weekly.sh` |
-|---|---|---|
-| 定时 | 每天 08:30（Hermes cron） | 每周一 05:30（Hermes cron） |
-| 数据源 | BigQuery（crashlytics / sessions / performance） | BigQuery（`fetch-snapshot-bq.sh`）+ git 反查 |
-| 用不用模型 | 否（`fetch-snapshot.sh` light 对照除外） | **数据层否**；仅分析层（`report.md` 根因/方案）用模型，失败只降级 |
-| 职责 | **高频数据呈现**，不做分析、不碰结论 | **分析与结论沉淀** |
-| 产出 | 群卡片 + 日报 + 索引页（**不含台账**，change `crash-ledger-l2-ownership`） | 周报文档 + 群卡片 + 索引页归档 + **台账同步** |
-| 性能 | 日维度当期值 | 周维度趋势 + WoW（不出根因） |
-| 版本口径 | **只统计最新 2 个版本**（按版本号），按版本分列 + 版本间对比 | **主力版本**（近 7 天会话量 top2） |
+| | L0 诊断告警 `diag-hourly.sh` | L1 日报 `crash-daily.sh` | L2 周报 `crash-weekly.sh` |
+|---|---|---|---|
+| 定时 | 每小时 :05（Hermes cron，**待注册**） | 每天 08:30（Hermes cron） | 每周一 05:30（Hermes cron） |
+| 数据源 | GA4 `app_diagnostic`（当天实时表） | BigQuery（crashlytics / sessions / performance）+ GA4 `app_diagnostic` 一节 | BigQuery（`fetch-snapshot-bq.sh`）+ git 反查 + GA4 `app_diagnostic` 一节 |
+| 用不用模型 | 否 | 否（`fetch-snapshot.sh` light 对照除外） | **数据层否**；仅分析层（`report.md` 根因/方案）用模型，失败只降级 |
+| 职责 | 接口类签名每小时激增告警，只给分布不给结论 | **高频数据呈现**，不做分析、不碰结论 | **分析与结论沉淀** |
+| 产出 | 命中时一张告警卡（目标只认 `CRASH_REPORT_DIAG_ALERT_CHAT_ID`） | 群卡片 + 日报 + 索引页（**不含台账**，change `crash-ledger-l2-ownership`） | 周报文档 + 群卡片 + 索引页归档 + **台账同步** |
+| 性能 | — | 日维度当期值 | 周维度趋势 + WoW（不出根因） |
+| 版本口径 | 不按版本过滤（签名级，分布里列版本） | **只统计最新 2 个版本**（按版本号），按版本分列 + 版本间对比 | **主力版本**（近 7 天会话量 top2） |
 
-**两条链路都只读业务仓库，不 commit / 不 push / 不改业务代码。**
+**三条链路都只读业务仓库，不 commit / 不 push / 不改业务代码。**
 
 ## 常用命令（完整版，含 SQL 手工验证示例）
 

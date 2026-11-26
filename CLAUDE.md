@@ -2,7 +2,7 @@
 
 Dino（iOS + Android）崩溃 & 性能日报/周报流水线的**部署运行时仓库**——bash + `bq` + `jq` + Hermes cron，无应用代码、无构建、无测试框架，产出投递飞书群 `oc_655033f1f85fa04f9eac25d56f056fc9`。
 
-两条独立链路（全表见 docs/CLAUDE-部署与运维.md，详规见 bin/INSTALL.md §0）：**L1 日报** `crash-daily.sh`（每天 08:30；高频数据呈现，不做分析；只统计最新 2 个版本）｜**L2 周报** `crash-weekly.sh`（周一 05:30；数据层零模型，分析层 `claude -p` 失败只降级；主力版本 = 近 7 天会话量 top2）。**两条链路都只读业务仓库，不 commit / 不 push / 不改业务代码。**
+三条独立链路（全表见 docs/CLAUDE-部署与运维.md，详规见 bin/INSTALL.md §0）：**L0 诊断告警** `diag-hourly.sh`（每小时 :05；GA4 `app_diagnostic` 接口类签名激增，只给分布不给结论；投递目标只认 `$STATE/local.env` 的 `CRASH_REPORT_DIAG_ALERT_CHAT_ID`）｜**L1 日报** `crash-daily.sh`（每天 08:30；高频数据呈现，不做分析；只统计最新 2 个版本）｜**L2 周报** `crash-weekly.sh`（周一 05:30；数据层零模型，分析层 `claude -p` 失败只降级；主力版本 = 近 7 天会话量 top2）。**三条链路都只读业务仓库，不 commit / 不 push / 不改业务代码。**
 
 ## 代码与状态分离
 
@@ -82,6 +82,7 @@ lark-cli → **lark-cli勘误**。动手改这四块前，按下表读对应那�
 
 只留一条在这里，因为它咬的是每个写 bash 的人：
 
+- ⛔ **允许失败、需要降级的命令替换写成 `"$(trap - ERR; …)"`**：errtrace 下 `$( )` 会继承 ERR trap，外层的 `||` / `if` 都挡不住，失败时子 shell 先发一张假故障卡（F72，2026-11-26 第二次踩到，第一次记在 `lib/lark.sh`）
 - ⛔ `grep` 无匹配返回 1，放进 `set -e` 路径必须 `|| true`；⚠️ 新增的检查/告警**不得走触发 ERR trap 的路径**，且加完要**双向测试**（违规样本变红 + 全量代码不误报）
 
 ### 模型与环境

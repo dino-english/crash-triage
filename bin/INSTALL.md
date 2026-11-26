@@ -18,7 +18,9 @@
 | 投递 | `bin/deliver.sh`（`lark-cli`，确定性、幂等） | 同左 |
 | 版本口径 | **只统计最新 2 个版本**（按版本号），按版本分列 + 版本间对比 | **主力版本**（近 7 天会话量 top2，复用日报 SQL 换窗口） |
 
-**两条都不写业务仓库、不 commit、不 push。**
+另有 **L0 每小时诊断告警** `bin/diag-hourly.sh`（change `crash-tech-diagnostics`）：每小时 :05 扫 GA4 `app_diagnostic` 当天实时表，接口类签名激增时发一张卡（附平台 / 国家 / 版本与策略配置分布，不给根因）。投递目标**只认** `$STATE/local.env` 的 `CRASH_REPORT_DIAG_ALERT_CHAT_ID`，未设置就不投递，⛔ 不回落到上面那个群。L1 / L2 文档里各有一节「技术诊断报错」，与 L0 同一口径。
+
+**三条都不写业务仓库、不 commit、不 push。**
 
 ### L1 顺带承担的文档同步
 
@@ -147,6 +149,7 @@ bash bin/setup.sh                        # 两个路径都不用设，setup 自�
 | `CRASH_REPORT_STATE_DIR` | 否 | 运行数据目录。默认 `${XDG_STATE_HOME:-~/.local/state}/crash-triage` |
 | `CRASH_REPORT_CHAT_ID` | 是 | 目标群 `oc_655033f1f85fa04f9eac25d56f056fc9`；**首次部署建议先填自己的 `ou_xxx` 私聊验证几轮再换群** |
 | `CRASH_REPORT_DRY_RUN` | 否 | `1` = 只打印不发送。首次务必用它跑 |
+| `CRASH_REPORT_DIAG_ALERT_CHAT_ID` | 否 | L0 诊断告警的投递目标（`ou_` 私聊或 `oc_` 群）。⚠️ **只从 `$STATE/local.env` 读**，命令行 / wrapper 里设了也会被忽略；未设置 → L0 照常计算、不投递，⛔ 不回落 `CRASH_REPORT_CHAT_ID`。首周只填维护者私聊（维护者 2026-11-26 定） |
 | `AGENT_CMD` | 否 | L2 用的 agent 命令，默认 `claude`；可换 cursor / codex |
 | `CRASH_REPORT_VERSION_COUNT` | 否 | 日报统计的**最新版本个数**，默认 `2` |
 | `CRASH_REPORT_MIN_SESSIONS` | 否 | 版本候选门槛（低于此会话数的版本不进清单），默认 `5` |
@@ -237,7 +240,11 @@ hermes cron edit <job_id> --schedule '0 10 * * *'       # 改完立即生效，�
 ```bash
 hermes cron create '30 8 * * *' --name crash-daily  --no-agent --script crash-daily.sh
 hermes cron create '30 5 * * 1' --name crash-weekly --no-agent --script crash-weekly.sh
+# L0 每小时诊断告警（⚠️ 需维护者同意后再注册；先在 $STATE/local.env 写好 CRASH_REPORT_DIAG_ALERT_CHAT_ID）
+hermes cron create '5 * * * *'  --name diag-hourly  --no-agent --script diag-hourly.sh
 ```
+
+⚠️ L0 首次运行本地没有基线，会自动回填前 7 天（约 20 GB，⛔ 不当作基线 0）；L1 / L2 的技术诊断日聚合首次启用前用 `bash bin/diag-backfill.sh <天数> --dry-run` 先报扫描字节数，批准后去掉 `--dry-run` 执行。
 
 `--script` 是相对 `~/.hermes/scripts/` 的路径，wrapper 由 `install.sh` 生成（写死 `ROOT` / `STATE` / `CHAT_ID` / `LARK_PROFILE`）。`--no-agent` 表示不起 LLM，脚本 stdout 直接投递——所以 wrapper 把 stdout 重定向到 `/dev/null`（卡片由脚本自己用 lark-cli 发）。
 
