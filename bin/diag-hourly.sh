@@ -265,7 +265,7 @@ if [ -n "$_miss_src" ]; then
 fi
 printf '%s\n' "$_ev" > "$DIAG_DIR/last-eval.json"   # 本小时全部签名的判定（排障 / 回填验收用）
 # 判定时刻的计数留档（审查 G3）：hh:05 判的是「当时进表的量」，晚到事件可能让它低于事后完整值。
-# 达到下限一半以上的签名逐小时追加，首周（2026-12-04）汇总时与次日完整数据对比，量出晚到的影响再决定要不要复判。
+# 达到下限一半以上的签名逐小时追加；复判上一小时那组带 recheck:true，两组对比就是晚到事件的实测（2026-12-04 汇总）。
 jq -c --arg h "$HOUR" --arg run "$RUN_ID" --argjson half "$((DIAG_MIN / 2))" \
    '.[] | select(.devices >= $half) | {run:$run, h:$h, sig, devices, baseline, verdict}' <<<"$_ev" >> "$DIAG_DIR/evals.jsonl"
 # 复判上一小时：同一套判定与去重。⚠️ 先于本小时做 plan——同一签名两小时都激增时，本小时的 first 才能沿用上一小时；

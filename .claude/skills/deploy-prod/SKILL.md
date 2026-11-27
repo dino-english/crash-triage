@@ -22,7 +22,7 @@ description: 部署到生产机 Mac mini——合入 main、ssh 执行 update.sh
 
 1. **一次性回填日聚合**（维护者 2026-11-26 批准 35 天）。先跑 `bash bin/diag-backfill.sh 35 --dry-run`，把打印出来的字节数报给维护者，同意后去掉 `--dry-run` 再跑。
    - ⛔ 不跑这一步的话，L2 冷启动要补 35 张表，会超出它 60 GB 的计费上限，周报这一节就会显示「取数失败」。
-2. **写投递目标**：在 `$STATE/local.env` 里写 `export CRASH_REPORT_DIAG_ALERT_CHAT_ID="oc_706585b425aa175d888509b372deaebe"`——首周发「Dino AI 客服测试」群（维护者 2026-11-26 定；群里唯一的真人是维护者，日报机发卡的「Dino AI Data Assistant」在群里）。✅ 2026-11-26 已写，原文件备份为 `local.env.bak-20261126`。
+2. **写投递目标**：在 `$STATE/local.env` 里写 `export CRASH_REPORT_DIAG_ALERT_CHAT_ID="oc_655033f1f85fa04f9eac25d56f056fc9"`（日报群，维护者 2026-11-27 定）。✅ 已写：11-26 先写的是测试群 `oc_706585…`（备份 `local.env.bak-20261126`），11-27 14:25 改成日报群（备份 `local.env.bak-20261127-pm`）。改之前先确认 cron 那个应用（hermes 上下文 `cli_aaf7d7fc…`）能访问目标群：`HERMES_HOME=~/.hermes lark-cli api GET /open-apis/im/v1/chats/<oc_…> --as bot` 回 `ok:true`。
    - 以后要改发私聊，得用维护者在日报机应用下的 open_id。⚠️ open_id 按应用隔离，开发机上的那个不能直接用；做法是日报机上 `HERMES_HOME=~/.hermes lark-cli im +chat-members-list --chat-id <群> --as bot`，在 users 列表里找本人。
 3. **生成包装脚本**：⛔ **不要整体跑 `install.sh`**。生产机现有的 crash-daily / crash-weekly 包装没有 `export HERMES_HOME`，模板里有，整体跑会把它补进去，日报 / 周报发卡的应用身份可能跟着变（2026-11-26 上线时发现，未核实前不动）。
    - 正确做法：先 `cp -Rp ~/.hermes/scripts ~/.hermes/scripts.bak-<日期>`，再用 python 从 `bin/install.sh` 截出 `w="$HERMES_SCRIPTS/diag-hourly.sh"` 到 `ok "wrapper $w"` 之间那一段，设好 `ROOT` / `STATE` / `PROFILE` / `HERMES_SCRIPTS` 后执行。

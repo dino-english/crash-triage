@@ -37,7 +37,7 @@ STATE="${CRASH_REPORT_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/crash-tri
 - 回退：`hermes cron pause 01c4ed7d509e` 停 L0；L0 只写 `$STATE/diag/` 里的小时聚合 / 去重状态与 `health-diag.json`，⛔ 不碰 L1 / L2 的基准。停用后这些文件留着无害；彻底撤掉就删 `diag/hourly.jsonl`、`coverage.json`、`coverage-posthog.json`、`alerted.json`、`hits.jsonl`（⚠️ `daily*.json*` 是 L1 / L2 的日聚合，不要一起删）。
 - **数据缺失**（某一侧——GA4 或 PostHog，各判各的——本小时与上一小时都没有接口类数据，而前 7 天同小时**每天**都有）时：发一张橙色「数据缺失」卡（6 小时去重），之后**非零退出**、`health-diag.json` 写 `ok:false`，不再叠加一张泛化的失败卡。spec 对这种情况的要求是「检查失败不冒充平稳」。
 - **L0 停摆由 L1 卡片兜底**：`health-diag.json` 存在且超过 3 小时没跑、最近一次失败或读不出时，日报卡片加一行。cron 停了或锁残留时，L0 自己发不出任何告警。
-- 首周（至 2026-12-04）发「Dino AI 客服测试」群（`oc_706585b425aa175d888509b372deaebe`，群里唯一的真人是维护者），维护者 2026-11-26 定（原定私聊；生产机 `local.env` 已写）。`$STATE/diag/hits.jsonl` 记每次命中，`evals.jsonl` 记每小时接近阈值的签名（用来量化晚到事件的影响），到期一起汇总报维护者，由维护者决定是否改发群。
+- **投递目标 = 日报群**「Dino 崩溃 & 性能日/周报」（`oc_655033f1f85fa04f9eac25d56f056fc9`）：维护者 2026-11-27 定，同日 14:25 写进生产机 `local.env`（备份 `local.env.bak-20261127-pm`）。在此之前（11-26 16:05 ～ 11-27 14:05）发的是「Dino AI 客服测试」群 `oc_706585b425aa175d888509b372deaebe`，那个群只是测试用。⚠️ 仍然只认 `CRASH_REPORT_DIAG_ALERT_CHAT_ID`：这一行删掉就不投递，⛔ 不会自动回落到 `CRASH_REPORT_CHAT_ID`。`$STATE/diag/hits.jsonl` 记每次命中，`evals.jsonl` 记每小时接近阈值的签名（量化晚到事件），2026-12-04 汇总命中数与实际费用报维护者。
 
 ⚠️ **生产机包装脚本与 `install.sh` 模板不一致**（2026-11-26 上线 L0 时发现，是既有情况）：模板生成的 crash-daily / crash-weekly 包装会 `export HERMES_HOME`，生产机现有的那两份没有这一行。整体重跑 `install.sh` 会把这一行补进去，日报 / 周报发卡用的应用身份可能跟着变（有 `HERMES_HOME` 时 lark-cli 用 `~/.lark-cli/hermes/config.json` 的应用「Dino AI Data Assistant」）。⛔ 没核实之前不要在生产机整体跑 `install.sh`；只生成某一个包装时，抽出 `install.sh` 里对应那一段单独执行（L0 就是这么装的，见 `.claude/skills/deploy-prod/`）。
 

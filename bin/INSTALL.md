@@ -152,7 +152,7 @@ bash bin/setup.sh                        # 两个路径都不用设，setup 自�
 | `CRASH_REPORT_DIAG_MIN` / `CRASH_REPORT_DIAG_MULT` | 否 | L0 小时级激增阈值：受影响设备下限，默认 `10`；对前 7 天同小时均值的倍数，默认 `4`。回测定稿值，改前先重跑回测（`openspec/changes/archive/2026-11-27-crash-tech-diagnostics/backtest/`） |
 | `CRASH_REPORT_DIAG_TOP_N` | 否 | 日报「技术诊断报错」一节每类取前几行，默认 `15` |
 | `CRASH_REPORT_POSTHOG_API_KEY` | 是（技术诊断） | PostHog 只读 Personal API Key（项目 423878；日报机用 support profile 那把，`~/.hermes/profiles/support/.env` 的 `POSTHOG_CLI_API_KEY`）。App 从 iOS 2.1.2 / Android 2.1.1 起把技术诊断改发 PostHog，缺了它这些版本的诊断就看不到。⚠️ 只放 `$STATE/local.env`（600），写成普通赋值、⛔ 不 export（只有主进程用，export 会进 claude -p / MCP 子进程环境），⛔ 不进仓库、不进命令行。未设置 → L0 每小时失败（只报一次）、L1 / L2 这一节显示「取数失败」 |
-| `CRASH_REPORT_DIAG_ALERT_CHAT_ID` | 否 | L0 诊断告警的投递目标（`ou_` 私聊或 `oc_` 群）。⚠️ **只从 `$STATE/local.env` 读**，命令行 / wrapper 里设了也会被忽略；未设置 → L0 照常计算、不投递，⛔ 不回落 `CRASH_REPORT_CHAT_ID`。首周填「Dino AI 客服测试」群（`oc_706585b425aa175d888509b372deaebe`，群里唯一的真人是维护者）（维护者 2026-11-26 定，原定私聊） |
+| `CRASH_REPORT_DIAG_ALERT_CHAT_ID` | 否 | L0 诊断告警的投递目标（`ou_` 私聊或 `oc_` 群）。⚠️ **只从 `$STATE/local.env` 读**，命令行 / wrapper 里设了也会被忽略；未设置 → L0 照常计算、不投递，⛔ 不回落 `CRASH_REPORT_CHAT_ID`。生产机填日报群 `oc_655033f1f85fa04f9eac25d56f056fc9`（维护者 2026-11-27 定；11-26 ～ 11-27 试运行期间是「Dino AI 客服测试」群，只是测试用）。开发机填维护者 `ou_` 私聊 |
 | `AGENT_CMD` | 否 | L2 用的 agent 命令，默认 `claude`；可换 cursor / codex |
 | `CRASH_REPORT_VERSION_COUNT` | 否 | 日报统计的**最新版本个数**，默认 `2` |
 | `CRASH_REPORT_MIN_SESSIONS` | 否 | 版本候选门槛（低于此会话数的版本不进清单），默认 `5` |

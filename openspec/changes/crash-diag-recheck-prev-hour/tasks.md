@@ -16,4 +16,6 @@
 ## 3. 文档与上线
 
 - [x] 3.1 docs/CLAUDE-部署与运维.md、docs/CLAUDE-架构与数据口径.md、crash-report-debug / morning-verify skill 同步
-- [ ] 3.2 提交、推送（问维护者）；日报机 `update.sh`（问维护者）
+- [x] 3.2 提交、推送（6de4124 / 4ecc493，super 与 origin）；日报机 `update.sh` 到 4ecc493（2026-11-27 14:25）
+- [x] 3.3 维护者 2026-11-27 定 L0 告警改发日报群：生产 `local.env` 的 `CRASH_REPORT_DIAG_ALERT_CHAT_ID` 改为 `oc_655033f1…`（备份 `local.env.bak-20261127-pm`；先核 cron 应用能访问该群）；spec「告警投递目标由机器决定」同步
+- [ ] 3.4 核 15:05 首个定时运行（新代码 + 新目标）

@@ -17,7 +17,7 @@ membership/current 10 台，GA4 原表独立核对一致）——实时只到约
 
 ### Modified Capabilities
 
-- `crash-perf-tech-diagnostics`：「每小时激增告警」增加复判上一小时与补报。
+- `crash-perf-tech-diagnostics`：「每小时激增告警」增加复判上一小时与补报；「告警投递目标由机器决定」按维护者 2026-11-27 决定改为生产机发日报群。
 
 ## Impact
 
