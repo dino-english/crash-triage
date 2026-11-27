@@ -31,6 +31,16 @@ description: 部署到生产机 Mac mini——合入 main、ssh 执行 update.sh
 5. **首跑核验**：看 `cat $STATE/health-diag.json`。首跑会自动回填 L0 前 7 天（约 20 GB，按 design 走，不另批）。
 6. **观察项**：2026-12-04 汇总 `diag/hits.jsonl` 与 `diag/evals.jsonl`，再从 `INFORMATION_SCHEMA.JOBS_BY_USER` 取实际费用，一起报维护者。
 
+## 启用技术诊断的 PostHog 一侧（2026-11-27 增补，design 决策 8，⛔ 每一步先问维护者）
+
+在 `update.sh` 到包含 `bin/lib/posthog.sh` 的版本**之后、下一次 L0 整点运行（hh:05）之前**做完第 1 步（⛔ 普通赋值、不 export：只有主进程用它）。代码一上去，L0 每小时都会查 PostHog，没有 key 就每小时失败（失败卡只发一次，发到诊断告警目标）。
+
+1. **写 key**：把 support profile 那把只读 key 追加进 `$STATE/local.env`，先备份。⛔ key 不进命令行、不打印：
+   `cp -p $S/local.env $S/local.env.bak-<日期>; printf 'CRASH_REPORT_POSTHOG_API_KEY="%s"\n' "$(grep '^POSTHOG_CLI_API_KEY=' ~/.hermes/profiles/support/.env | cut -d= -f2- | tr -d "\"'")" >> $S/local.env; chmod 600 $S/local.env; grep -c POSTHOG_API_KEY $S/local.env`
+2. **补 PostHog 历史 35 天**（不计费，不扫 GA4）：`bash bin/diag-backfill.sh 35 --posthog-only`。不补也行：L1 第一次跑会补 7 天，L2 补 34 天；补了，周一第一份周报的「前 4 周未出现」才完整。
+3. **核验**：下一个 hh:05 之后看 `jq -c . $S/health-diag.json` 是 `ok:true`，`$S/diag/coverage-posthog.json` 有 8 个 UTC 日；次日 08:30 L1 审计 `type=diag` 为 ok，文档「五、技术诊断报错」的说明框写着「iOS 2.1.2、Android 2.1.1 起的版本取 PostHog Logs」。
+4. **回退**：删掉 `local.env` 里那一行，代码 `git revert`，再跑 `update.sh`。PostHog 一侧只多了 `coverage-posthog.json`、`daily-coverage-posthog.json` 和 `daily.jsonl` 里 `src=posthog` 的行，留着无害。
+
 ## 假故障（别追）
 
 - 非交互 ssh 里 `setup.sh 失败 / 缺工具`：ssh 无 brew PATH 的假象，按上面核验 path.env 即可。

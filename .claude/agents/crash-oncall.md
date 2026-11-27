@@ -60,7 +60,8 @@ cd ~/gitWorkspace/crash-triage && git rev-parse --short HEAD && git status --sho
 - **时间线优先**：先定第一次异常的时刻，再对照那之前的提交（`git log --since`）、`update.sh`、`local.env` / 包装脚本的修改时间（`ls -l`），以及上游 lark-cli / Hermes 的版本变化。
 - **数据异常先怀疑数据**：全零、对不上业务常识时，先查导出表是否停更（记忆 perf-bigquery-export-outage），再看窗口和版本口径，最后才怀疑代码。
 - **报「取数失败」的那一节**：去 `bq-stderr-<TS>.log` 找 bq 原文。常见原因：计费上限（`maximum_bytes_billed`）、超时 124、表不存在（GA4 intraday / 日表切换）。
-- **L0 专项**：判定上一个 MYT 小时；本地数据在 `$S/diag/`。数据缺失卡 = 本小时和上一小时都没有接口类数据。锁残留看 `$S/diag/.lock`（超过 50 分钟视为残留）。
+- **L0 专项**：判定上一个 MYT 小时；本地数据在 `$S/diag/`。数据缺失卡 = 本小时和上一小时 **GA4 一侧**都没有接口类数据（PostHog 一侧量小，不判缺失，design 决策 8）。
+- **技术诊断的 PostHog 一侧**（iOS 2.1.2 / Android 2.1.1 起的版本）：失败原因在日志「⚠️ PostHog：…」那一行（缺 key / curl rc / HTTP 码 + detail / 回满 50000 行被截断，F74）。某个版本「有会话、诊断为 0」先想 F75（App 换了上报去处）。锁残留看 `$S/diag/.lock`（超过 50 分钟视为残留）。
 - **子进程卡住**：已知 `fetch-issue-states.py` 读 MCP 回包没有超时（开发机上复现过）。要按 pid 确认是谁卡住，⛔ 不要按名字猜。
 - 问题落在 Hermes 网关 / support 时，只确认 cron 触发这一环，其余转给 daily-machine-hermes-ops 仓的 `sre-oncall`。
 

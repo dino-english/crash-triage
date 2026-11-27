@@ -7,7 +7,9 @@
   R1 跑批期间改 bin/**          CLAUDE.md「跑批期间不得改 bin/**」：bash 按字节偏移边读边执行，改动让运行中的进程错位
   R2 用默认信号终止跑批          CLAUDE.md「终止跑批用 kill -9」：TERM 会被 ERR trap 捕获，发一张假故障告警卡
   R3 整跑设短超时                CLAUDE.md「整跑要 5 分钟以上，别设短超时」：被信号杀掉同样触发 ERR trap 发假告警
-  R4 在日报机上手工跑 L1 / L2    记忆 no-manual-run-on-mini：生产机 local.env 指向正式群，手工跑会把测试报告发进群
+  R4 在日报机上跑测试            维护者规则（2026-11-27）：测试在本地机做，确认无误后才上生产；生产机只做只读查询。
+                                 拦：在日报机上执行 bin/ 下的 crash-daily / crash-weekly / diag-hourly（⛔ 带 /tmp 影子副本也拦）、
+                                 hermes cron run、往 ~/.hermes/scripts/ 写文件。放：update.sh、生产包装首跑、只读命令。
   R5 循环里用 pgrep -f 等进程    pgrep -f 匹配到这条命令自己，循环永不结束（2026-11-26 本仓实测踩到）
 """
 
@@ -27,8 +29,11 @@ FULL_RUN = re.compile(
 MINI = re.compile(r"\bssh\b[^\n]*\b(?:dino911s-mac-mini|100\.114\.17\.23)\b")
 PROD_RUN = re.compile(
     r"(?:^|[\s;&|('\"])(?:bash|sh|exec)\s+\S*(?:bin/|\.hermes/scripts/)(?:crash-daily|crash-weekly)\.sh\b"
+    r"|(?:^|[\s;&|('\"])(?:bash|sh|exec)\s+\S*bin/diag-hourly\.sh\b"
     r"|\bhermes\s+cron\s+run\b"
 )
+# 往生产调度脚本目录写文件（2026-11-27 实例：在日报机写临时探针脚本 + 建一次性 cron 任务做测试）
+HERMES_SCRIPT_WRITE = re.compile(r"(?:>>?|\btee\b(?:\s+-a)?|\bcp\b[^\n;&|]*|\bmv\b[^\n;&|]*)\s*\S*\.hermes/scripts/")
 LOOP = re.compile(r"\b(?:until|while)\b")
 PGREP_F = re.compile(r"\bpgrep\b[^\n|;&]*\s-[a-zA-Z]*f")
 KILL = re.compile(r"\b(kill|pkill|killall)\b([^\n;&|]*)")
@@ -124,10 +129,11 @@ def check_bash(cmd: str, tin: dict) -> str | None:
         return ("R5：不要在 until/while 循环里用 pgrep -f 等进程——它会匹配到这条命令自己，循环永不结束。"
                 "等指定进程用 kill -0 <PID>；等后台任务用完成通知。")
     # R4（先于 R2 / R3：远端命令里的 kill / timeout 是另一台机器的事）
-    if MINI.search(cmd) and PROD_RUN.search(cmd) and "CRASH_REPORT_STATE_DIR=" not in cmd:
-        return ("R4：不要在日报机上手工跑 crash-daily / crash-weekly（或 hermes cron run）——生产机 local.env 指向正式群，"
-                "会把测试报告发进群。要验证就做生产只读影子跑：STATE 副本 + 副本 local.env 改指测试目标 + NO_DELIVER"
-                "（见记忆 prod-readonly-shadow-run / dev-prod-share-feishu-docs），命令里显式带 CRASH_REPORT_STATE_DIR=<副本>。")
+    if MINI.search(cmd) and (PROD_RUN.search(cmd) or HERMES_SCRIPT_WRITE.search(cmd)):
+        return ("R4：⛔ 不在日报机上做测试（维护者规则：测试在本地机做，确认无误后才上生产；生产机只做只读查询）。"
+                "带 /tmp 影子副本也不行——2026-11-27 影子跑在生产 ~/.claude 写了空令牌文件、挂住 MCP 进程，又在生产建临时 cron 做探针。"
+                "做法：把生产 STATE 只读复制到本机 scratchpad，在本机用 CRASH_REPORT_STATE_DIR=<副本> + NO_DELIVER 跑"
+                "（.claude/skills/crash-report-debug/「用生产数据在本机验证」）。部署用 update.sh / 生产包装首跑不受影响。")
     if MINI.search(cmd):
         return None
     # R2

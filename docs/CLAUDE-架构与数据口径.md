@@ -465,7 +465,17 @@ CardKit v2 的 `table` 组件字段只有 `rows` / `page_size` / `row_height` / 
 
 ### 技术诊断报错（2026-11-26，change `crash-tech-diagnostics`）
 
-数据源 GA4 `dino-english-497507.analytics_538991439.events_*`，`event_name = 'app_diagnostic'`。L0（每小时告警）、L1、L2 同一口径；谓词只在 `bin/lib/bq.sh` 的 `SQL_DIAG_API_PRED` 定义一次。
+数据源有两个，**读取时按「平台 × 版本 × 天」二选一**（2026-11-27 起，design 决策 8）：
+- **GA4** `dino-english-497507.analytics_538991439.events_*`，`event_name = 'app_diagnostic'`。
+- **PostHog Logs**（项目 423878，HogQL 表 `logs`，`attributes['event_name'] = 'app_diagnostic'`，只算 `env=production`）。App 从 iOS 2.1.2、Android 2.1.1 起改发 PostHog、GA4 停发（iOS 提交 `2be0e62c2`，2026-11-19）；没合入迁移的开发分支（Android 2.2.0）仍发 GA4。
+  - ⛔ 只查 GA4 的话，iOS 诊断随用户升级归零（11-26：iOS 2.1.2 GA4 设备 1382 台、诊断 0 条），读者会读成「无报错」。业务上天天有的报错突然报 0，先怀疑数据源。
+  - 两边原样存（行带 `src`），读取时 `core/diag.sh` 的 `diag_pick` 对每个平台 × 版本 × 天取设备数多的一边。⛔ 不按版本号划分界（开发分支会两边都看不到），⛔ 不两边相加（QA / 内部包两边都可能有零星数据）。
+  - 断数按来源各判各的（L0 `diag_missing`、L1 / L2 `diag_day_gaps`），要求前 7 天每天都有才算基线。⛔ 两边合起来判，一边中断会被另一边盖住。
+  - 口径对齐：PostHog 的 `firebase_id` 就是 GA4 的 `user_pseudo_id`，`uid` 对应 `user_id`；`code` 同为 `http_401` 形态；失败记录不采样。PostHog Logs **没有国家**，L0 卡片的国家显示「未知」。
+  - ⛔ PostHog 查询接口：不写 LIMIT 只回 100 行；LIMIT 再大也悄悄截到 50000 行，而且 `hasMore` 是 null（F74）。
+  - 凭据 `CRASH_REPORT_POSTHOG_API_KEY`（`$STATE/local.env`，support 那把只读 Personal API Key），经 `curl -K -` 从 stdin 传。PostHog 查询不计费。
+
+L0（每小时告警）、L1、L2 同一口径。接口类谓词有两种方言：`bin/lib/bq.sh` 的 `SQL_DIAG_API_PRED`（GA4）和 `bin/lib/posthog.sh` 的 `PH_DIAG_API_PRED`（HogQL），⛔ 改一处必须改另一处。
 
 - **两类签名**：
   - 接口类 = `diagnostic_id = 'api_result'` 的 `target × code`，排除 2xx 与空 `code`。

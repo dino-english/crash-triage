@@ -26,6 +26,25 @@ FACT_CACHE_BASELINE=<跑批前快照> bash bin/test/assert-fact-cache.sh   # 事
 
 补投：产物已落盘时直接 `bash bin/deliver.sh <manifest路径>`，投递失败不影响生成脚本退出码。
 
+## 用生产数据在本机验证（部署前，「测完」第二、三步）
+
+⛔ **测试在本地机做，确认无误后才上生产；生产机只做只读查询**（维护者规则，钩子 R4 拦：在日报机上跑 bin/ 下的跑批脚本、`hermes cron run`、往 `~/.hermes/scripts/` 写文件，带 /tmp 影子副本也拦）。
+开发机自己的 `$STATE` 陈旧，所以要用**生产 STATE 的只读副本**在本机跑：
+
+1. 本机 `pgrep -fl "crash-daily|crash-weekly|diag-hourly"` 确认没在跑批。L1 整跑约 62 GB、L2 约 41 GB（2026-11-27 `JOBS_BY_USER` 实测），**超过 20 GB 先报维护者**。
+2. 数据：`ssh dino911s-mac-mini 'tar czf - -C ~/.local/state crash-triage' | tar xzf - -C <scratchpad>/verify`，每条链路一份副本。
+   - 副本里的 `path.env` 换成**本机**的，生产机的工具路径在本机无效。
+   - 副本里的 `local.env` 换成**本机**的（投递目标是本机应用下的维护者私聊），再追加该链路需要的凭据，比如 `CRASH_REPORT_POSTHOG_API_KEY`（普通赋值），然后 `chmod 600`。
+3. 业务仓：本机 iOS 仓有 tag 与远端冲突，L2 的 `fetch --tags` 会失败。用 `git clone --shared <本机仓> <scratchpad>/verify/repos/<仓名>`，再把 `REPOS_ROOT` 指过去。
+4. 跑：`CRASH_REPORT_STATE_DIR=<副本> CRASH_REPORT_NO_DELIVER=1 REPOS_ROOT=<…> bash bin/crash-daily.sh`，放后台跑（钩子 R3）。本机 claude 登录正常，模型层也能验到。
+5. 读回：`lark-cli docs +create --as bot --content - < <副本>/publish/docs/daily.xml` 建临时文档，`docs +fetch` 读回，核完删掉；遇到 429 就退避重试。
+6. 收尾：删掉 scratchpad 里的副本。副本里有凭据和生产数据，⛔ 不留。
+
+⚠️ 为什么不在生产机上做（2026-11-27 实测）：
+- ssh 会话打不开登录钥匙串，`claude -p` 报 `OAuth session expired and could not be refreshed`，模型层验不到。失败的同时 claude 还会在生产 `~/.claude/` 写出一份空令牌的 `.credentials.json`。
+- `fetch-issue-states.py` 在 ssh 下连 MCP 会一直挂着，只能手动 `kill -9`。
+- 跑批进程和生产共用同一台机器、同一套凭据。
+
 ## 不负责什么
 
 - 零行为重构的等价性验收 → `eqv-check` skill（冻结缓存严格 diff 协议）

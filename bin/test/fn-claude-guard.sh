@@ -21,11 +21,17 @@ block 'until ! pgrep -f "bin/crash-daily.sh" >/dev/null; do sleep 5; done'
 allow 'pgrep -fl "crash-daily|crash-weekly" || echo 无跑批进程'
 allow 'until grep -q 完成 run.log; do sleep 5; done'
 
-echo "── R4 日报机手工跑 L1 / L2 ──"
+echo "── R4 日报机上做测试（⛔ 带 /tmp 影子副本也拦，2026-11-27 维护者规则）──"
 block "ssh dino911s-mac-mini 'cd ~/gitWorkspace/crash-triage && bash bin/crash-daily.sh'"
 block "ssh -o BatchMode=yes dino911s-mac-mini 'bash ~/.hermes/scripts/crash-weekly.sh'"
 block "ssh dino911s-mac-mini 'export PATH=/opt/homebrew/bin; hermes cron run 72f0850e6688'"
-allow "ssh dino911s-mac-mini 'CRASH_REPORT_STATE_DIR=/tmp/shadow CRASH_REPORT_NO_DELIVER=1 bash bin/crash-daily.sh'"
+block "ssh dino911s-mac-mini 'CRASH_REPORT_STATE_DIR=/tmp/shadow CRASH_REPORT_NO_DELIVER=1 bash bin/crash-daily.sh'"
+block "ssh -o BatchMode=yes dino911s-mac-mini 'R=/tmp/ct-shadow-1127; cd \$R/code; nohup env CRASH_REPORT_STATE_DIR=\$R/state-l2 CRASH_REPORT_NO_DELIVER=1 bash bin/crash-weekly.sh > \$R/l2.log 2>&1 &'"
+block "ssh dino911s-mac-mini 'cd /tmp/x/code; env CRASH_REPORT_STATE_DIR=/tmp/x/state CRASH_REPORT_DIAG_HOUR=\"2026-11-26 20\" bash bin/diag-hourly.sh'"
+block "ssh dino911s-mac-mini 'cat > ~/.hermes/scripts/ct-claude-probe.sh <<EOF
+echo hi
+EOF'"
+allow "ssh dino911s-mac-mini 'ls ~/.hermes/scripts/; cat ~/.hermes/scripts/diag-hourly.sh'"
 allow "ssh dino911s-mac-mini 'cd ~/gitWorkspace/crash-triage && bash bin/update.sh'"
 allow "ssh dino911s-mac-mini 'grep -n diag bin/crash-daily.sh; env -i HOME=\$HOME /bin/bash ~/.hermes/scripts/diag-hourly.sh'"
 

@@ -110,7 +110,8 @@ $STATE/                          # ${XDG_STATE_HOME:-~/.local/state}/crash-triag
 ├── publish/                     每次运行 rm -rf 重建的投递目录
 ├── diag/                        技术诊断（change crash-tech-diagnostics），见下表
 │   ├── hourly.jsonl / coverage.json / alerted.json / hits.jsonl / last-*.json   L0 每小时告警
-│   └── daily.jsonl / daily-coverage.json                                        L1 / L2 的日聚合
+│   ├── coverage-posthog.json                                                   L0 的 PostHog 一侧覆盖
+│   └── daily.jsonl / daily-coverage.json / daily-coverage-posthog.json          L1 / L2 的日聚合
 ├── path.env                     setup.sh 探测生成（只有 PATH），install.sh / update.sh 每次覆写
 ├── local.env                    机器本地配置（CRASH_REPORT_CHAT_ID），**人手写，脚本永不覆写**
 └── *.json                       基准文件，**保持顶层不动**（见下表）
@@ -133,6 +134,7 @@ $STATE/                          # ${XDG_STATE_HOME:-~/.local/state}/crash-triag
 | `last-snapshot.json` | L2 变化检测基准；**首跑无基准时只建基线不报新增**（否则刷一屏「新增」）。⚠️ **提升在 `NO_DELIVER` 闸门之前**（`crash-weekly.sh:624`），所以「跑两次对比产物」这个验收方法在 L2 上不成立——第二次会看到零变化。测试前先备份它 |
 | `health-daily.json` / `health.json` / `health-diag.json` | L1 / L2 / L0 的健康状态 |
 | `diag/hourly.jsonl` + `coverage.json` | L0 的小时聚合（签名 × 平台 × 版本，保留 15 天）与「各 UTC 日取自哪张表、何时取」。丢了不致命：下次运行自动回填前 7 天（约 20 GB，⛔ 不当作基线 0），但**费钱**——换机时一起带走 |
+| `diag/coverage-posthog.json` / `daily-coverage-posthog.json` | PostHog 一侧（iOS 2.1.2、Android 2.1.1 起的版本）的覆盖，和 GA4 的分开记；本地行带 `src` 区分来源、按来源整段替换（design 决策 8）。丢了只会让下次运行把 PostHog 那几天重取一遍，不计费 |
 | `diag/alerted.json` | L0 去重状态 `{签名: {sent, first, last}}`。丢了 → 正在持续的激增会再发一张卡 |
 | `diag/daily.jsonl` + `daily-coverage.json` | L1 / L2 的技术诊断日聚合（全版本，保留 60 天）。L1 每天重取前一日、缺历史自动补；周报「前 4 周未出现」靠它。生产机首次启用前一次性回填 **35 天**，覆盖周报「前 4 周」：维护者 2026-11-26 批准，执行前先报 dry-run 字节数 `bash bin/diag-backfill.sh 35 --dry-run`。2026-11-26 已执行，实际计费 47.41 GB，写入 19507 行 |
 | `ledger/dispositions.json` | issue 处置结论（`issue_id` → `{first_seen, disposition, note}`，键跨 `error_type` 统一）。⛔ **不可重算的人工资产**：人工独占写入，跑批只读、前后逐字节一致。**L2 收尾自动落副本到 `backup/dispositions/`**（内容变化时才落，落后 `cmp` 校验；失败只告警不中止跑批）。⚠️ 它防的是误覆写 / 误删 / 损坏，⛔ **防不住整台机器丢失**——异地那一层仍靠人工 scp。⚠️ 它是 NON_FATAL 现状表人工结论的**唯一**存续途径——那张表是按受影响安装取头部的滚动榜单，旧做法「从上一版表格解析再写回」在行掉榜时就把结论丢了。⛔ 不在 `$STATE` 里就等于永久丢失，**必须与 `last-snapshot.json` 同级纳入备份**（`git clean -xfd` / 换机都会抹掉）。文件缺失 → 降级渲染 + 标注；⛔ 内容损坏 → 台账本轮不更新且整跑非零退出，绝不以空结论覆写 |

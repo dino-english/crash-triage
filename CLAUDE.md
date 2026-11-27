@@ -2,7 +2,7 @@
 
 Dino（iOS + Android）崩溃 & 性能日报/周报流水线的**部署运行时仓库**——bash + `bq` + `jq` + Hermes cron，无应用代码、无构建、无测试框架，产出投递飞书群 `oc_655033f1f85fa04f9eac25d56f056fc9`。
 
-三条独立链路（全表见 docs/CLAUDE-部署与运维.md，详规见 bin/INSTALL.md §0）：**L0 诊断告警** `diag-hourly.sh`（每小时 :05；GA4 `app_diagnostic` 接口类签名激增，只给分布不给结论；投递目标只认 `$STATE/local.env` 的 `CRASH_REPORT_DIAG_ALERT_CHAT_ID`）｜**L1 日报** `crash-daily.sh`（每天 08:30；高频数据呈现，不做分析；只统计最新 2 个版本）｜**L2 周报** `crash-weekly.sh`（周一 05:30；数据层零模型，分析层 `claude -p` 失败只降级；主力版本 = 近 7 天会话量 top2）。**三条链路都只读业务仓库，不 commit / 不 push / 不改业务代码。**
+三条独立链路（全表见 docs/CLAUDE-部署与运维.md，详规见 bin/INSTALL.md §0）：**L0 诊断告警** `diag-hourly.sh`（每小时 :05；`app_diagnostic` 接口类签名激增，旧版本取 GA4、iOS 2.1.2 / Android 2.1.1 起取 PostHog Logs，只给分布不给结论；投递目标只认 `$STATE/local.env` 的 `CRASH_REPORT_DIAG_ALERT_CHAT_ID`）｜**L1 日报** `crash-daily.sh`（每天 08:30；高频数据呈现，不做分析；只统计最新 2 个版本）｜**L2 周报** `crash-weekly.sh`（周一 05:30；数据层零模型，分析层 `claude -p` 失败只降级；主力版本 = 近 7 天会话量 top2）。**三条链路都只读业务仓库，不 commit / 不 push / 不改业务代码。**
 
 ## 代码与状态分离
 
@@ -31,7 +31,7 @@ cat "$STATE/health-daily.json"   # L1 健康（L2 是 health.json，L0 是 healt
   - R1 跑批期间改 `bin/**`；
   - R2 用默认信号杀跑批；
   - R3 整跑设短超时；
-  - R4 在日报机手工跑 L1 / L2；
+  - R4 在日报机上做测试（带 /tmp 影子副本也拦）；
   - R5 循环里用 `pgrep -f`。
 
   被拦下就按提示改写，⛔ 不绕过。改规则后跑 `bin/test/fn-claude-guard.sh`（双向测试，`ps` 用桩）。
@@ -58,9 +58,13 @@ cat "$STATE/health-daily.json"   # L1 健康（L2 是 health.json，L0 是 healt
   rc=0 下实发，仍挖出三个真缺陷（F57 两处假 ✅ · F58 callout 粘连），
   并发现索引页「今日日报」入口每天都是秃的（F59）。
 - ⛔ **验证在部署之前，「部署后核验」不是验证步骤**：tasks / 提议里⛔不得出现以部署为前提的验证项
-  （「部署后首跑再看台账怎样」）。「只有生产首跑才看得到」多半不成立——用生产真实输入在
-  生产 /tmp 影子跑新代码，先算出首跑产物、与线上逐格 diff。部署后的 morning-verify 是**监控**。
+  （「部署后首跑再看台账怎样」）。「只有生产首跑才看得到」多半不成立——把生产 STATE **只读复制到本机**，
+  在本机用新代码跑，先算出首跑产物、与线上逐格 diff。部署后的 morning-verify 是**监控**。
   2026-10-06 把「生产台账首轮会被改成什么样」写成部署后核验，被纠正。
+- ⛔⛔ **测试在本地机做，确认无误后才上生产；生产机只做只读查询**（维护者规则，2026-11-27 重申）。
+  ⛔ 不在日报机上跑新代码、不建临时 cron、不往 `~/.hermes/scripts/` 写东西——带 /tmp 影子副本也不行（钩子 R4 拦）。
+  2026-11-27 违反两次：生产 /tmp 影子跑让 claude 在生产 `~/.claude/` 写了空令牌文件、挂住 MCP 进程；
+  被指出后又在生产建临时 cron 做探针。做法见 `.claude/skills/crash-report-debug/`「用生产数据在本机验证」。
 - ⛔ **「投递成功」≠「渲染正确」≠「内容写进去了」**：飞书写指令无权限时返回
   `ok:true`/rc=0/`result:"failed"`（F57），只判退出码会打假 ✅；排版类问题只有读回文档才看得见。
 - ⛔ **失败必须非零退出**：四个脚本用完成哨兵（末尾 `RUN_COMPLETED=1`，trap 里没看到就 `exit 1`）。⚠️ bash 3.2 下 `set -u` 失败进 EXIT trap 时 `$?` **已经是 0**，保留 `$?` 的写法修不好；任何合法的提前 `exit 0` 都要先置位
