@@ -29,7 +29,13 @@
   **不是** `crash-triage`（`cli_aaf7b44…`）。open_id 按应用隔离——私聊自测拿 `crash-triage` 下的 open_id 去发，
   报 `99992361 open_id cross app`。要用该应用下的 id：机器人身份列正式群成员
   （`lark-cli api GET /open-apis/im/v1/chats/<oc_…>/members --params '{"member_id_type":"open_id"}'`）按名字取。
-  ⚠️ 机器人身份读不回私聊（`+chat-messages-list --user-id` 只认用户身份），私聊卡片的读回要人看。
+  ⚠️ 机器人身份**列**不了私聊（`+chat-messages-list --user-id` 只认用户身份），但**按 message_id 能读回自己发的卡片**（2026-11-27 订正：
+  这里原先写「私聊卡片的读回要人看」，⛔ 是错的，害我对维护者说「读不回来」）：
+  `lark-cli api GET /open-apis/im/v1/messages/<om_…> --params '{"card_msg_content_type":"raw_card_content"}' --as bot`，
+  `.data.items[0].body.content` 是 `{"json_card": "<渲染后的卡片 JSON 字符串>"}`，标题、表格表头与单元格、markdown、脚注文字都在里面，
+  可以逐项和本地渲染的 `last-card*.json` 比对。⚠️ 不带这个参数时，schema 2.0 卡片只回标题加一张图片占位，看起来像「读不回」。
+  ⚠️ 查询参数必须走 `--params`，写进路径（`?card_msg_content_type=…`）会被 lark-cli 拒绝（`path must not contain a query string`）。
+  ⚠️ 同一个幂等键在去重窗口内重发，飞书直接返回旧 message_id、不真发——验新版卡片要换键。
 - **错误 JSON 走 stderr，rc=1**（2026-11-02 实测）。文档已删 `3380003`，不存在 / 不可访问 `3380002`（fetch 与 overwrite 同码）；
   令牌端限流 `429` + `"subtype": "rate_limit"` + `retryable: true`，日报机上很常见——一律经 `bin/lib/lark.sh` 的 `lk` 调用（F68）。
 - **`docs +fetch` 取正文的 jq 路径是 `.data.document.content`**，不是 `.content`（后者恒为 `null`）。
