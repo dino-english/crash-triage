@@ -11,8 +11,8 @@
 | | L1 每日数据日报 | L2 每周变化播报 |
 |---|---|---|
 | 定时 | 每天 08:30 | 每周一 05:30 |
-| 数据源 | BigQuery（crashlytics / sessions / performance） | Firebase MCP（topIssues 等） |
-| 用不用模型 | **否**，纯 `bq` + `jq` + `lark-cli` | 是，仅用于取数与 git 反查 |
+| 数据源 | BigQuery（crashlytics / sessions / performance）+ `app_diagnostic`（GA4 + PostHog Logs） | BigQuery（`fetch-snapshot-bq.sh`）+ git 反查 + `app_diagnostic`（GA4 + PostHog Logs） |
+| 用不用模型 | 主口径**不用**（`bq` + `jq` + `lark-cli`）；「MCP 崩溃对照数据」一步经 `claude -p` 调 Firebase MCP，失败只降级（索引页「跟踪中的 issue」缺失） | 数据层**零模型**；分析层 `claude -p`（firebase-crash-triage）写根因分析，失败只降级 |
 | 碰不碰仓库 | 只读 clone（git 反查修复状态） | 只读 clone |
 | 产出 | 群卡片 + 日报 + 索引页（**不含台账**，change `crash-ledger-l2-ownership`） | 周报文档 + 群卡片 + 索引页归档 + **台账同步**（新增性能段、WoW 环比） |
 | 投递 | `bin/deliver.sh`（`lark-cli`，确定性、幂等） | 同左 |
