@@ -70,6 +70,22 @@ GA4 表的日期边界按 property 时区切分，实施时先核实 property �
 
 `5 * * * *`（整点后 5 分钟，避开 GA4 写入尾部），包装脚本由 `install.sh` 生成，与 L1 / L2 同一套。L0 写的文件只在 `$STATE/diag/` 下，不碰 L1 / L2 的基准文件。
 
+### 8. 双数据源：GA4 + PostHog Logs，读取时按「平台 × 版本 × 天」二选一（2026-11-27 增补）
+
+起因：11-27 首个生产日报核验发现 iOS 诊断设备 4 天里从 4513 掉到 884。GA4 原表实测 iOS 2.1.2 有 1382 台设备、`app_diagnostic` 0 条。原因是 App 从 iOS 2.1.2、Android 2.1.1 起把技术诊断改发 PostHog Logs（项目 423878 的 Logs，不是 Events），Firebase 停发（iOS 提交 `2be0e62c2`，2026-11-19）。只查 GA4 的话，iOS 的诊断会随用户升级归零，读者会读成「无报错」。维护者 2026-11-27 定：2.1.2 的 `app_diagnostic` 从 PostHog 取。
+
+- **取法**：HogQL（`POST /api/projects/423878/query/`），模板在 `bin/sql/diag-{daily,hourly,breakdown}.hogql`，列与对应的 GA4 SQL 完全相同，下游判定和渲染不用改。用日报机上 support 已有的那把只读 Personal API Key，放在 `$STATE/local.env` 的 `CRASH_REPORT_POSTHOG_API_KEY`，写成普通赋值、不 export（只有主进程用它，export 会进 claude -p、MCP 等子进程的环境）；经 `curl -K -` 从 stdin 传，不上命令行。
+- **口径对齐**：设备按 `firebase_id` 去重，它就是 GA4 的 `user_pseudo_id`；用户按 `uid`；只算 `env=production`，Logs 里有大量 debug 包测试数据，support 的 `error_impact` 也是同一口径。去掉没有 `firebase_id` 的行（约 1%，GA4 每条都有 `user_pseudo_id`）；流程类排除空 `diagnostic_id`（GA4 里 `NULL NOT IN` 不成立）。失败记录不采样（`sampling_ratio=1.0`，11-27 实测）。接口类谓词有两种方言（`bq.sh` 的 `SQL_DIAG_API_PRED`、`posthog.sh` 的 `PH_DIAG_API_PRED`），改一处必须改另一处，check-scripts 抓不到 SQL 文本里的重复。
+- **存时两边原样存，读时二选一，不相加**：本地行带 `src`，两边各取各的、各记各的覆盖（`daily-coverage-posthog.json`、`coverage-posthog.json`），按来源整段替换。读取时由核心层纯函数 `diag_pick` 对每个「平台 × 版本 × MYT 日」只留设备数之和较大的一边，相等取 PostHog。
+  - **为什么不按版本号划分界**：初版写的是「iOS ≥ 2.1.2、Android ≥ 2.1.1 取 PostHog」，11-27 审查推翻了它。还没合入迁移的开发分支照样发 GA4：Android 2.2.0 在 GA4 一直有数据（11-25 还有 8 行），PostHog 里没有。按版本号判会把它判给 PostHog，结果两边都看不到。「版本号越大越晚迁移」不成立，按数据在哪边就取哪边。
+  - **为什么不相加**：分界前后的 QA / 内部包两边都可能有零星数据（11-27 影子跑：GA4 里有 Android `2.1.1-qa`、`2.2.0`）。
+  - **为什么按天选**：同一版本迁移前后几天两边都有数据，按天取多的一边，基线不会被另一边的零星数据带偏。读取时选，加 `src` 字段之前写入的旧行也会参与选择，不必迁移旧数据。
+  - 上线时只需补 PostHog 一侧，不计费；GA4 那 35 天不用重扫（上次花了 47 GB）。任一边取数失败，整节降级为「取数失败」，⛔ 不拿一半的数据冒充全量。
+- **断数按来源各判各的**：
+  - L0 的「数据缺失」：⛔ 两边合起来判，GA4 导出中断会被 PostHog 的行盖住（11-27 双向测试证实）。判据从「前 7 天同小时任一天有行」收紧为「每天都有行」。原因是量小的一边（刚放量的 PostHog，用户迁走后的 GA4）夜里连续两小时为 0 是常态：iOS 2.1.2 的接口失败 11-26 一天只有 18 个小时有数据。量大的来源每小时都有数据，照样抓得到中断。代价：一次中断后的 7 天里，同一小时再断不报。
+  - L1 / L2：某来源某天 0 行、而前 7 天每天都有，判为断数（`diag_day_gaps`），这一节降级为「取数失败」。PostHog 摄入中断时接口照样回 200 加空结果，那天会被记成「已取过」，不在这里拦就再也不会重取。
+- **告警分布**：PostHog Logs 没有国家，k2 为空，卡片显示「未知」。策略配置经 `firebase_id` 关联同一小时的 `strategy_config_result`，但多数报错设备关联不到（11-26 全天只有 41 台上报），所以经常为空。分布附件不做二选一（cfg 行没有版本列），两边合并后 affected 相加。
+
 ## Risks / Trade-offs
 
 - [阈值没在真实环境跑过，首周误报未知] → 首周只发「Dino AI 客服测试」群（维护者 2026-11-26 由私聊改定；群里唯一的真人是维护者）；一周后按实际命中记录决定是否改发群（观察项，到期日 2026-12-04）。
@@ -80,6 +96,8 @@ GA4 表的日期边界按 property 时区切分，实施时先核实 property �
   - 必中案例 11-23 17 点只有 13 台，比下限 10 台只高 3 台，余量很小。
 - [L1 / L2 / 回填并发写日聚合（审查 G5）] → `diag_daily_store` 加目录锁（最多等 120 秒，超过 10 分钟的锁视为残留）。
 - [跨零点、时区切分错一小时] → 实施前核 property 时区；夹具覆盖跨零点小时。
+- [PostHog 查询接口悄悄截断] → 不写 LIMIT 只回 100 行（`hasMore:true`）；LIMIT 写得再大也截到 50000 行，而且这时 `hasMore` 是 null（11-27 实测）。模板一律写 `LIMIT 50000`，回满 50000 行就判失败。当前量级：小时聚合每个 UTC 日 64 行，日聚合每天约 120 行。
+- [PostHog 查询缓存] → 请求带 `refresh: force_blocking`，当天重取不会拿到旧结果。
 - [L0 与 L1 同时跑撞 lark-cli 限流] → L0 只在命中时投递，平时零调用；整点后 5 分钟跑，与 08:30 的 L1 不重叠。
 
 ## Migration Plan

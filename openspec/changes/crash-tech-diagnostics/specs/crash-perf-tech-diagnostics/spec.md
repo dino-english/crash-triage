@@ -8,7 +8,7 @@
 
 ### Requirement: 技术诊断报错签名口径
 
-系统 SHALL 从 GA4 `app_diagnostic` 事件取两类报错签名，并按平台 × 版本统计受影响设备数（`user_pseudo_id` 去重）与受影响用户数（`user_id` 去重，空值不计）：
+系统 SHALL 从 App 上报的 `app_diagnostic` 技术诊断取两类报错签名，并按平台 × 版本统计受影响设备数（`user_pseudo_id` 去重，PostHog 中为同值的 `firebase_id`）与受影响用户数（`user_id` 去重，PostHog 中为 `uid`，空值不计）。数据源有两个：GA4 与 PostHog Logs（只算 `env=production`；App 从 iOS 2.1.2、Android 2.1.1 起改发 PostHog）。每个平台 × 版本 × 日 MUST 只取一个数据源（设备数较多的一边），MUST NOT 两个数据源相加，也 MUST NOT 按版本号划定数据源：
 
 1. 接口类：`diagnostic_id='api_result'` 的 `target × code`，排除 2xx 成功码与空 `code`；
 2. 流程类：`diagnostic_id × reason`，只取 `result` 为 `tech_fail` 且 `record_type` 为 `outcome` 的事件，排除接口层的三个 `diagnostic_id`。
@@ -24,6 +24,31 @@
 
 - **WHEN** 某流程诊断的 `result` 为 `rejected` 或 `user_abort`（如 `subscription_operation × no_restorable_purchase`）
 - **THEN** 该事件不计入任何流程类签名（这两类多为业务正常态：无可恢复购买、不适用、用户取消）
+
+#### Scenario: 新版本的诊断从 PostHog 取
+
+- **WHEN** iOS 2.1.2 的设备只把 `app_diagnostic` 发到 PostHog Logs，GA4 里这个版本有会话但诊断为 0
+- **THEN** 该版本的签名、设备数、用户数取自 PostHog，日报、周报和每小时告警里照常出现，不显示为「无报错」
+
+#### Scenario: 同一版本两边都有数据时不重复计数
+
+- **WHEN** 某天 iOS 2.1.2 在 PostHog 有 23 台、GA4 里另有 2 台（内部包零星数据）
+- **THEN** 当天该版本只计 PostHog 的 23 台，GA4 那 2 台不计入任何签名
+
+#### Scenario: 没合入迁移的版本仍从 GA4 取
+
+- **WHEN** 版本号更大的开发分支（如 Android 2.2.0）仍只把诊断发到 GA4
+- **THEN** 该版本的签名照常从 GA4 统计，不因版本号大于迁移版本而被丢弃
+
+#### Scenario: 一个数据源断数不被另一个盖住
+
+- **WHEN** 某数据源某天 0 行（或某小时与上一小时 0 行），而前 7 天每天（同一小时）都有数据，另一个数据源照常有数据
+- **THEN** 日报、周报的这一节显示「取数失败」，每小时告警发「数据缺失」并写明是哪个数据源
+
+#### Scenario: 一个数据源取数失败不冒充全量
+
+- **WHEN** GA4 取数成功、PostHog 取数失败（或未配置凭据）
+- **THEN** 日报、周报的这一节显示「取数失败」，每小时告警非零退出并发失败告警，不只用 GA4 的数据判定
 
 #### Scenario: 成功码不成为签名
 

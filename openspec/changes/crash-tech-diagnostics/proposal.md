@@ -28,6 +28,10 @@
 
 - `crash-perf-tech-diagnostics`: 技术诊断报错的签名口径、激增判定、每小时告警（去重、投递目标、分布附件）、日报与周报的呈现。
 
+### 2026-11-27 增补：PostHog 双源
+
+上线次日核验发现 App 从 iOS 2.1.2、Android 2.1.1 起把 `app_diagnostic` 改发 PostHog Logs，GA4 停发，iOS 诊断随升级归零。维护者定：2.1.2 的诊断从 PostHog 取。实现为两边都取、读取时每个平台 × 版本 × 天取设备多的一边（design 决策 8；初版按版本号划分界，被审查推翻）。新增 `bin/lib/posthog.sh` 与三份 HogQL 模板；凭据为日报机已有的 PostHog 只读 key，写在 `$STATE/local.env`；PostHog 查询不计费。
+
 ### Modified Capabilities
 
 - `crash-perf-daily-weekly-report`: 「两条相互独立的无人值守报告链路」改为三条，新增 L0 每小时诊断告警；L0 与 L1 / L2 各自定时触发、独立失败、互不阻塞。

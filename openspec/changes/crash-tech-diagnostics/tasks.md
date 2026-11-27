@@ -92,6 +92,37 @@
 - [x] 8.4 BigQuery 实际扫描字节：L0 单次、L1 / L2 增量，从审计事件流取数记入本文件 @lead。**2026-11-26 完成**（来源 `region-asia-southeast1.INFORMATION_SCHEMA.JOBS_BY_USER` 的 `total_bytes_billed`，⚠️ 审计事件流不记字节，见 design Risks）：L0 单次 = 当天一张表约 3.8 GB（11-23 整天）+ 命中时分布查询 3.75 GB；L1 增量 = 每天重取前一日两张表 6.0 GB（11-25）～ 8.58 GB（11-23）；L2 增量 = 重取一天 8.58 GB（历史完整时）。本 change 今天合计约 187 GB（回测 47.62 + 开发机回填 48.07 + 其余验证 ≈ 91，单条均 < 20 GB）。⚠️ 同账号今天另有约 580 GB 来自本 change 以外的查询（10:38～11:18 的 409 排查、带 `@tz` 参数的查询等），不计入
 - [x] 8.5 对 `bin/` 全部 diff 做对抗审查（bash 3.2、跨进程边界、口径标注三类镜头），问题清单回 lead 复核 @crash-reviewer。**2026-11-26 完成**（crash-reviewer 审查后 lead 复核）：S1（`$( )` 内失败触发 ERR trap → L1 / L2 降级路径发假故障卡，可能进正式群）已复现并修复（`trap - ERR`），新增 `fn-diag-daily-fail.sh` 双向测试；G1 计费上限放宽；G2 字节数改从 INFORMATION_SCHEMA 取；G3（推测：hh:05 判定时数据不全）改为记 `evals.jsonl` 首周量化，未改判定；G4 表格渲染提前、三处结论一致；G5 日聚合写锁；G6 L0 失败卡写具体原因并加夹具场景；建议项（空版本集提示、阈值单处定义、`|` / `<` 转义、锁年龄上限、临时文件清理）已改。审查指出的「取数失败时卡片加一行」与 spec 字面冲突，按「缺数可见」改 spec，已报维护者
 
+## 9. PostHog 双源（2026-11-27 增补，design 决策 8；维护者 2026-11-27 定「2.1.2 app_diagnostic 从 PostHog 获取」）
+
+- [x] 9.1 口径实测（本机用 support 的只读 key，只读查询）@lead。**2026-11-27 完成**：production 近 2 天只有 iOS 2.1.2（2087 台）和 Android 2.1.1（3 台）；平台小写；`code` 形态与 GA4 同为 `http_401`；失败 `sampling_ratio=1.0`；`firebase_id` 覆盖 99%（9594 / 9665）；HogQL 不写 LIMIT 回 100 行、LIMIT 20 万被截到 50000 且 `hasMore` 为 null；数组占位可用；MYT 08 时 = UTC 0 时
+- [x] 9.2 `bin/lib/posthog.sh`（`ph_query`、`PH_DIAG_API_PRED`）与三份 HogQL 模板；三份模板经 `ph_query` 打真实 PostHog 验证 @lead。**2026-11-27 完成**：日聚合 11-26 117 行（api 24 / flow 93，无 2xx）；小时聚合 UTC 11-26 64 行；分布查询有行
+- [x] 9.3 核心层 `diag_pick`（读取时按平台 × 版本 × 天二选一）/ `diag_missing`（按来源、前 7 天每天都有）/ `diag_day_gaps`；L0 / L1 / L2 / 回填接入双源，按来源整段替换、分开记覆盖；`diag-backfill.sh --posthog-only` @lead。**2026-11-27 完成**（初版按版本号划分界 `diag_route` + 只判 GA4 缺失，审查 9.7 推翻后改为现在这样）
+- [x] 9.4 夹具：`fn-posthog-query.sh`（新，29 条）、`fake-posthog-curl.py`（新）、`fn-diag-hourly.sh` / `fn-diag-daily-lock.sh` / `fn-diag-daily-fail.sh` 补双源场景，`core-diag.sh` 补 `diag_route` @lead。**2026-11-27 完成**：双向测试 4 组都做过、改坏都变红：key 上命令行、截断判据 `>`、版本按字符串比较、合并判缺失 / GA4 不切分界
+- [x] 9.5 `check-scripts.sh` 十项全绿 @lead。**2026-11-27 完成**（审查修复后最终一次）：`纯函数断言：204 通过，0 失败 ✅` · 函数级夹具全部 0 失败（`fn-posthog-query.sh` 31、`fn-diag-hourly.sh` 62、`fn-diag-daily-lock.sh` 31、`fn-diag-daily-fail.sh` 11、`fn-claude-guard.sh` 44）· `fn-fetch-events-mcp.sh` 跳过（既有，缺依赖）· ShellCheck `共 74 处`（与改前相同）· `✅ 全部通过`，rc=0
+- [x] 9.6 用生产 STATE 只读副本在**本机**整跑（`NO_DELIVER`）：L1、L2 各一次，L0 两次；实发维护者私聊，`docs +fetch` 读回 @lead。**2026-11-27 完成**（第二轮，本机，审查修复后的最终代码）：
+  - L1 rc=0 `ok:true`：GA4 640 行 + PostHog 116 行、自动补 7 天 203 行，无断数；签名 45 个、日级激增 1 个；MCP 对照正常。bot 临时文档读回：「五、」说明框为二选一说明，iOS 2.1.2 两行在表；`assert-artifacts.sh` 4 / 4。临时文档已删
+  - L2 rc=0 `ok:true`：PostHog 自动补 34 天，无断数；「七、」头部 20 · 新出现 3 · 持续高位 2，iOS 2.1.2 进主力版本分布；**模型分析层跑通**（文末有「分析层 · 根因分析」）；`assert-artifacts.sh` 2 / 2。临时文档已删
+  - L0：最近一小时 rc=0（PostHog 基线 7 天补 163 行，无激增、数据正常）；重放 11-26 20 点 rc=0，3 个签名激增（19 / 14 / 10 台，与第一轮一致），实发维护者私聊 `om_x100b7fbb45acd4a8eee2dd68b2c518f`
+  - 真实数据上的二选一：35 天 20071 行，读取后不丢行（同版本同天两边都有的情况目前不存在），Android 2.2.0（只在 GA4）保留 46 行，iOS 2.1.2 290 行全部取自 PostHog
+  - 生产数据副本（含 key）核完已从 scratchpad 删除
+  - ⛔ 第一轮（下面记录的）跑在日报机 /tmp，违反维护者规则「测试在本地机做，确认无误后才上生产」，且跑的是审查 9.7 之前的代码；残留已全部清掉（/tmp 目录、bot 临时文档、`~/.claude/` 空令牌文件与会话文件、临时探针 cron 与脚本）。第二轮改在本机重跑。规则已写进 CLAUDE.md、调试 skill、钩子 R4。
+  - 第一轮记录（日报机 /tmp，维护者批准 L1 + L2 整跑约 103 GB）：
+  - L1：`ok:true`；GA4 640 行 + PostHog 当天 117 行、自动补 7 天 206 行；签名 30 → 46 个，日级激增仍 1 个（lottie 57 vs 18.9，与生产卡片逐字相同）。bot 临时文档 `docs +fetch` 读回：「五、」说明框为新来源说明，表中出现 iOS 2.1.2 两行（`shop/purchase × biz_40010` 20 台、`onboarding-journey/bootstrap × http_409` 11 台）。卡片 / 文档其余差异都是取数时刻漂移（08:30 → 10:13）和下一条的 MCP 降级，与本改动无关
+  - L2：`ok:true`；PostHog 自动补 34 天；「七、」头部 20 行 · 新出现 3 · 持续高位 2，iOS 2.1.2 进主力版本分布；新出现的 `classroom_bridge_call_out × bridge_call_failed` 只在 PostHog iOS 2.1.2，GA4 35 天无此签名，首次 11-24（PostHog 数据始于 11-20）
+  - L0：最近一小时 rc=0，PostHog 基线 7 天自动补 168 行，GA4 未重扫、GA4 一侧无分界后版本；重放 11-26 20 点（3 个签名激增）实发私聊卡 `om_x100b7fba321f30a0ed865e8bf9817ef`，来源说明为新文案
+  - ⚠️ **影子跑验证不了模型层**：ssh 会话打不开登录钥匙串，`claude -p` 报 OAuth 过期（L1 MCP 对照、L2 分析层降级），并在日报机 `~/.claude/` 写出空令牌 `.credentials.json` 与 4 个失败会话文件——已挪到 `/tmp/ct-shadow-1127/residue/`。本改动不碰模型层。做法与坑已写进 `.claude/skills/crash-report-debug/`「生产机 /tmp 影子跑」
+  - L2 的既有 `fetch-issue-states.py` 在 ssh 下连 MCP 挂住 6 分钟，`kill -9` 后走既有降级（与 8.2 同一现象）
+- [x] 9.7 对 `bin/` diff 做对抗审查 @crash-reviewer。**2026-11-27 完成**，lead 逐条复核：
+  - #1 按版本号划分界会丢掉没合入迁移的开发分支（Android 2.2.0 GA4 至 11-25 仍有数据、PostHog 无）：一手数据证实 → 改为读取时按数据二选一（design 决策 8 重写）
+  - #2 旧行（无 src）不过切分、与 PostHog 同版本相加：读取时选，自然解决；夹具补场景（5 + 4 不得成 9）
+  - #3 GA4 缺失判据随迁移变成误报、#4 PostHog 归零无人发现：断数改为按来源、前 7 天每天都有才判；L1 / L2 加 `diag_day_gaps`
+  - #5 口径细差：去掉无 `firebase_id` 的行、流程类排除空 `diagnostic_id`（PostHog 实测 117 → 116、64 → 63 行）；L0 卡片注明「只算 production」
+  - #6 失败文案写明来源；#7 `local.env.example` 注释挂错行、回填用法提示；#8 key 改普通赋值不 export；#9 PostHog 成败都记审计；#10 覆盖文件那行补 `trap - ERR`
+  - 夹具盲区「PostHog 分布查询失败」已补（⑤d）；「HogQL 语义没有自动化测试」接受，靠 9.1 / 9.2 真查与 9.6 影子跑
+  - 每条改法都有双向测试：二选一改回相加 → 核心 3 / L0 1 / 锁夹具 2 条变红
+- [x] 9.10 L0 告警卡片版式按读卡顺序重排（维护者 11-27 问「卡片能优化？」）@lead。**2026-11-27 完成**：标题带接口数；多签名时加「共同点」一行（平台 / 错误码相同就点出、设备最多的版本与国家，只并分布不下结论）；一张表列设备 · 账号 · 前 7 天同小时 · 倍数（= 设备 / max(基线, 1)，与判定口径一致），持续激增写「从 HH:00 起持续」；分布按「平台 版本」分组；策略配置写「受影响 M 台里 N 台次上报」；判定规则、数字偏低原因（晚到事件，实测曾只到一半）、0 账号含义、来源挪到灰字脚注。spec 要求的字段全部保留。核心断言补 7 条；本机用生产数据重放 11-26 20 点、实发维护者私聊 `om_x100b7fbb34b47534ed90d5dc6fe2532`（⚠️ 同一小时重放会被幂等键去重，预览另用新键单独发送）
+- [ ] 9.8 上线（每一步维护者同意）：合并推送 → 日报机 `update.sh` → `local.env` 加 `CRASH_REPORT_POSTHOG_API_KEY` → `diag-backfill.sh 35 --posthog-only` @lead
+
 ## Workflow follow-up
 
 **上线记录（2026-11-26，每一步都经维护者同意）**：
