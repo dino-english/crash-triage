@@ -38,8 +38,8 @@ description: 部署到生产机 Mac mini——合入 main、ssh 执行 update.sh
 1. **写 key**：把 support profile 那把只读 key 追加进 `$STATE/local.env`，先备份。⛔ key 不进命令行、不打印：
    `cp -p $S/local.env $S/local.env.bak-<日期>; printf 'CRASH_REPORT_POSTHOG_API_KEY="%s"\n' "$(grep '^POSTHOG_CLI_API_KEY=' ~/.hermes/profiles/support/.env | cut -d= -f2- | tr -d "\"'")" >> $S/local.env; chmod 600 $S/local.env; grep -c POSTHOG_API_KEY $S/local.env`
 2. **补 PostHog 历史 35 天**（不计费，不扫 GA4）：`bash bin/diag-backfill.sh 35 --posthog-only`。不补也行：L1 第一次跑会补 7 天，L2 补 34 天；补了，周一第一份周报的「前 4 周未出现」才完整。
-3. **核验**：下一个 hh:05 之后看 `jq -c . $S/health-diag.json` 是 `ok:true`，`$S/diag/coverage-posthog.json` 有 8 个 UTC 日；次日 08:30 L1 审计 `type=diag` 为 ok，文档「五、技术诊断报错」的说明框写着「iOS 2.1.2、Android 2.1.1 起的版本取 PostHog Logs」。
-4. **回退**：删掉 `local.env` 里那一行，代码 `git revert`，再跑 `update.sh`。PostHog 一侧只多了 `coverage-posthog.json`、`daily-coverage-posthog.json` 和 `daily.jsonl` 里 `src=posthog` 的行，留着无害。
+3. **核验**：下一个 hh:05 之后看 `jq -c . $S/health-diag.json` 是 `ok:true`，`$S/diag/coverage-posthog.json` 有 8 个 UTC 日；次日 08:30 L1 审计 `type=diag` 为 ok，文档「五、技术诊断报错」的说明框写着「GA4 与 PostHog Logs（只算 env=production；App 从 iOS 2.1.2、Android 2.1.1 起改发 PostHog）两处取，同一版本同一天只取设备数多的一边、不相加」（`bin/lib/posthog.sh` 的 `diag_ph_note`）。
+4. **回退**（顺序不能反：先删 key 而代码还在，hh:05 的 L0 就会失败发卡；⛔ 不在日报机上 `git revert`，本地提交会让以后 `update.sh` 的 `git pull --ff-only` 失败）：开发机 revert 这批提交并推送 → 日报机 `update.sh` → 删 `local.env` 里 key 那几行（或用 `local.env.bak-20261127` 还原并 `chmod 600`）。PostHog 一侧只多了 `coverage-posthog.json`、`daily-coverage-posthog.json` 和 `daily.jsonl` 里 `src=posthog` 的行，留着无害。
 
 ## 假故障（别追）
 

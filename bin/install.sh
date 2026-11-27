@@ -133,7 +133,7 @@ ok "wrapper $w"
 if hermes cron list 2>/dev/null | grep -q 'diag-hourly'; then
   ok "diag-hourly cron 已存在"
 else
-  todo "L0 每小时诊断告警（需维护者同意后再注册；投递目标写 \$STATE/local.env 的 CRASH_REPORT_DIAG_ALERT_CHAT_ID）："
+  todo "L0 每小时诊断告警（需维护者同意后再注册；先在 \$STATE/local.env 写投递目标 CRASH_REPORT_DIAG_ALERT_CHAT_ID 和 PostHog key CRASH_REPORT_POSTHOG_API_KEY，缺 key 会每小时失败）："
   echo "     hermes cron create '5 * * * *' --name diag-hourly --no-agent --script diag-hourly.sh"
 fi
 if hermes cron list 2>/dev/null | grep -q 'crash-daily'; then

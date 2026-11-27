@@ -207,3 +207,4 @@ lark-cli --profile crash-triage im +messages-send \
 - **F29 类**：文案与实况自相矛盾（原因写"显式跳过"、建议写"等额度恢复"）。两行各自都对，错的是组合。⛔ **没有工具能抓**，只有人读产物。
 - **F18 类**：模型路径产物的非确定性——冻结缓存冻得住 bq，冻不住模型。
 - **跨轮潜伏**：`WOW_CUT` 那种"首轮不进分支、第二轮才炸"。静态检查能抓这一个，但同类未必都能。
+- **HogQL 语义**（2026-11-27，技术诊断 PostHog 双源）：夹具的 curl 桩（`bin/test/fake-posthog-curl.py`）只按查询文本挑回放数据，**不执行 HogQL**。`env=production` 过滤、接口类谓词、`multiIf`、`IN {sigs}` 的语义，以及与 GA4 SQL 两种方言是否同口径，都没有自动化测试。改 `bin/sql/*.hogql` 或 `PH_DIAG_API_PRED` 后，必须用只读 key 真查一次，并在本机用生产 STATE 副本整跑对照（归档版 tasks 9.1 / 9.2 / 9.6 的做法）。

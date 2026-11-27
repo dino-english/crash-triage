@@ -58,7 +58,7 @@ FACT_CACHE_BASELINE=<跑批前快照> bash bin/test/assert-fact-cache.sh   # 事
 - **回放某个小时**：`CRASH_REPORT_STATE_DIR=<临时目录> CRASH_REPORT_DIAG_HOUR="2026-11-23 18" bash bin/diag-hourly.sh`。
   - 投递目标只认临时目录里 `local.env` 的 `CRASH_REPORT_DIAG_ALERT_CHAT_ID`，没有这个文件就不投递。⛔ 不要在生产机的 `$STATE` 上回放，会写坏去重状态。
   - 判定结果看 `diag/last-eval.json`，渲染出的卡片看 `last-card.json`。
-- **零字节、零投递的夹具**：`bash bin/test/fn-diag-hourly.sh`。它桩掉 bq 和 lark-cli，跑真实的脚本。
+- **零字节、零投递的夹具**：`bash bin/test/fn-diag-hourly.sh`。它桩掉 bq、curl（PostHog，`bin/test/fake-posthog-curl.py`）和 lark-cli，跑真实的脚本。
 - 日报 / 周报那一节回放用 `CRASH_REPORT_DIAG_DAY=<日>`，L1 填前一日，L2 填跑批日。冻结数据照旧用 `CRASH_REPORT_BQ_CACHE`。
-- ⚠️ 大回填（`bin/diag-backfill.sh`）先 `--dry-run` 报字节数。
+- ⚠️ 大回填（`bin/diag-backfill.sh`）先 `--dry-run` 报字节数。只补 PostHog 一侧用 `--posthog-only`（不扫 GA4、不计费）。
 

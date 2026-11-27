@@ -18,7 +18,7 @@
 | 投递 | `bin/deliver.sh`（`lark-cli`，确定性、幂等） | 同左 |
 | 版本口径 | **只统计最新 2 个版本**（按版本号），按版本分列 + 版本间对比 | **主力版本**（近 7 天会话量 top2，复用日报 SQL 换窗口） |
 
-另有 **L0 每小时诊断告警** `bin/diag-hourly.sh`（change `crash-tech-diagnostics`）：每小时 :05 扫 `app_diagnostic` 当天数据（旧版本在 GA4 实时表，iOS 2.1.2 / Android 2.1.1 起在 PostHog Logs），接口类签名激增时发一张卡（附平台 / 国家 / 版本与策略配置分布，不给根因）。投递目标**只认** `$STATE/local.env` 的 `CRASH_REPORT_DIAG_ALERT_CHAT_ID`，未设置就不投递，⛔ 不回落到上面那个群。L1 / L2 文档里各有一节「技术诊断报错」，与 L0 同一口径。
+另有 **L0 每小时诊断告警** `bin/diag-hourly.sh`（change `crash-tech-diagnostics`）：每小时 :05 扫 `app_diagnostic` 当天数据（GA4 实时表 + PostHog Logs，两边都取，每个平台 × 版本 × 天取设备多的一边（App 从 iOS 2.1.2 / Android 2.1.1 起改发 PostHog，没合入迁移的分支仍发 GA4）），接口类签名激增时发一张卡（附平台 / 国家 / 版本与策略配置分布，不给根因）。投递目标**只认** `$STATE/local.env` 的 `CRASH_REPORT_DIAG_ALERT_CHAT_ID`，未设置就不投递，⛔ 不回落到上面那个群。L1 / L2 文档里各有一节「技术诊断报错」，与 L0 同一口径。
 
 **三条都不写业务仓库、不 commit、不 push。**
 
@@ -149,9 +149,9 @@ bash bin/setup.sh                        # 两个路径都不用设，setup 自�
 | `CRASH_REPORT_STATE_DIR` | 否 | 运行数据目录。默认 `${XDG_STATE_HOME:-~/.local/state}/crash-triage` |
 | `CRASH_REPORT_CHAT_ID` | 是 | 目标群 `oc_655033f1f85fa04f9eac25d56f056fc9`；**首次部署建议先填自己的 `ou_xxx` 私聊验证几轮再换群** |
 | `CRASH_REPORT_DRY_RUN` | 否 | `1` = 只打印不发送。首次务必用它跑 |
-| `CRASH_REPORT_DIAG_MIN` / `CRASH_REPORT_DIAG_MULT` | 否 | L0 小时级激增阈值：受影响设备下限，默认 `10`；对前 7 天同小时均值的倍数，默认 `4`。回测定稿值，改前先重跑回测（`openspec/changes/crash-tech-diagnostics/backtest/`） |
+| `CRASH_REPORT_DIAG_MIN` / `CRASH_REPORT_DIAG_MULT` | 否 | L0 小时级激增阈值：受影响设备下限，默认 `10`；对前 7 天同小时均值的倍数，默认 `4`。回测定稿值，改前先重跑回测（`openspec/changes/archive/2026-11-27-crash-tech-diagnostics/backtest/`） |
 | `CRASH_REPORT_DIAG_TOP_N` | 否 | 日报「技术诊断报错」一节每类取前几行，默认 `15` |
-| `CRASH_REPORT_POSTHOG_API_KEY` | 是（技术诊断） | PostHog 只读 Personal API Key（项目 423878；日报机用 support profile 那把，`~/.hermes/profiles/support/.env` 的 `POSTHOG_CLI_API_KEY`）。iOS 2.1.2 / Android 2.1.1 起的技术诊断只在 PostHog。⚠️ 只放 `$STATE/local.env`（600），写成普通赋值、⛔ 不 export（只有主进程用，export 会进 claude -p / MCP 子进程环境），⛔ 不进仓库、不进命令行。未设置 → L0 每小时失败（只报一次）、L1 / L2 这一节显示「取数失败」 |
+| `CRASH_REPORT_POSTHOG_API_KEY` | 是（技术诊断） | PostHog 只读 Personal API Key（项目 423878；日报机用 support profile 那把，`~/.hermes/profiles/support/.env` 的 `POSTHOG_CLI_API_KEY`）。App 从 iOS 2.1.2 / Android 2.1.1 起把技术诊断改发 PostHog，缺了它这些版本的诊断就看不到。⚠️ 只放 `$STATE/local.env`（600），写成普通赋值、⛔ 不 export（只有主进程用，export 会进 claude -p / MCP 子进程环境），⛔ 不进仓库、不进命令行。未设置 → L0 每小时失败（只报一次）、L1 / L2 这一节显示「取数失败」 |
 | `CRASH_REPORT_DIAG_ALERT_CHAT_ID` | 否 | L0 诊断告警的投递目标（`ou_` 私聊或 `oc_` 群）。⚠️ **只从 `$STATE/local.env` 读**，命令行 / wrapper 里设了也会被忽略；未设置 → L0 照常计算、不投递，⛔ 不回落 `CRASH_REPORT_CHAT_ID`。首周填「Dino AI 客服测试」群（`oc_706585b425aa175d888509b372deaebe`，群里唯一的真人是维护者）（维护者 2026-11-26 定，原定私聊） |
 | `AGENT_CMD` | 否 | L2 用的 agent 命令，默认 `claude`；可换 cursor / codex |
 | `CRASH_REPORT_VERSION_COUNT` | 否 | 日报统计的**最新版本个数**，默认 `2` |
@@ -243,7 +243,7 @@ hermes cron edit <job_id> --schedule '0 10 * * *'       # 改完立即生效，�
 ```bash
 hermes cron create '30 8 * * *' --name crash-daily  --no-agent --script crash-daily.sh
 hermes cron create '30 5 * * 1' --name crash-weekly --no-agent --script crash-weekly.sh
-# L0 每小时诊断告警（⚠️ 需维护者同意后再注册；先在 $STATE/local.env 写好 CRASH_REPORT_DIAG_ALERT_CHAT_ID）
+# L0 每小时诊断告警（⚠️ 需维护者同意后再注册；先在 $STATE/local.env 写好 CRASH_REPORT_DIAG_ALERT_CHAT_ID 和 CRASH_REPORT_POSTHOG_API_KEY（普通赋值、600），缺 key 会每小时失败）
 hermes cron create '5 * * * *'  --name diag-hourly  --no-agent --script diag-hourly.sh
 ```
 

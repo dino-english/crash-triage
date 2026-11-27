@@ -2,7 +2,7 @@
 
 Dino（iOS + Android）崩溃 & 性能日报/周报流水线的**部署运行时仓库**——bash + `bq` + `jq` + Hermes cron，无应用代码、无构建、无测试框架，产出投递飞书群 `oc_655033f1f85fa04f9eac25d56f056fc9`。
 
-三条独立链路（全表见 docs/CLAUDE-部署与运维.md，详规见 bin/INSTALL.md §0）：**L0 诊断告警** `diag-hourly.sh`（每小时 :05；`app_diagnostic` 接口类签名激增，旧版本取 GA4、iOS 2.1.2 / Android 2.1.1 起取 PostHog Logs，只给分布不给结论；投递目标只认 `$STATE/local.env` 的 `CRASH_REPORT_DIAG_ALERT_CHAT_ID`）｜**L1 日报** `crash-daily.sh`（每天 08:30；高频数据呈现，不做分析；只统计最新 2 个版本）｜**L2 周报** `crash-weekly.sh`（周一 05:30；数据层零模型，分析层 `claude -p` 失败只降级；主力版本 = 近 7 天会话量 top2）。**三条链路都只读业务仓库，不 commit / 不 push / 不改业务代码。**
+三条独立链路（全表见 docs/CLAUDE-部署与运维.md，详规见 bin/INSTALL.md §0）：**L0 诊断告警** `diag-hourly.sh`（每小时 :05；`app_diagnostic` 接口类签名激增，GA4 与 PostHog Logs 两边都取、每个平台 × 版本 × 天取设备多的一边，只给分布不给结论；投递目标只认 `$STATE/local.env` 的 `CRASH_REPORT_DIAG_ALERT_CHAT_ID`）｜**L1 日报** `crash-daily.sh`（每天 08:30；高频数据呈现，不做分析；只统计最新 2 个版本）｜**L2 周报** `crash-weekly.sh`（周一 05:30；数据层零模型，分析层 `claude -p` 失败只降级；主力版本 = 近 7 天会话量 top2）。**三条链路都只读业务仓库，不 commit / 不 push / 不改业务代码。**
 
 ## 代码与状态分离
 
@@ -62,7 +62,7 @@ cat "$STATE/health-daily.json"   # L1 健康（L2 是 health.json，L0 是 healt
   在本机用新代码跑，先算出首跑产物、与线上逐格 diff。部署后的 morning-verify 是**监控**。
   2026-10-06 把「生产台账首轮会被改成什么样」写成部署后核验，被纠正。
 - ⛔⛔ **测试在本地机做，确认无误后才上生产；生产机只做只读查询**（维护者规则，2026-11-27 重申）。
-  ⛔ 不在日报机上跑新代码、不建临时 cron、不往 `~/.hermes/scripts/` 写东西——带 /tmp 影子副本也不行（钩子 R4 拦）。
+  ⛔ 不在日报机上跑新代码、不建临时 cron、不往 `~/.hermes/scripts/` 写东西——带 /tmp 影子副本也不行。钩子 R4 拦跑批脚本、`hermes cron run`、写 `~/.hermes/scripts/`；建临时 cron（`hermes cron create`）钩子不拦（部署注册 L0 要用它），靠这条规则。
   2026-11-27 违反两次：生产 /tmp 影子跑让 claude 在生产 `~/.claude/` 写了空令牌文件、挂住 MCP 进程；
   被指出后又在生产建临时 cron 做探针。做法见 `.claude/skills/crash-report-debug/`「用生产数据在本机验证」。
 - ⛔ **「投递成功」≠「渲染正确」≠「内容写进去了」**：飞书写指令无权限时返回
