@@ -1766,6 +1766,11 @@ DIAG_W_NEW_MIN=10      # 「本周新出现」的单日峰值下限（同 L0 的
 DIAG_W_TOP_N=10
 _drc=0
 diag_daily_ensure "$(_diag_day_add "$DIAG_W_DAY" -1)" 34 60000000000 || _drc=$?
+# 本周 7 天里某个来源某天 0 行、而前 7 天每天都有 = 断数，⛔ 不冒充「无报错」（design 决策 8，同 L1）
+if [ "$_drc" -eq 0 ]; then
+  _dgap="$(trap - ERR; diag_daily_gaps "$(_diag_day_add "$DIAG_W_DAY" -7)" "$(_diag_day_add "$DIAG_W_DAY" -1)")" || _drc=$?
+  if [ -n "${_dgap:-}" ]; then echo "  ⚠️ 技术诊断：疑似断数（某来源某天 0 行而前 7 天每天都有）：${_dgap}"; _drc=3; fi
+fi
 if [ "$_drc" -eq 0 ]; then
   # 版本口径 = 周报自己的主力版本（窗口 top2 ∪ 当日 top1），与二 / 三 / 四 / 五段同一份
   _dw_vers="$(trap - ERR; jq -cn --arg i "${IOS_TOP2_VERS:-}" --arg a "${AND_TOP2_VERS:-}" \
@@ -1882,7 +1887,7 @@ REPORT="$STATE/reports/$DAY-weekly.md"
     printf '\n## 七、技术诊断报错\n\n> ⚠️ **取数失败**：本节本周缺失——⛔ 不是「无报错」。详见日志与审计事件 `diag`。\n'
   else
     printf '\n## 七、技术诊断报错（%s ～ %s）\n\n' "$(jq -r '.week[0]' <<<"$DIAG_W")" "$(jq -r '.week[1]' <<<"$DIAG_W")"
-    printf '%s\n' "> 来源 GA4 app_diagnostic；接口类 = api_result（物理请求）的 target × code，排除 2xx 与空 code；流程类 = diagnostic_id × reason，只取 tech_fail。纯脚本确定性计算，⛔ 不经模型、不判断根因。"
+    printf '%s\n' "> 来源 app_diagnostic：$(diag_ph_note)；接口类 = api_result（物理请求）的 target × code，排除 2xx 与空 code；流程类 = diagnostic_id × reason，只取 tech_fail。纯脚本确定性计算，⛔ 不经模型、不判断根因。"
     printf '%s\n\n' "> ⚠️ 数字是**日均受影响设备**（7 天日值之和 / 7，设备按 user_pseudo_id 去重）——周内去重设备数不能由日数相加得到。上周 = $(jq -r '.prev | join(" ～ ")' <<<"$DIAG_W")。"
     printf '### 头部签名（全版本合计环比，附主力版本分布）\n\n'
     printf '%s\n\n' "> 环比按签名合计（跨平台、跨版本），⛔ 不按版本算——新版本上周还没放量，按版本算会得出上万百分比的假激增。「主力版本分布」只列本报告的主力版本。"

@@ -1,0 +1,27 @@
+-- 技术诊断报错：接口类签名的小时聚合，PostHog Logs 版（diag-hourly.sql 的同口径另一数据源；L0 每小时 + 基线回填共用）。
+-- 列与 diag-hourly.sql 完全相同：h（MYT 'YYYY-MM-DD HH'）, plat, ver, target, code, devices, users, events。
+--
+-- 占位：{t0} / {t1} = UTC 'YYYY-MM-DD HH:MM:SS'，半开区间，按 UTC 整日给（与 GA4 一张表一个 UTC 日对齐，
+--       外壳层按 UTC 日整段 upsert）；{{PH_DIAG_API_PRED}} 同 diag-daily.hogql。
+-- 口径注释见 diag-daily.hogql（env=production、firebase_id 去重、失败不采样）。
+SELECT h, plat, ver, target, code,
+  count(DISTINCT dev) AS devices, count(DISTINCT uid) AS users, count() AS events
+FROM (
+  SELECT
+    formatDateTime(toTimeZone(timestamp, 'Asia/Kuala_Lumpur'), '%Y-%m-%d %H') AS h,
+    upper(coalesce(attributes['platform'], '')) AS plat,
+    coalesce(attributes['app_version'], '') AS ver,
+    nullIf(attributes['firebase_id'], '') AS dev,
+    nullIf(attributes['uid'], '') AS uid,
+    coalesce(attributes['diagnostic_id'], '') AS did,
+    coalesce(attributes['target'], '') AS target,
+    coalesce(attributes['code'], '') AS code
+  FROM logs
+  WHERE timestamp >= toDateTime({t0}, 'UTC') AND timestamp < toDateTime({t1}, 'UTC')
+    AND attributes['env'] = 'production' AND attributes['event_name'] = 'app_diagnostic'
+    AND coalesce(attributes['firebase_id'], '') != ''   -- 与 GA4 对齐：GA4 每条都有 user_pseudo_id（9.1 实测约 1% 的行没有 firebase_id）
+)
+WHERE {{PH_DIAG_API_PRED}}
+GROUP BY h, plat, ver, target, code
+ORDER BY h, devices DESC
+LIMIT 50000

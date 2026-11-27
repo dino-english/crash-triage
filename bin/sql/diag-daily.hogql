@@ -1,0 +1,38 @@
+-- 技术诊断报错：完整 MYT 日的签名日聚合，PostHog Logs 版（diag-daily.sql 的同口径另一数据源；L1 / L2 / 回填共用）。
+-- 列与 diag-daily.sql 完全相同：d, kind, plat, ver, s1, s2, devices, users, events。
+--
+-- 占位：{t0} / {t1} = UTC 'YYYY-MM-DD HH:MM:SS'，半开区间 [起日 MYT 0 点, 止日次日 MYT 0 点)（外壳层算好，走 values）；
+--       {{PH_DIAG_API_PRED}} = 接口类谓词（bin/lib/posthog.sh，与 bq.sh 的 SQL_DIAG_API_PRED 同口径）。
+--
+-- ⛔ 只算 env=production：Logs 里有大量 debug 包的测试数据（内部包、模拟器）。
+-- ⛔ 不按版本过滤，全版本输出：同一版本同一天两边都有时，由外壳层读取时二选一（core diag_pick，取设备多的一边）。
+-- 设备按 firebase_id 去重（就是 GA4 的 user_pseudo_id，两个数据源的设备口径一致），用户按 uid 去重（空值不计）。
+-- 失败记录不采样（sampling_ratio=1.0，2026-11-27 实测），只有成功请求 10% 采样——这里只数失败，不受影响。
+-- 流程类同 diag-daily.sql：只取 tech_fail 的 outcome，排除接口层三个 diagnostic_id。
+SELECT d, kind, plat, ver, s1, s2,
+  count(DISTINCT dev) AS devices, count(DISTINCT uid) AS users, count() AS events
+FROM (
+  SELECT
+    formatDateTime(toTimeZone(timestamp, 'Asia/Kuala_Lumpur'), '%Y-%m-%d') AS d,
+    upper(coalesce(attributes['platform'], '')) AS plat,
+    coalesce(attributes['app_version'], '') AS ver,
+    nullIf(attributes['firebase_id'], '') AS dev,
+    nullIf(attributes['uid'], '') AS uid,
+    coalesce(attributes['diagnostic_id'], '') AS did,
+    coalesce(attributes['target'], '') AS target,
+    coalesce(attributes['code'], '') AS code,
+    multiIf({{PH_DIAG_API_PRED}}, 'api',
+            did != '' AND did NOT IN ('api_result', 'api_request_result', 'api_failure_context')   -- did != ''：GA4 里 NULL NOT IN 为 NULL、被排除
+              AND attributes['record_type'] = 'outcome' AND attributes['result'] = 'tech_fail', 'flow',
+            '') AS kind,
+    if(kind = 'api', target, did) AS s1,
+    if(kind = 'api', code, coalesce(attributes['reason'], '')) AS s2
+  FROM logs
+  WHERE timestamp >= toDateTime({t0}, 'UTC') AND timestamp < toDateTime({t1}, 'UTC')
+    AND attributes['env'] = 'production' AND attributes['event_name'] = 'app_diagnostic'
+    AND coalesce(attributes['firebase_id'], '') != ''   -- 与 GA4 对齐：GA4 每条都有 user_pseudo_id（9.1 实测约 1% 的行没有 firebase_id）
+)
+WHERE kind != ''
+GROUP BY d, kind, plat, ver, s1, s2
+ORDER BY d, kind, devices DESC
+LIMIT 50000

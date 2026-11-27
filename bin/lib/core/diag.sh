@@ -135,6 +135,41 @@ diag_mark_sent() {
     reduce $ks[] as $k ($a; .[$k] = ((.[$k] // {}) + {sent: $now}))'
 }
 
+# diag_pick <时间字段名 d|h>，stdin = 行 JSON 数组（日或小时聚合，带 plat / ver / src；没有 src 的旧行按 ga4 算）
+# → 每个「平台 × 版本 × MYT 日」只留一个数据源的行（JSON 数组）：取该桶设备数之和较大的那边，相等取 posthog。
+#   为什么不按版本号划分界（design 决策 8，11-27 审查推翻了初版）：App 从 iOS 2.1.2、Android 2.1.1 起改发 PostHog，
+#   但还没合入迁移的开发分支照样发 GA4——Android 2.2.0 在 GA4 一直有数据、PostHog 里没有（11-27 实测）。
+#   「版本号越大越晚迁移」不成立，按数据在哪边就取哪边。⛔ 不两边相加：分界前后的 QA / 内部包两边都可能有零星数据。
+#   按天选、不按整段选：同一版本迁移前后几天两边都有，按天取多的一边，基线不会被另一边的零星数据带偏。
+#   ⚠️ 行数据走 stdin（35 天日聚合约 3 MB，理由同 diag_evaluate_days）。
+diag_pick() {
+  jq -c --arg tk "$1" '
+    def bucket: [.plat, .ver, (.[$tk] | .[0:10])] | join("\u0001");
+    map(. + {src: (.src // "ga4")}) as $rows
+    | ($rows | group_by(bucket)
+       | map({key: (.[0] | bucket),
+              value: ( (map(select(.src == "posthog") | .devices) | add // 0) as $p
+                     | (map(select(.src == "ga4") | .devices) | add // 0) as $g
+                     | if $p >= $g then "posthog" else "ga4" end )})
+       | from_entries) as $win
+    | [ $rows[] | select(.src == $win[bucket]) ]'
+}
+
+# diag_day_gaps <MYT 日 JSON 数组 ["YYYY-MM-DD",…]>，stdin = 日聚合行 JSON 数组（**未经 diag_pick**，带 src）
+# → 「来源@日」（空格分隔，空串 = 没有断数）：该来源这一天 0 行，而前 7 天每天都有行。
+#   某天 0 行也会被记成「取过」（PostHog 摄入中断时接口照样回 200 + 空结果），两个来源合在一起看，
+#   一边的 0 会被另一边的行盖住、谁都发现不了（审查 #4）。稀疏的来源（新版本刚放量）前 7 天凑不齐，不会误报。
+diag_day_gaps() {
+  jq -r --argjson ds "$1" "$_DIAG_JQ_DEFS"'
+    map(. + {src: (.src // "ga4")}) as $rows
+    | ([ $rows[] | [.src, .d] | join("@") ] | unique) as $have
+    | [ $ds[] as $d | ("ga4", "posthog") as $s
+        | select(($have | index($s + "@" + $d)) == null)
+        | select([range(1; 8) | day_shift($d; -.)] | all(. as $x | ($have | index($s + "@" + $x)) != null))
+        | $s + "@" + $d ]
+    | join(" ")'
+}
+
 # diag_pick_suffix <已存在的表名（换行分隔）> <UTC 日期 YYYYMMDD> → 表后缀（日表优先）或空串
 #   ⛔ 同一 UTC 日日表与 intraday 并存时只能取一张（intraday 约滞后一天才删，内容几乎一样）。
 diag_pick_suffix() {
@@ -144,57 +179,92 @@ diag_pick_suffix() {
   return 0
 }
 
-# diag_missing <历史行 JSON 数组（含当前小时）> <小时> → missing | ok
-#   签名族（全部接口类签名）在本小时与上一小时都没有任何行，而前 7 天同一小时有行 → missing。
-#   全天每小时都有几十台设备报接口失败（11-25 实测），整小时为 0 只可能是数据没进来。
+# diag_missing <历史行 JSON 数组（含当前小时，**未经 diag_pick**，带 src）> <小时> → 断数的来源（空格分隔，如 "ga4"；空串 = 正常）
+#   按来源分别判（design 决策 8）：该来源本小时与上一小时都没有任何行，而前 7 天同一小时**每天**都有行 → 断数。
+#   ⛔ 不能两边合起来判：GA4 导出中断会被 PostHog 的行盖住（11-27 双向测试）。
+#   「每天都有」而不是「任一天有」：来源的量一小（新版本刚放量的 PostHog、用户迁走后的 GA4），
+#   夜里连续两小时为 0 是常态，「任一天有」会天天误报（审查 #3）；量大的来源每小时都有，照样抓得到中断。
+#   代价：一次中断后的 7 天里，同一小时再断不报（基线那天缺着）。
 diag_missing() {
   jq -rn --argjson rows "$1" --arg h "$2" "$_DIAG_JQ_DEFS"'
-    ([ $rows[].h ] | unique) as $have
-    | def has($x): ($have | index($x)) != null;
-    if (has($h) or has(hour_shift($h; -1))) then "ok"
-    elif ([range(1; 8) | hour_shift($h; -24 * .)] | any(has(.))) then "missing"
-    else "ok" end'
+    [ ("ga4", "posthog") as $s
+      | ([ $rows[] | select((.src // "ga4") == $s) | .h ] | unique) as $have
+      | def has($x): ($have | index($x)) != null;
+      select((has($h) or has(hour_shift($h; -1))) | not)
+      | select([range(1; 8) | hour_shift($h; -24 * .)] | all(has(.)))
+      | $s ]
+    | join(" ")'
 }
 
-# diag_card <待发条目 JSON（diag_plan 的 send，每条可带 geo/cfg 分布）> <小时> <missing|ok> <下限> <倍数>
+# diag_card <待发条目 JSON（diag_plan 的 send，每条可带 geo/cfg 分布）> <小时> <ok | 断数来源的显示名，如「GA4」> <下限> <倍数>
 # → 飞书卡片 JSON（schema 2.0）
 #   geo = [{k1:plat, k2:country, k3:ver, devices, affected}]；cfg = [{k1:source_type, k2:data_id, devices, affected}]
-#   ⛔ 只给分布，不写根因（spec「每小时激增告警」）。
-#   ⚠️ 配置分布写「N / 受影响 M 台」不写构成比：一台设备同一小时可拿到多份配置，相加会超过 100%。
+#   ⛔ 只给分布，不写根因（spec「每小时激增告警」）。「共同点」只是把各签名的分布并起来数，不是结论。
+#   版式（2026-11-27 按读卡顺序重排）：标题带签名数 → 共同点一行 → 一张表（设备 / 账号 / 基线 / 倍数）
+#   → 每个签名一行分布（按「平台 版本」分组）→ 灰字脚注（数字偏低的原因、判定规则、来源）。
+#   ⚠️ 倍数 = 设备 / max(基线, 1)，与判定口径一致（基线不足 1 按 1 计）。
+#   ⚠️ 配置分布写「受影响 M 台里 N 台上报」不写构成比：一台设备同一小时可拿到多份配置，相加会超过 100%。
 diag_card() {
   jq -cn --argjson s "$1" --arg h "$2" --arg miss "$3" --argjson min "$4" --argjson mult "$5" '
-    def top($xs; $n): ($xs // []) | sort_by(-.devices) | .[:$n];
     def plat: if . == "IOS" then "iOS" elif . == "ANDROID" then "Android" else . end;
-    def item:
-      "**" + .target + " × " + .code + "**\n"
-      + "本小时 **" + (.devices | tostring) + " 台**设备 / " + (.users | tostring) + " 个账号（前 7 天同小时均值 "
-      + (.baseline | tostring) + " 台）· 本轮首次激增 " + .first + ":00\n"
-      + (if (.geo // []) | length > 0 then
-           "平台 · 国家 · 版本：" + ([ top(.geo; 5)[] | (.k1 | plat) + " · " + (if .k2 == "" then "未知" else .k2 end) + " · " + .k3 + " " + (.devices | tostring) + " 台" ] | join("；")) + "\n"
-         else "" end)
-      + (if (.cfg // []) | length > 0 then
-           "策略配置（N / 受影响 " + ((.cfg[0].affected // .devices) | tostring) + " 台）："
-           + ([ top(.cfg; 5)[] | .k1 + " " + .k2 + " " + (.devices | tostring) + " 台" ] | join("；"))
-         elif has("cfg") then "策略配置：受影响设备本小时没有上报配置结果"
-         else "" end);
+    def ratio: (.devices / ([.baseline, 1] | max)) as $r | if $r >= 10 then ($r | round | tostring) else (($r * 10 | round) / 10 | tostring) end;
+    def hm: .[11:13] + ":00";
+    def country: if . == "" then "未知" else . end;
+    # 某签名的分布：取设备数前 6 的「平台 × 国家 × 版本」，按「平台 版本」分组，组按组内最大值排序
+    def geo_line:
+      ((.geo // []) | sort_by(-.devices) | .[:6]) as $g
+      | if ($g | length) == 0 then "分布：无"
+        else ($g | group_by([.k1, .k3]) | sort_by(-(map(.devices) | max))
+              | map((.[0].k1 | plat) + " " + .[0].k3 + "：" + (map((.k2 | country) + " " + (.devices | tostring)) | join(" · ")))
+              | join("｜")) end;
+    def cfg_line:
+      if (.cfg // []) | length > 0 then
+        "策略配置：受影响 " + ((.cfg[0].affected // .devices) | tostring) + " 台里 "
+        + ([.cfg[].devices] | add | tostring) + " 台次上报 · "
+        + ([ (.cfg | sort_by(-.devices) | .[:3])[] | .k1 + " " + .k2 + " " + (.devices | tostring) + " 台" ] | join(" · "))
+      elif has("cfg") then "策略配置：受影响设备本小时没有上报"
+      else "" end;
+    # 共同点：多个签名时，把分布并起来看（平台、错误码相同就点出来；设备最多的版本、国家）
+    def common:
+      ([ $s[].geo // [] | .[] ]) as $all
+      | if ($s | length) < 2 or ($all | length) == 0 then ""
+        else ([ $all[].k1 ] | unique) as $ps
+        | ([ $s[].code ] | unique) as $cs
+        | ($all | group_by(.k3) | map({k: .[0].k3, n: (map(.devices) | add)}) | max_by(.n) | .k) as $v
+        | ($all | group_by(.k2) | map({k: (.[0].k2 | country), n: (map(.devices) | add)}) | max_by(.n) | .k) as $c
+        | "共同点：" + ([ (if ($ps | length) == 1 then "都在 " + ($ps[0] | plat) else empty end),
+                          (if ($cs | length) == 1 then "都是 " + $cs[0] else empty end),
+                          "设备最多的版本 " + $v + "、国家 " + $c ] | join(" · "))
+        end;
     ($s | length) as $n
     | {schema: "2.0", config: {width_mode: "fill"},
        header: {template: (if $n > 0 then "red" else "orange" end),
                 title: {tag: "plain_text",
-                        content: (if $n > 0 then "🚨 技术诊断报错激增 · " + $h + ":00（MYT）"
+                        content: (if $n > 0 then "🚨 技术诊断报错激增 · " + $h + ":00（MYT）· " + ($n | tostring) + " 个接口"
                                   else "⚠️ 技术诊断数据缺失 · " + $h + ":00（MYT）" end)}},
        body: {elements: (
          (if $n > 0 then
-            [{tag: "markdown", content: ("**" + ($n | tostring) + " 个接口签名**命中激增（≥" + ($min | tostring)
-              + " 台设备且 ≥" + ($mult | tostring) + "× 前 7 天同小时均值；同一签名 6 小时内只报一次）")},
-             {tag: "hr"}]
-            + [ $s[] | {tag: "markdown", content: item} ]
+            (common as $cm | if $cm == "" then [] else [{tag: "markdown", content: ("**" + $cm + "**")}] end)
+            + [{tag: "markdown", content: (
+                 "| 接口 × 错误码 | 本小时 | 前 7 天同小时 | 倍数 |\n|---|---|---|---|\n"
+                 + ([ $s[] | "| " + .target + " × " + .code
+                      + " | **" + (.devices | tostring) + " 台** · " + (.users | tostring) + " 账号"
+                      + " | " + (.baseline | tostring) + " | " + ratio + "×"
+                      + (if (.first // $h) < $h then "（从 " + (.first | hm) + " 起持续）" else "" end) + " |" ] | join("\n")))},
+               {tag: "hr"}]
+            + [ $s[] | {tag: "markdown", content: (
+                  "**" + .target + " × " + .code + "**\n" + geo_line
+                  + (cfg_line as $l | if $l == "" then "" else "\n" + $l end))} ]
           else [] end)
-         + (if $miss == "missing" then
-              [{tag: "markdown", content: ("**数据缺失**：" + $h + ":00 与前一小时没有任何接口类诊断数据，而前 7 天同一小时都有——不是「平稳」，可能是上报或导出中断")}]
+         + (if $miss != "ok" then
+              [{tag: "markdown", content: ("**数据缺失**：" + $h + ":00 与前一小时 " + $miss + " 一侧没有任何接口类诊断数据，而前 7 天同一小时每天都有——不是「平稳」，可能是上报或导出中断")}]
             else [] end)
          + [{tag: "div", text: {tag: "plain_text", text_size: "notation", text_color: "grey",
-              content: "来源：GA4 app_diagnostic · api_result（物理请求）· 只给分布，不判断根因"}}])}}'
+              content: ("「本小时」是整点后 5 分钟判定时已入表的量，晚到事件只会让它更大（实测曾只到完整数据的一半）"
+                        + " · 激增 = ≥" + ($min | tostring) + " 台且 ≥" + ($mult | tostring) + "× 前 7 天同小时均值，同一签名 6 小时内只报一次"
+                        + (if [ $s[] | select(.users == 0) ] | length > 0 then " · 0 账号 = 这些设备都没登录" else "" end)
+                        + " · 来源：app_diagnostic · api_result（物理请求），GA4 与 PostHog Logs 同一版本取设备多的一边（PostHog 只算 production、无国家）"
+                        + " · 只给分布，不判断根因")}}])}}'
 }
 
 # diag_need_dates <coverage.json 内容> <UTC 日期 JSON 数组 ["YYYYMMDD",…]> → 还要取的日期（空格分隔）

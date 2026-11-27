@@ -86,11 +86,17 @@ assert_eq "20261125" "$(diag_pick_suffix $'events_20261125\nevents_intraday_2026
 assert_eq "intraday_20261126" "$(diag_pick_suffix $'events_20261125\nevents_intraday_20261126' 20261126)" "只有 intraday → 取 intraday"
 assert_eq "" "$(diag_pick_suffix $'events_20261125' 20261127)" "都不存在 → 空串（调用方判失败）"
 
-# ── diag_missing ──
-_d_rows='[{"h":"2026-11-22 17","devices":3},{"h":"2026-11-23 15","devices":5}]'
-assert_eq "missing" "$(diag_missing "$_d_rows" "2026-11-23 17")" "本小时与上一小时都无数据、前 7 天同小时有 → 数据缺失"
-assert_eq "ok" "$(diag_missing "$(printf '%s' "$_d_rows" | jq -c '. + [{"h":"2026-11-23 16","devices":1}]')" "2026-11-23 17")" "上一小时有数据 → 不算缺失（只缺一小时不报）"
-assert_eq "ok" "$(diag_missing '[]' "2026-11-23 17")" "前 7 天同小时也没有（冷启动）→ 不报缺失"
+# ── diag_missing ──（按来源各判各的，前 7 天同小时每天都有才算基线；返回断数的来源，空串 = 正常）
+_d_rows="$(for k in 1 2 3 4 5 6 7; do printf '{"h":"2026-11-%02d 17","devices":3}\n' $((23 - k)); done | jq -sc '. + [{"h":"2026-11-23 15","devices":5}]')"
+assert_eq "ga4" "$(diag_missing "$_d_rows" "2026-11-23 17")" "GA4：本小时与上一小时都无数据、前 7 天同小时每天都有 → 断数（没有 src 的旧行按 ga4 算）"
+assert_eq "" "$(diag_missing "$(printf '%s' "$_d_rows" | jq -c '. + [{"h":"2026-11-23 16","devices":1}]')" "2026-11-23 17")" "上一小时有数据 → 不算缺失（只缺一小时不报）"
+assert_eq "" "$(diag_missing '[]' "2026-11-23 17")" "前 7 天同小时也没有（冷启动）→ 不报缺失"
+assert_eq "" "$(diag_missing "$(printf '%s' "$_d_rows" | jq -c 'del(.[3])')" "2026-11-23 17")" \
+  "前 7 天只有 6 天有（量小的来源夜里常空）→ 不报（改回「任一天有」则变红，审查 #3）"
+_d_ph="$(printf '%s' "$_d_rows" | jq -c 'map(. + {src:"posthog"}) + [{"h":"2026-11-23 17","devices":40}]')"
+assert_eq "posthog" "$(diag_missing "$_d_ph" "2026-11-23 17")" \
+  "PostHog 断、GA4 这一小时有 40 台 → 只报 PostHog（两边合起来判就被 GA4 盖住，变红）"
+assert_eq "ga4 posthog" "$(diag_missing "$(printf '%s' "$_d_rows" | jq -c '. + map(. + {src:"posthog"})')" "2026-11-23 17")" "两边都断 → 两边都报"
 
 # ── diag_card ──
 _d_send='[{"sig":"/x × http_409","target":"/x","code":"http_409","devices":35,"users":32,"events":392,"baseline":2.6,"first":"2026-11-23 17",
@@ -98,13 +104,25 @@ _d_send='[{"sig":"/x × http_409","target":"/x","code":"http_409","devices":35,"
   "cfg":[{"k1":"experiment","k2":"2124743975533666306","devices":18,"affected":35},{"k1":"direct","k2":"190101","devices":3,"affected":35}]}]'
 _d_card="$(diag_card "$_d_send" "2026-11-23 18" ok 10 4)"
 _d_txt="$(printf '%s' "$_d_card" | jq -r '[.. | .content? // empty] | join("\n")')"
-for _d_need in "2026-11-23 18:00" "/x × http_409" "35 台" "32 个账号" "均值 2.6 台" "首次激增 2026-11-23 17:00" \
-               "iOS · Saudi Arabia · 2.1.1 14 台" "受影响 35 台" "experiment 2124743975533666306 18 台" "不判断根因"; do
+# spec「每小时激增告警」必含：签名、设备 / 用户数与基线、首次激增时刻、平台 × 版本 × 国家、策略配置分布；不给根因
+for _d_need in "2026-11-23 18:00" "/x × http_409" "**35 台** · 32 账号" "| 2.6 |" "13×" "从 17:00 起持续" \
+               "iOS 2.1.1：Saudi Arabia 14" "Android 2.1.0：South Korea 11" "受影响 35 台里" "experiment 2124743975533666306 18 台" "不判断根因"; do
   assert_eq "1" "$(printf '%s' "$_d_txt" | grep -cF "$_d_need" | tr -d ' ' | sed 's/^[1-9][0-9]*$/1/')" "卡片含「${_d_need}」"
 done
 assert_eq "0" "$(printf '%s' "$_d_txt" | grep -cE '根因：|原因是|导致' || true)" "卡片不写根因结论"
-assert_eq "orange" "$(diag_card '[]' "2026-11-23 18" missing 10 4 | jq -r .header.template)" "只有数据缺失时卡片为橙色"
-assert_eq "1" "$(diag_card '[]' "2026-11-23 18" missing 10 4 | jq -r '[.. | .content? // empty] | join(" ")' | grep -c '数据缺失')" "数据缺失卡片写明「数据缺失」"
+assert_eq "0" "$(printf '%s' "$_d_txt" | grep -c '共同点' || true)" "只有 1 个签名时不写「共同点」"
+assert_eq "0" "$(printf '%s' "$_d_txt" | grep -c '0 账号 =' || true)" "没有 0 账号的签名就不写那句解释"
+_d_send2="$(printf '%s' "$_d_send" | jq -c '. + [{"sig":"/y × http_409","target":"/y","code":"http_409","devices":12,"users":0,"baseline":0.4,"first":"2026-11-23 18",
+  "geo":[{"k1":"IOS","k2":"Saudi Arabia","k3":"2.1.1","devices":12,"affected":12}]}]')"
+_d_txt2="$(diag_card "$_d_send2" "2026-11-23 18" ok 10 4 | jq -r '[.. | .content? // empty] | join("\n")')"
+assert_eq "1" "$(printf '%s' "$_d_txt2" | grep -c '共同点：都是 http_409 · 设备最多的版本 2.1.1、国家 Saudi Arabia')" \
+  "2 个签名：共同点只并分布数数（平台不同就不写「都在」）"
+assert_eq "1" "$(printf '%s' "$_d_txt2" | grep -c '| 12×' )" "倍数 = 设备 / max(基线, 1)：基线 0.4 按 1 计 → 12×（与判定口径一致）"
+assert_eq "1" "$(printf '%s' "$_d_txt2" | grep -c '0 账号 = 这些设备都没登录')" "有 0 账号的签名才解释"
+assert_eq "0" "$(printf '%s' "$_d_txt2" | grep -c '/y × http_409 | .*起持续')" "首次 = 本小时：不写「起持续」"
+assert_eq "orange" "$(diag_card '[]' "2026-11-23 18" GA4 10 4 | jq -r .header.template)" "只有数据缺失时卡片为橙色"
+assert_eq "1" "$(diag_card '[]' "2026-11-23 18" GA4 10 4 | jq -r '[.. | .content? // empty] | join(" ")' | grep -c '数据缺失')" "数据缺失卡片写明「数据缺失」"
+assert_eq "1" "$(diag_card '[]' "2026-11-23 18" PostHog 10 4 | jq -r '[.. | .content? // empty] | join(" ")' | grep -c 'PostHog 一侧没有')" "写明是哪个来源断数（另一边可能照常有数据）"
 
 # ── diag_need_dates ──（20261125 的次日 00:05 UTC = 1795651500）
 _d_cov='{"20261124":{"src":"daily","at":1},"20261125":{"src":"intraday","at":1795651500},"20261126":{"src":"intraday","at":1795651499}}'
@@ -179,3 +197,23 @@ assert_eq "⚠️ L0 每小时诊断告警已 4 小时没有运行——定时�
 assert_eq "⚠️ L0 每小时诊断告警最近一次失败：数据缺失：2026-11-23 18:00" \
   "$(diag_l0_line false '数据缺失：2026-11-23 18:00' 1000 4000 10800)" "最近一次失败 → 失败一行"
 assert_eq "" "$(diag_l0_line true '' 1000 $((1000 + 10800)) 10800)" "边界：恰好 3 小时不算停摆（> 不是 ≥）"
+
+# ── diag_pick ──（PostHog 双源，design 决策 8：每个平台 × 版本 × 天只留设备多的一边，不相加）
+_D_PR='[{"d":"2026-11-26","plat":"ANDROID","ver":"2.2.0","devices":5},
+ {"d":"2026-11-26","plat":"IOS","ver":"2.1.2","src":"ga4","devices":2},
+ {"d":"2026-11-26","plat":"IOS","ver":"2.1.2","src":"posthog","devices":20},{"d":"2026-11-26","plat":"IOS","ver":"2.1.2","src":"posthog","devices":3},
+ {"d":"2026-11-25","plat":"IOS","ver":"2.1.2","src":"ga4","devices":9},{"d":"2026-11-25","plat":"IOS","ver":"2.1.2","src":"posthog","devices":4},
+ {"d":"2026-11-24","plat":"ANDROID","ver":"2.1.1","src":"ga4","devices":3},{"d":"2026-11-24","plat":"ANDROID","ver":"2.1.1","src":"posthog","devices":3}]'
+assert_eq "2026-11-26 ANDROID 2.2.0 ga4,2026-11-26 IOS 2.1.2 posthog,2026-11-26 IOS 2.1.2 posthog,2026-11-25 IOS 2.1.2 ga4,2026-11-24 ANDROID 2.1.1 posthog" \
+  "$(printf '%s' "$_D_PR" | diag_pick d | jq -r 'map([.d,.plat,.ver,.src]|join(" "))|join(",")')" \
+  "只在 GA4 的版本（Android 2.2.0 开发分支）留下（按版本号划分界则变红，审查 #1）；两边都有时按天取设备多的（11-26 PostHog 23 > 2，11-25 GA4 9 > 4）；相等取 PostHog；没有 src 的旧行按 GA4 算"
+assert_eq "23" "$(printf '%s' "$_D_PR" | diag_pick d | jq '[.[]|select(.d=="2026-11-26" and .ver=="2.1.2")|.devices]|add')" \
+  "⛔ 不两边相加（相加是 25）"
+assert_eq "ga4" "$(printf '%s' '[{"h":"2026-11-26 03","plat":"IOS","ver":"2.1.2","src":"posthog","devices":1},{"h":"2026-11-26 23","plat":"IOS","ver":"2.1.2","devices":30}]' | diag_pick h | jq -r 'map(.src)|unique|join(" ")')" \
+  "小时聚合按 MYT 日分桶：同一天不同小时一起比"
+
+# ── diag_day_gaps ──（日级断数：某来源当天 0 行而前 7 天每天都有）
+_D_GR="$(for k in 1 2 3 4 5 6 7; do d="$(date -j -v-"$k"d -f %Y-%m-%d 2026-11-26 +%Y-%m-%d)"; printf '{"d":"%s","src":"posthog"}\n{"d":"%s"}\n' "$d" "$d"; done | jq -sc '. + [{"d":"2026-11-26"}]')"
+assert_eq "posthog@2026-11-26" "$(printf '%s' "$_D_GR" | diag_day_gaps '["2026-11-26"]')" "PostHog 当天 0 行、GA4 照常 → 只报 PostHog（两边合起来看就被 GA4 盖住，审查 #4）"
+assert_eq "" "$(printf '%s' "$_D_GR" | jq -c 'del(.[0])' | diag_day_gaps '["2026-11-26"]')" "前 7 天只有 6 天有（刚放量）→ 不报"
+assert_eq "" "$(printf '%s' "$_D_GR" | jq -c '. + [{"d":"2026-11-26","src":"posthog"}]' | diag_day_gaps '["2026-11-26"]')" "当天有行 → 不报"

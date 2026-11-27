@@ -2,12 +2,17 @@
 # L0 每小时诊断告警的端到端夹具（change crash-tech-diagnostics tasks 4.1–4.4）。
 #
 # 跑的是**真的 bin/diag-hourly.sh**（它自己就是 set -euo pipefail + errtrace + ERR trap 的生产设置），
-# 只把两个外部命令换成桩：bq（按 SQL 里的表后缀回放夹具行）与 lark-cli（只记录调用）。
-# 零 BigQuery 字节、零飞书调用。投递目标只能经 $STATE/local.env 给——这正是被测的约束之一。
+# 只把三个外部命令换成桩：bq（按 SQL 里的表后缀回放夹具行）、curl（PostHog 查询，bin/test/fake-posthog-curl.py）
+# 与 lark-cli（只记录调用）。零 BigQuery 字节、零 PostHog 请求、零飞书调用。投递目标只能经 $STATE/local.env 给——这正是被测的约束之一。
 #
 # 夹具数据（MYT 2026-11-23 18 点判定，UTC 日 20261123；基线 UTC 日 20261116～20261122）：
 #   /app/v2/onboarding-journey/bootstrap × http_409：前 7 天 18 点每天 2 台 → 当天 18 点 35 台、19 点 40 台（激增）
 #   /app/v1/shop/purchase × biz_40010：每天 18 点 40 台 → 当天 42 台（平稳）
+# PostHog 一侧（iOS 2.1.2，分界之后的版本，design 决策 8）：
+#   bootstrap × http_409：前 7 天 18 点每天 1 台 → 当天 18 点 10 台 → 签名级 35 + 10 = 45 台 vs 基线 3
+#   GA4 里混进一行 iOS 2.1.2 的 /x/ga4-212 × http_500（2 台，内部包零星数据）：同一天 PostHog 一侧 25 台更多，
+#     读取时只留 PostHog（core diag_pick），⛔ 这行不参与判定
+#   GA4 里 Android 2.2.0（没合入迁移的开发分支，只在 GA4）/x/and-220 × http_500：每天 18 点 14 台 → 当天 15 台（平稳），⛔ 不能丢
 ROOT="${CRASH_REPORT_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}"
 . "$ROOT/bin/test/harness.sh"
 
@@ -27,12 +32,26 @@ for d in range(16, 23):
 for h, n in (("17", 13), ("18", 35), ("19", 40)):
     rows.append({"h": f"2026-11-23 {h}", "plat": "IOS", "ver": "2.1.1", "target": "/app/v2/onboarding-journey/bootstrap", "code": "http_409", "devices": str(n), "users": str(n - 2), "events": str(n * 10)})
 rows.append({"h": "2026-11-23 18", "plat": "IOS", "ver": "2.1.1", "target": "/app/v1/shop/purchase", "code": "biz_40010", "devices": "42", "users": "42", "events": "60"})
+rows.append({"h": "2026-11-23 18", "plat": "IOS", "ver": "2.1.2", "target": "/x/ga4-212", "code": "http_500", "devices": "2", "users": "2", "events": "2"})
+for d in range(16, 23):
+    rows.append({"h": f"2026-11-{d} 18", "plat": "ANDROID", "ver": "2.2.0", "target": "/x/and-220", "code": "http_500", "devices": "14", "users": "14", "events": "14"})
+rows.append({"h": "2026-11-23 18", "plat": "ANDROID", "ver": "2.2.0", "target": "/x/and-220", "code": "http_500", "devices": "15", "users": "15", "events": "15"})
 json.dump(rows, open(sys.argv[1], "w"))
+ph = [{"h": f"2026-11-{d} 18", "plat": "IOS", "ver": "2.1.2", "target": "/app/v2/onboarding-journey/bootstrap", "code": "http_409", "devices": 1, "users": 1, "events": 1} for d in range(16, 23)]
+ph += [{"h": f"2026-11-23 {h}", "plat": "IOS", "ver": "2.1.2", "target": "/app/v2/onboarding-journey/bootstrap", "code": "http_409", "devices": n, "users": n, "events": n} for h, n in (("17", 3), ("18", 10), ("19", 12))]
+json.dump(ph, open(sys.argv[1].replace("rows.json", "ph-hourly.json"), "w"))
 PY
 cat > "$T/fx/breakdown.json" <<'JSON'
 [{"dim":"geo","sig":"/app/v2/onboarding-journey/bootstrap × http_409","k1":"IOS","k2":"Saudi Arabia","k3":"2.1.1","devices":"14","affected":"35"},
  {"dim":"cfg","sig":"/app/v2/onboarding-journey/bootstrap × http_409","k1":"experiment","k2":"2124743975533666306","k3":"","devices":"18","affected":"35"}]
 JSON
+cat > "$T/fx/ph-breakdown.json" <<'JSON'
+[{"dim":"geo","sig":"/app/v2/onboarding-journey/bootstrap × http_409","k1":"IOS","k2":"","k3":"2.1.2","devices":10,"affected":10}]
+JSON
+# ── 桩：curl（PostHog）──
+printf '#!/usr/bin/env bash\nexec python3 %q "$@"\n' "$ROOT/bin/test/fake-posthog-curl.py" > "$T/bin/curl"
+chmod +x "$T/bin/curl"
+export CRASH_REPORT_POSTHOG_API_KEY="phx_fixture"
 
 # ── 桩：bq ──（按 SQL 里 _TABLE_SUFFIX IN (...) 的表回放；每次调用记一行到 bq.calls）
 cat > "$T/bin/bq" <<'STUB'
@@ -100,6 +119,15 @@ h_assert_eq "20261116 20261117 20261118 20261119 20261120 20261121 20261122 2026
 h_assert_contains "$(cat "$T/bq.calls")" "--maximum_bytes_billed=40000000000" "回填查询带 40 GB 计费上限"
 h_assert_contains "$(cat "$T/bq.calls")" "--maximum_bytes_billed=10000000000" "当天查询带 10 GB 计费上限"
 h_assert_contains "$(cat "$T/bq.calls")" "--max_rows=1000000" "⛔ 带 --max_rows（bq 默认只返回 100 行且不报错）"
+h_assert_eq "20261116 20261117 20261118 20261119 20261120 20261121 20261122 20261123" \
+  "$(jq -r 'keys | join(" ")' "$T/state/diag/coverage-posthog.json")" "PostHog 覆盖另记一份，同样 8 个 UTC 日"
+h_assert_eq "10" "$(jq -s '[.[] | select(.src == "posthog")] | length' "$T/state/diag/hourly.jsonl")" "PostHog 的 10 行带 src=posthog 进本地小时聚合"
+h_assert_eq "present" "$(grep -q 'ga4-212' "$T/state/diag/hourly.jsonl" && echo present || echo absent)" "存的时候两边原样存（GA4 那行 iOS 2.1.2 也在）"
+h_assert_eq "absent" "$(jq -r '.[].sig' "$T/state/diag/last-eval.json" | grep -q 'ga4-212' && echo present || echo absent)" \
+  "⛔ 判定时同一天 iOS 2.1.2 只留设备多的 PostHog 一侧，GA4 那 2 台不参与（不两边相加）"
+h_assert_eq "15	flat" "$(jq -r '.[] | select(.sig | test("and-220")) | [.devices, .verdict] | @tsv' "$T/state/diag/last-eval.json")" \
+  "⛔ 只在 GA4 的开发分支版本（Android 2.2.0）照常参与判定（按版本号划分界会丢掉它，审查 #1）"
+h_assert_eq "45" "$(jq -r '.[] | select(.sig | test("onboarding")) | .devices' "$T/state/diag/last-eval.json")" "签名级 = GA4 35 台 + PostHog 10 台"
 h_assert_absent "$(cat "$T/last.log")" "以退出码" "⛔ 正常路径没有触发 ERR trap"
 
 echo "── ② 配置私聊目标后重跑同一小时：发一张卡（上次没投递成功）──"
@@ -111,6 +139,9 @@ h_assert_eq "1" "$(nlark)" "lark-cli 调用 1 次"
 h_assert_contains "$(cat "$T/lark.calls")" "--user-id ou_fixture" "ou_ 走 --user-id"
 h_assert_contains "$(cat "$T/lark.calls")" "Saudi Arabia" "卡片带国家分布"
 h_assert_contains "$(cat "$T/lark.calls")" "2124743975533666306" "卡片带策略配置分布"
+h_assert_contains "$(cat "$T/lark.calls")" "iOS 2.1.2：未知 10" "卡片带 PostHog 一侧的分布（Logs 没有国家 → 未知）"
+h_assert_contains "$(cat "$T/lark.calls")" "受影响 45 台里" "受影响设备数两边相加（35 + 10）"
+h_assert_contains "$(tail -1 "$T/ph.bodies" | jq -r '.query.values.sigs[]')" "onboarding-journey/bootstrap × http_409" "PostHog 分布查询的签名走 values"
 h_assert_eq "1795431600" "$(st '.["/app/v2/onboarding-journey/bootstrap × http_409"].sent')" "投递成功后 sent = 该小时结束时刻"
 h_assert_absent "$(cat "$T/last.log")" "回填" "基线已完整 → 不再回填"
 h_assert_eq "1" "$(grep -c 'affected AS' "$T/bq.sql" | tr -d ' ')" "分布查询 1 次（所有待发签名一次查完）"
@@ -147,6 +178,25 @@ h_assert_absent "$(cat "$T/lark.calls")" "未预期的失败" "⛔ 不是子 she
 rm -f "$T/state/diag/.alerted-failure"
 rc=0; run "2026-11-23 19" || rc=$?
 
+echo "── ⑤c PostHog 取数失败：非零退出，失败卡写具体原因（⛔ 不拿 GA4 一半的数据判定）──"
+: > "$T/lark.calls"
+rc=0; FAKE_PH_FAIL=1 run "2026-11-23 20" || rc=$?
+h_assert_eq "1	1" "$rc	$(nlark)" "非零退出，发 1 张失败卡"
+h_assert_contains "$(cat "$T/lark.calls")" "取 PostHog 小时聚合失败" "失败卡里是 PostHog 一侧的具体原因"
+h_assert_absent "$(cat "$T/lark.calls")" "未预期的失败" "⛔ 不是子 shell 里 on_err 抢先发的泛化卡"
+rm -f "$T/state/diag/.alerted-failure"
+rc=0; run "2026-11-23 19" || rc=$?
+
+echo "── ⑤d PostHog 分布查询失败：非零退出，卡片不发、sent 不写（下一小时再试）──"
+jq -c 'del(.["/app/v2/onboarding-journey/bootstrap × http_409"])' "$T/state/diag/alerted.json" > "$T/a" && mv "$T/a" "$T/state/diag/alerted.json"
+: > "$T/lark.calls"
+rc=0; FAKE_PH_FAIL_BREAKDOWN=1 run "2026-11-23 18" || rc=$?
+h_assert_eq "1	1" "$rc	$(nlark)" "非零退出，只发 1 张失败卡（激增卡没发出去）"
+h_assert_contains "$(cat "$T/lark.calls")" "取 PostHog 分布失败" "失败卡写具体原因"
+h_assert_absent "$(cat "$T/lark.calls")" "技术诊断报错激增" "⛔ 不拿半份分布发激增卡"
+h_assert_eq "true" "$(st '.["/app/v2/onboarding-journey/bootstrap × http_409"] == null')" "状态未写，下一小时照发"
+rm -f "$T/state/diag/.alerted-failure"
+
 echo "── ⑥ 投递失败：非零退出，sent 不写（下一小时再试）──"
 jq -c 'del(.["/app/v2/onboarding-journey/bootstrap × http_409"])' "$T/state/diag/alerted.json" > "$T/a" && mv "$T/a" "$T/state/diag/alerted.json"
 rc=0; FAKE_LARK_FAIL=1 run "2026-11-23 18" || rc=$?
@@ -154,11 +204,13 @@ h_assert_eq "1" "$rc" "非零退出"
 h_assert_eq "true" "$(st '.["/app/v2/onboarding-journey/bootstrap × http_409"] == null')" "状态未写（失败前不落盘），下一小时照发"
 rm -f "$T/state/diag/.alerted-failure"
 
-echo "── ⑦ 当天整段无数据：卡片写「数据缺失」，不冒充平稳（tasks 4.3）──"
+echo "── ⑦ 当天 GA4 整段无数据：卡片写「数据缺失」，不冒充平稳（tasks 4.3）──"
+# ⚠️ 这一小时 PostHog 一侧照常有行（夹具 18 点 10 台）：⛔ 不得因为 PostHog 有数据就把 GA4 中断盖掉（design 决策 8）
 : > "$T/lark.calls"
 rc=0; FAKE_EMPTY_DAYS=20261123 run "2026-11-23 18" || rc=$?
 h_assert_eq "1	1" "$rc	$(nlark)" "⛔ 非零退出（spec：数据未更新不冒充平稳），只发 1 张卡（不叠泛化失败卡）"
 h_assert_contains "$(cat "$T/lark.calls")" "数据缺失" "卡片写明数据缺失"
+h_assert_contains "$(cat "$T/lark.calls")" "GA4 一侧没有" "卡片写明是 GA4 一侧断数（PostHog 这一小时有数据）"
 h_assert_eq "absent" "$(grep -q 'http_409' "$T/lark.calls" && echo present || echo absent)" "没有数据就不报任何签名激增"
 h_assert_eq "false" "$(jq -r .ok "$T/state/health-diag.json")" "health-diag.json 留下失败记录"
 rc=0; FAKE_EMPTY_DAYS=20261123 run "2026-11-23 18" || rc=$?

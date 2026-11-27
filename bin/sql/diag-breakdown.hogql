@@ -1,0 +1,40 @@
+-- 技术诊断报错：待发签名在某 MYT 小时的分布，PostHog Logs 版（diag-breakdown.sql 的另一数据源；L0 告警卡片附件）。
+-- 列与 diag-breakdown.sql 相同：dim, sig, k1, k2, k3, devices, affected。
+--
+-- 占位：{t0} / {t1} = 该 MYT 小时的 UTC 起止（半开）；{sigs} = 待发签名「target × code」数组（⛔ 来自数据，只走 values）。
+-- 与 GA4 版的差别：
+--   geo：PostHog Logs **没有国家**，k2 恒为空串（卡片渲染为「未知」）；k1 = 平台，k3 = 版本。
+--   cfg：同一小时同一设备（firebase_id）上报的 strategy_config_result 的 config_source_type × config_data_id；
+--        PostHog 侧多数报错设备关联不到策略记录（2026-11-26 全天只有 41 台上报），空是常态不是取数失败。
+-- 外壳层把它与 GA4 的分布合并、affected 两边相加。⚠️ 分布附件不做二选一（cfg 行没有版本列）：
+-- 同一版本同一小时两边都有数据的情况很少（2026-11-27 实测 PostHog production 只有 iOS 2.1.2、Android 2.1.1），附件只作线索。
+WITH ev AS (
+  SELECT
+    upper(coalesce(attributes['platform'], '')) AS plat,
+    coalesce(attributes['app_version'], '') AS ver,
+    nullIf(attributes['firebase_id'], '') AS dev,
+    coalesce(attributes['diagnostic_id'], '') AS did,
+    concat(coalesce(attributes['target'], ''), ' × ', coalesce(attributes['code'], '')) AS sig,
+    attributes['config_source_type'] AS cst,
+    attributes['config_data_id'] AS cdi
+  FROM logs
+  WHERE timestamp >= toDateTime({t0}, 'UTC') AND timestamp < toDateTime({t1}, 'UTC')
+    AND attributes['env'] = 'production' AND attributes['event_name'] = 'app_diagnostic'
+), hit AS (
+  SELECT * FROM ev WHERE did = 'api_result' AND sig IN {sigs} AND dev IS NOT NULL
+), affected AS (
+  SELECT sig, count(DISTINCT dev) AS n FROM hit GROUP BY sig
+)
+SELECT * FROM (
+  SELECT 'geo' AS dim, g.sig AS sig, g.plat AS k1, '' AS k2, g.ver AS k3, g.devices AS devices, a.n AS affected
+  FROM (SELECT sig, plat, ver, count(DISTINCT dev) AS devices FROM hit GROUP BY sig, plat, ver) AS g
+  JOIN affected AS a ON g.sig = a.sig
+  UNION ALL
+  SELECT 'cfg' AS dim, c.sig AS sig, c.cst AS k1, c.cdi AS k2, '' AS k3, c.devices AS devices, a.n AS affected
+  FROM (SELECT h.sig AS sig, e.cst AS cst, e.cdi AS cdi, count(DISTINCT e.dev) AS devices
+        FROM ev AS e JOIN (SELECT DISTINCT sig, dev FROM hit) AS h ON e.dev = h.dev
+        WHERE e.did = 'strategy_config_result' AND e.cst IS NOT NULL AND e.cst != ''
+        GROUP BY h.sig, e.cst, e.cdi) AS c
+  JOIN affected AS a ON c.sig = a.sig
+)
+LIMIT 50000

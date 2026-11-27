@@ -13,6 +13,7 @@ STATE="$T"; SQL_DIR="$ROOT/bin/sql"; SQL_DIAG_API_PRED="did = 'api_result'"
 . "$ROOT/bin/lib/core/diag.sh"
 . "$ROOT/bin/lib/query.sh"
 . "$ROOT/bin/lib/diag.sh"
+H_ERR_HIT=0   # 先于首次引用（check-scripts 第 7 项）
 
 # ⚠️ h_run 必须在当前 shell 里调、输出写文件：写成 out="$(h_run …)" 时 h_run 跑在子 shell 里，
 #    它记下的 H_ERR_HIT 传不回来，「ERR 未触发」的断言永远通过（本夹具初版就这么错过，双向测试抓到）。
@@ -36,5 +37,28 @@ echo "── 表不存在：同样只返回非零 ──"
 bqq() { echo "table_id"; }
 h_run _like_l1 > "$T/out" 2>/dev/null || true; out="$(cat "$T/out")"
 h_assert_eq "1	0" "${out}	${H_ERR_HIT}" "返回 1，ERR trap 未触发"
+
+echo "── GA4 成功、PostHog 失败：整节降级（⛔ 不拿一半数据冒充全量），不触发 ERR trap ──"
+# GA4 桩：表都在、查询回空
+bqq() { if [ "$1" = csv ]; then echo "table_id"; for d in 15 16 17 18 19 20 21 22 23; do echo "events_202611$d"; done; else echo '[]'; fi; }
+mkdir -p "$T/bin"; printf '#!/usr/bin/env bash\nexec python3 %q "$@"\n' "$ROOT/bin/test/fake-posthog-curl.py" > "$T/bin/curl"; chmod +x "$T/bin/curl"
+PATH="$T/bin:$PATH"; export FAKE_DIR="$T"
+unset CRASH_REPORT_POSTHOG_API_KEY
+H_ERR_HIT=0
+h_run _like_l1 > "$T/out" 2>"$T/err" || true; out="$(tail -1 "$T/out")"   # 前面是进度行
+h_assert_eq "1	0" "${out}	${H_ERR_HIT}" "未配置 PostHog key：返回 1，ERR trap 未触发"
+h_assert_contains "$(cat "$T/err")" "未配置 CRASH_REPORT_POSTHOG_API_KEY" "stderr 写明缺 key"
+export CRASH_REPORT_POSTHOG_API_KEY=phx_fixture
+H_ERR_HIT=0
+FAKE_PH_FAIL=1 h_run _like_l1 > "$T/out" 2>"$T/err" || true; out="$(tail -1 "$T/out")"   # 前面是进度行
+h_assert_eq "1	0" "${out}	${H_ERR_HIT}" "PostHog 请求失败：返回 1，ERR trap 未触发"
+h_assert_contains "$(cat "$T/err")" "PostHog 日聚合查询失败" "stderr 写明是 PostHog 一侧"
+echo "── 两边都成功：返回 0；PostHog 一侧首次补满回看窗口 ──"
+H_ERR_HIT=0
+: > "$T/ph.bodies"
+h_run _like_l1 > "$T/out" 2>"$T/err" || true; out="$(tail -1 "$T/out")"   # 前面是进度行
+h_assert_eq "0	0" "${out}	${H_ERR_HIT}" "返回 0，ERR trap 未触发"
+h_assert_eq "8" "$(jq 'length' "$DIAG_DAILY_COV_PH")" "PostHog 覆盖记满当日 + 前 7 天"
+h_assert_eq "2" "$(grep -c '"t0"' "$T/ph.bodies" | tr -d ' ')" "PostHog 只发 2 次（当日 1 次 + 回看窗口一次补齐）"
 
 h_summary

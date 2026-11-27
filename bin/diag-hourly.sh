@@ -1,14 +1,17 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2034  # AUDIT_FILE / ALERT_* / BQ_MAX_ROWS / LK 由 source 进来的 lib.sh、common.sh、bq.sh、lark.sh 读取
-# L0 每小时技术诊断告警（change crash-tech-diagnostics）：GA4 app_diagnostic 接口类签名激增 → 飞书卡片。
+# L0 每小时技术诊断告警（change crash-tech-diagnostics）：app_diagnostic 接口类签名激增 → 飞书卡片。
+# 两个数据源（design 决策 8）：GA4 与 PostHog Logs 两边原样取、行带 src、各记各的覆盖；
+# 判定前按「平台 × 版本 × 天」二选一（core diag_pick，取设备多的一边，不相加）；断数按来源各判各的（core diag_missing）。
 #
 # 每次运行判定「上一个完整 MYT 小时」：
-#   取数（该小时所在 UTC 日的那张表，整天重取、按小时 upsert 进本地聚合）
+#   取数（该小时所在 UTC 日：GA4 那张表 + PostHog 同一 UTC 日，整天重取、按来源按小时 upsert 进本地聚合）
 #   → 基线不足先回填 → 签名级激增判定 → 去重 → 命中则取分布、发一张卡 → 写去重状态。
 #
 # 运行数据只在 $STATE/diag/（spec：L0 ⛔ 不碰 L1 / L2 的文档、索引页、台账与基准文件）：
 #   hourly.jsonl    小时聚合（diag-hourly.sql 的行，保留 DIAG_KEEP_DAYS 天）
-#   coverage.json   各 UTC 日取自哪张表、何时取的（判定「历史是否完整」，见 core diag_need_dates）
+#   coverage.json   GA4 一侧：各 UTC 日取自哪张表、何时取的（判定「历史是否完整」，见 core diag_need_dates）
+#   coverage-posthog.json  PostHog 一侧：各 UTC 日何时取的（src 记 "posthog"，按 intraday 同一规则判完整）
 #   alerted.json    去重状态 {签名: {sent, first, last}}
 #   hits.jsonl      每次激增 / 数据缺失的记录（首周观察项 2026-12-04 汇总用）
 #   last-eval.json  最近一次判定的全部签名；last-card.json 最近一次渲染的卡片
@@ -44,6 +47,7 @@ AUDIT_FILE="$STATE/audit/diag-$RUN_ID.events.jsonl"
 SQL_DIR="${SQL_DIR:-$ROOT/bin/sql}"
 HOURLY="$DIAG_DIR/hourly.jsonl"
 COVERAGE="$DIAG_DIR/coverage.json"
+COVERAGE_PH="$DIAG_DIR/coverage-posthog.json"
 DIAG_STATE_FILE="$DIAG_DIR/alerted.json"   # ⛔ 不能叫 ALERTED：common.sh 的 ALERTED=0 是告警去重标志，会把路径盖成「0」
 HITS="$DIAG_DIR/hits.jsonl"
 LOCK="$DIAG_DIR/.lock"
@@ -80,13 +84,15 @@ ALERT_TO="$DIAG_TO"
 # shellcheck disable=SC1091
 . "$ROOT/bin/lib/query.sh"
 # shellcheck disable=SC1091
+. "$ROOT/bin/lib/posthog.sh"
+# shellcheck disable=SC1091
 . "$ROOT/bin/lib/core/diag.sh" || { echo "❌ 核心层缺失：bin/lib/core/diag.sh" >&2; exit 1; }
 set -o errtrace
 trap 'on_err' ERR
 bq_init
 _lock_mine=0
 # ⛔ 完成哨兵：bash 3.2 下 set -u 失败进 EXIT trap 时 $? 已是 0（CLAUDE.md），只能靠哨兵判成败
-trap 'rm -f "$BQ_SQLTMP" "$DIAG_DIR/.rows.$$.json" "$HOURLY.tmp.$$" "$COVERAGE.tmp.$$" "$DIAG_STATE_FILE.tmp.$$"; [ "$_lock_mine" = 1 ] && rm -rf "$LOCK"; [ "${RUN_COMPLETED:-0}" = 1 ] || exit 1' EXIT
+trap 'rm -f "$BQ_SQLTMP" "$DIAG_DIR/.rows.$$.json" "$DIAG_DIR/.phv.$$.json" "$DIAG_DIR/.ph.$$.json" "$DIAG_DIR/.ph.$$.json.r" "$HOURLY.tmp.$$" "$COVERAGE.tmp.$$" "$COVERAGE_PH.tmp.$$" "$DIAG_STATE_FILE.tmp.$$"; [ "$_lock_mine" = 1 ] && rm -rf "$LOCK"; [ "${RUN_COMPLETED:-0}" = 1 ] || exit 1' EXIT
 audit run.start "" "$(jq -cn --arg to "${DIAG_TO:+set}" '{to:$to}')"
 
 # ── 并发锁：上一轮还在跑（bq 慢）就让位，下一小时整天重取会补上 ──────────
@@ -143,55 +149,103 @@ fetch_days() {
   # bq 的 json 输出把数字给成字符串；空结果是 [] 或空串
   # ⚠️ 行数据走文件（--slurpfile），不作 --argjson 参数：回填 7 天上千行，作参数会撞 ARG_MAX
   local rowsf="$DIAG_DIR/.rows.$$.json"
-  printf '%s' "${rows:-[]}" | jq -c '[ .[] | .devices |= tonumber | .users |= tonumber | .events |= tonumber ]' > "$rowsf" \
-    || fail "小时聚合结果不是合法 JSON"
-  local fetched_at; fetched_at="$(date +%s)"
-  # upsert：这些 UTC 日对应的 MYT 小时整段替换（UTC D 日 = MYT D 08 时 ～ D+1 07 时）；超过保留期的丢掉
-  # 保留期按**判定小时**往回算，不按真实当前时间：回放旧小时（CRASH_REPORT_DIAG_HOUR）时基线不被删掉
-  local keep_from; keep_from="$(TZ=Asia/Kuala_Lumpur date -r $((H_EPOCH - DIAG_KEEP_DAYS * 86400)) '+%Y-%m-%d %H')"
-  local tmp="$HOURLY.tmp.$$"
-  { [ -s "$HOURLY" ] && cat "$HOURLY"; true; } | jq -c --argjson days "$(printf '%s\n' "$@" | jq -R . | jq -sc .)" \
-      --slurpfile new "$rowsf" --arg keep "$keep_from" -s '
-    def utcday: (.h + ":00" | strptime("%Y-%m-%d %H:%M") | mktime - 8 * 3600 | strftime("%Y%m%d"));
-    ([ .[] | select((utcday as $u | $days | index($u)) | not) ] + $new[0])
-    | map(select(.h >= $keep)) | sort_by(.h) | .[]' > "$tmp" || fail "写本地小时聚合失败"
-  mv "$tmp" "$HOURLY"
-  jq -c --argjson s "$srcs" --argjson at "$fetched_at" \
-     'reduce ($s | to_entries[]) as $e (.; .[$e.key] = {src: $e.value, at: $at})' \
-     <<<"$( [ -s "$COVERAGE" ] && cat "$COVERAGE" || echo '{}' )" > "$COVERAGE.tmp.$$" || fail "写 coverage.json 失败"
-  mv "$COVERAGE.tmp.$$" "$COVERAGE"
+  printf '%s' "${rows:-[]}" | jq -c '[ .[] | .devices |= tonumber | .users |= tonumber | .events |= tonumber ]' \
+    | jq -c 'map(. + {src: "ga4"})' > "$rowsf" || fail "小时聚合结果不是合法 JSON"
+  upsert_hourly ga4 "$rowsf" "$@"
+  write_coverage "$COVERAGE" "$srcs"
   local nrows; nrows="$(jq length "$rowsf")"
   rm -f "$rowsf"
   audit fetch "取数" "$(jq -cn --arg s "$sufs" --argjson n "$nrows" '{suffixes:$s,rows:$n}')"
-  echo "  写入 ${nrows} 行"
+  echo "  写入 ${nrows} 行（GA4）"
+}
+
+# PostHog 一侧：$@=UTC 日期 YYYYMMDD。一条 HogQL 查最早到最晚那一天（不计费），只把列出的日 upsert 进本地。
+fetch_days_ph() {
+  local d lo hi srcs="{}" v="$DIAG_DIR/.phv.$$.json" f="$DIAG_DIR/.ph.$$.json"
+  lo="$(printf '%s\n' "$@" | sort | head -1)"; hi="$(printf '%s\n' "$@" | sort | tail -1)"
+  jq -n --arg a "$(date -u -j -f '%Y%m%d %H%M%S' "$lo 000000" '+%Y-%m-%d %H:%M:%S')" \
+        --arg b "$(date -u -j -v+1d -f '%Y%m%d %H%M%S' "$hi 000000" '+%Y-%m-%d %H:%M:%S')" '{t0: $a, t1: $b}' > "$v"
+  ph_query diag-hourly.hogql "$v" "$f" || fail "取 PostHog 小时聚合失败（UTC ${lo} ～ ${hi}）"
+  jq -c 'map(. + {src: "posthog"})' < "$f" > "$f.r" && mv "$f.r" "$f" || fail "PostHog 小时聚合结果不是合法 JSON"
+  for d in "$@"; do srcs="$(jq -c --arg d "$d" '.[$d] = "posthog"' <<<"$srcs")"; done
+  upsert_hourly posthog "$f" "$@"
+  write_coverage "$COVERAGE_PH" "$srcs"
+  local nrows; nrows="$(jq length "$f")"
+  rm -f "$v" "$f"
+  audit fetch "取数" "$(jq -cn --arg s "posthog ${lo}-${hi}" --argjson n "$nrows" '{suffixes:$s,rows:$n}')"
+  echo "  写入 ${nrows} 行（PostHog，UTC ${lo} ～ ${hi}）"
+}
+
+# upsert_hourly <ga4|posthog> <行文件> <UTC 日…>：该来源在这些 UTC 日对应的 MYT 小时整段替换
+#（UTC D 日 = MYT D 08 时 ～ D+1 07 时）；⛔ 只换同一来源的行，另一来源原样保留；超过保留期的丢掉。
+# 新行里不在这些 UTC 日的（PostHog 按最早～最晚整段查，中间可能夹着不用补的日）丢掉，不覆盖已有的。
+# 保留期按**判定小时**往回算，不按真实当前时间：回放旧小时（CRASH_REPORT_DIAG_HOUR）时基线不被删掉
+upsert_hourly() {
+  local src="$1" rowsf="$2"; shift 2
+  local keep_from; keep_from="$(TZ=Asia/Kuala_Lumpur date -r $((H_EPOCH - DIAG_KEEP_DAYS * 86400)) '+%Y-%m-%d %H')"
+  local tmp="$HOURLY.tmp.$$"
+  { [ -s "$HOURLY" ] && cat "$HOURLY"; true; } | jq -c --argjson days "$(printf '%s\n' "$@" | jq -R . | jq -sc .)" \
+      --slurpfile new "$rowsf" --arg keep "$keep_from" --arg src "$src" -s '
+    def utcday: (.h + ":00" | strptime("%Y-%m-%d %H:%M") | mktime - 8 * 3600 | strftime("%Y%m%d"));
+    def listed: (utcday as $u | $days | index($u)) != null;
+    ([ .[] | select(((.src // "ga4") != $src) or (listed | not)) ] + [ $new[0][] | select(listed) ])
+    | map(select(.h >= $keep)) | sort_by(.h) | .[]' > "$tmp" || fail "写本地小时聚合失败"
+  mv "$tmp" "$HOURLY"
+}
+
+# write_coverage <覆盖文件> <{UTC 日: src}>：记下这些日取自哪里、何时取的
+write_coverage() {
+  local fetched_at; fetched_at="$(date +%s)"
+  jq -c --argjson s "$2" --argjson at "$fetched_at" \
+     'reduce ($s | to_entries[]) as $e (.; .[$e.key] = {src: $e.value, at: $at})' \
+     <<<"$( [ -s "$1" ] && cat "$1" || echo '{}' )" > "$1.tmp.$$" || fail "写 $(basename "$1") 失败"
+  mv "$1.tmp.$$" "$1"
 }
 
 step "取当前小时所在 UTC 日"
 fetch_days "$DIAG_MAX_BYTES_ONE" "$H_DAY"
+fetch_days_ph "$H_DAY"
 
 step "基线完整性"
 # 前 7 天同一小时分别落在哪个 UTC 日（MYT 与 UTC 差整 8 小时，同一小时的 UTC 日就是往前推 k 天）
 _need_days="$(for k in 1 2 3 4 5 6 7; do utc_day $((H_EPOCH - k * 86400)); done | jq -R . | jq -sc .)"
 _missing="$(diag_need_dates "$( [ -s "$COVERAGE" ] && cat "$COVERAGE" || true )" "$_need_days")"
+_missing_ph="$(diag_need_dates "$( [ -s "$COVERAGE_PH" ] && cat "$COVERAGE_PH" || true )" "$_need_days")"
 if [ -n "$_missing" ]; then
-  echo "  本地基线缺 UTC 日：${_missing} → 回填（⛔ 不当作基线为 0）"
+  echo "  本地基线（GA4）缺 UTC 日：${_missing} → 回填（⛔ 不当作基线为 0）"
   # shellcheck disable=SC2086
   fetch_days "$DIAG_MAX_BYTES_BACKFILL" $_missing
-  _still="$(diag_need_dates "$(cat "$COVERAGE")" "$_need_days")"
-  [ -z "$_still" ] || fail "回填后基线仍不完整：${_still}"
+fi
+if [ -n "$_missing_ph" ]; then
+  echo "  本地基线（PostHog）缺 UTC 日：${_missing_ph} → 回填（⛔ 不当作基线为 0）"
+  # shellcheck disable=SC2086
+  fetch_days_ph $_missing_ph
+fi
+if [ -n "$_missing$_missing_ph" ]; then
+  _still="$(diag_need_dates "$(cat "$COVERAGE")" "$_need_days") $(diag_need_dates "$(cat "$COVERAGE_PH")" "$_need_days")"
+  [ -z "${_still// /}" ] || fail "回填后基线仍不完整：${_still}"
 else
-  echo "  前 7 天同小时基线完整"
+  echo "  前 7 天同小时基线完整（GA4 与 PostHog）"
 fi
 
 step "判定"
-_win="$(jq -c --arg h "$HOUR" -s '
+# _win_raw = 两边原样（断数判定用）；_win = 每个平台 × 版本 × 天二选一后（激增判定用）
+_win_raw="$(jq -c --arg h "$HOUR" -s '
   def ep: (. + ":00" | strptime("%Y-%m-%d %H:%M") | mktime);
   ($h | ep) as $t
   | [ .[] | (.h | ep) as $x
           | select(($t - $x) >= 0 and ($t - $x) <= 7 * 86400 and ((($t - $x) % 86400 == 0) or ($t - $x) == 3600)) ]' "$HOURLY")"
+_win="$(diag_pick h <<<"$_win_raw")"
 _cur="$(jq -c --arg h "$HOUR" '[ .[] | select(.h == $h) ]' <<<"$_win")"
 _ev="$(diag_evaluate "$_cur" "$_win" "$HOUR" "$DIAG_MIN" "$DIAG_MULT")"
-_miss="$(diag_missing "$_win" "$HOUR")"
+# 「数据缺失」按来源各判各的（design 决策 8，core diag_missing）：⛔ 两边合起来判，GA4 导出中断会被 PostHog 的行盖住；
+# 判据要求前 7 天同小时**每天**都有行——量小的一边（刚放量的 PostHog、用户迁走后的 GA4）夜里两小时为 0 是常态，不能报。
+_miss_src="$(diag_missing "$_win_raw" "$HOUR")"
+_miss=ok; _miss_label=""
+if [ -n "$_miss_src" ]; then
+  _miss=missing
+  _miss_label="$(printf '%s' "$_miss_src" | sed -e 's/posthog/PostHog/' -e 's/ga4/GA4/' -e 's/ /、/g')"
+fi
 printf '%s\n' "$_ev" > "$DIAG_DIR/last-eval.json"   # 本小时全部签名的判定（排障 / 回填验收用）
 # 判定时刻的计数留档（审查 G3）：hh:05 判的是「当时进表的量」，晚到事件可能让它低于事后完整值。
 # 达到下限一半以上的签名逐小时追加，首周（2026-12-04）汇总时与次日完整数据对比，量出晚到的影响再决定要不要复判。
@@ -207,7 +261,7 @@ jq -r '.[] | select(.verdict == "spike") | "    🚨 \(.sig)：\(.devices) 台 v
 _miss_send=skip
 if [ "$_miss" = missing ]; then
   _miss_send="$(diag_dedupe "$_state" "__data_missing__" "$NOW" "$DIAG_WINDOW")"
-  echo "  ⚠️ 数据缺失：${HOUR}:00 与前一小时无任何接口类数据（去重判定：${_miss_send}）"
+  echo "  ⚠️ 数据缺失：${HOUR}:00 与前一小时 ${_miss_label} 一侧无任何接口类数据（去重判定：${_miss_send}）"
 fi
 # 命中记录（不论投不投递都记）：首周观察项要的是「判定命中了什么」
 jq -c --arg h "$HOUR" --arg run "$RUN_ID" --arg miss "$_miss" --argjson send "$_send" \
@@ -233,13 +287,24 @@ if [ "$_n_send" -gt 0 ] || [ "$_miss_send" = send ]; then
     _rc=0
     _bd="$(trap - ERR; BQ_MAX_BYTES="$DIAG_MAX_BYTES_ONE" bqq json "$(q_render diag-breakdown.sql SUFFIXES="'$_suf'" HOUR="$HOUR" SIG_KEYS="$_keys")")" || _rc=$?
     [ "$_rc" -eq 0 ] || fail "取分布失败（rc=${_rc}）"
+    # PostHog 一侧同一小时同一批签名（签名来自数据，⛔ 只走 values 占位，不拼进查询文本）
+    jq -n --arg a "$(date -u -r "$H_EPOCH" '+%Y-%m-%d %H:%M:%S')" --arg b "$(date -u -r "$NOW" '+%Y-%m-%d %H:%M:%S')" \
+          --argjson s "$(jq -c '[.[].sig]' <<<"$_send")" '{t0: $a, t1: $b, sigs: $s}' > "$DIAG_DIR/.phv.$$.json"
+    ph_query diag-breakdown.hogql "$DIAG_DIR/.phv.$$.json" "$DIAG_DIR/.ph.$$.json" || fail "取 PostHog 分布失败"
+    # 两边合并：affected 是各来源各自的受影响设备数，按签名两边相加（每个版本只在一边，不重复）
+    _bd="$(jq -c --argjson g "${_bd:-[]}" '
+      ([ $g[] | . + {src: "ga4"} ] + [ .[] | . + {src: "posthog"} ])
+      | map(.devices |= tonumber | .affected |= tonumber)
+      | (group_by(.sig) | map({key: .[0].sig, value: (group_by(.src) | map(.[0].affected) | add)}) | from_entries) as $aff
+      | map(.affected = $aff[.sig] | del(.src))' "$DIAG_DIR/.ph.$$.json")"
+    rm -f "$DIAG_DIR/.phv.$$.json" "$DIAG_DIR/.ph.$$.json"
     _send="$(jq -c --argjson bd "${_bd:-[]}" '
       ($bd | map(.devices |= tonumber | .affected |= tonumber)) as $b
       | map(. as $x | . + {geo: [ $b[] | select(.dim == "geo" and .sig == $x.sig) ],
                            cfg: [ $b[] | select(.dim == "cfg" and .sig == $x.sig) ]})' <<<"$_send")"
   fi
   step "投递"
-  _card="$(diag_card "$_send" "$HOUR" "$( [ "$_miss_send" = send ] && echo missing || echo ok )" "$DIAG_MIN" "$DIAG_MULT")"
+  _card="$(diag_card "$_send" "$HOUR" "$( [ "$_miss_send" = send ] && printf '%s' "$_miss_label" || echo ok )" "$DIAG_MIN" "$DIAG_MULT")"
   printf '%s\n' "$_card" > "$DIAG_DIR/last-card.json"
   if [ -z "$DIAG_TO" ]; then
     echo "  ⏭️ 未设置 CRASH_REPORT_DIAG_ALERT_CHAT_ID（\$STATE/local.env），跳过投递；卡片已写 $DIAG_DIR/last-card.json"
@@ -276,7 +341,7 @@ printf '%s\n' "$_new_state" > "$DIAG_STATE_FILE.tmp.$$" && mv "$DIAG_STATE_FILE.
 # fail 只写 health（ok:false）与审计、非零退出；标记留到下一次成功才删，与其它失败同一套「只报一次」。
 if [ "$_miss" = missing ]; then
   : > "$ALERT_FLAG"
-  fail "数据缺失：${HOUR}:00 与前一小时没有任何接口类诊断数据（前 7 天同小时有）——上报或导出可能中断"
+  fail "数据缺失：${HOUR}:00 与前一小时 ${_miss_label} 一侧没有任何接口类诊断数据（前 7 天同小时每天都有）——上报或导出可能中断"
 fi
 jq -n --arg t "$TS" --arg h "$HOUR" --argjson sp "$_n_spike" --argjson se "$_n_send" --arg miss "$_miss" \
   '{last_run:$t, run_id:$t, ok:true, hour:$h, spikes:$sp, sent:$se, data:$miss}' > "$HEALTH_FILE"

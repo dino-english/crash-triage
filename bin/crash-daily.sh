@@ -1601,7 +1601,7 @@ TIER_N_URGENT=$(( ${TIER_N_URGENT:-0} + $(printf '%s' "$TIER_METRIC" | jq 'lengt
 echo "  三档：🚨 ${TIER_N_URGENT} · ⏳ ${TIER_N_RELEASE:-0} · 👀 ${TIER_N_WATCH:-0}"
 
 # ── 技术诊断报错（change crash-tech-diagnostics）─────────────────────────
-# 前一完整 MYT 日的 GA4 app_diagnostic 签名聚合；只进文档「五、技术诊断报错」与（激增日 / 取数失败时）卡片一行。
+# 前一完整 MYT 日的 app_diagnostic 签名聚合（GA4 + PostHog，每个平台 × 版本 × 天取设备多的一边）；只进文档「五、技术诊断报错」与（激增日 / 取数失败时）卡片一行。
 # ⛔ 取数失败不得让日报失败（`|| _drc=$?`，不走 fail），也不得冒充「无报错」：DIAG_OK=0 时文档与卡片都写「取数失败」。
 # ⛔ 原有崩溃 / 性能 / 放量各段零改动：本节的数据只从这里流向它自己的渲染点。
 step "技术诊断报错"
@@ -1611,8 +1611,13 @@ DIAG_OK=0; DIAG_EV='[]'; DIAG_SPIKES='[]'
 DIAG_ROWS_FILE="$TMP/diag-rows.json"
 _drc=0
 diag_daily_ensure "$DIAG_DAY" 7 60000000000 || _drc=$?   # 7 天回填最多 8 张表 × ~4.3 GB
+# 某个来源当天 0 行、而前 7 天每天都有 = 断数（PostHog 摄入中断时接口照样回 200 + 空结果），⛔ 不冒充「无报错」（design 决策 8）
+if [ "$_drc" -eq 0 ]; then
+  _dgap="$(trap - ERR; diag_daily_gaps "$DIAG_DAY" "$DIAG_DAY")" || _drc=$?
+  if [ -n "${_dgap:-}" ]; then echo "  ⚠️ 技术诊断：疑似断数（某来源当天 0 行而前 7 天每天都有）：${_dgap}"; _drc=3; fi
+fi
 # 本节版本集 = 日报其他按版本分列的表同一份列集合（最新 N 版 ∪ 性能可得版 ∪ 主力补充列，IOS_COLS / AND_COLS）。
-# ⚠️ 只用最新 N 版时，iOS 最新两版常是内部包（11-26：2.2.0 只有 4 个会话、2.1.2 无诊断数据），
+# ⚠️ 只用最新 N 版时，iOS 最新两版常是内部包（11-26：2.2.0 只有 4 个会话；2.1.2 那时只查 GA4，诊断为 0——它改发 PostHog 了），
 #    这一节 iOS 整段为空——读者会读成「iOS 无报错」，而用户实际都在主力版 2.1.1 上。
 DIAG_VERS="$(trap - ERR; jq -cn --arg i "$IOS_COLS" --arg a "$AND_COLS" \
   '{IOS: [$i | splits("\\s+") | select(. != "")], ANDROID: [$a | splits("\\s+") | select(. != "")]}')" || DIAG_VERS='{}'
@@ -2910,7 +2915,7 @@ XMLPY
 step "生成日报文档"
 # 技术诊断报错两张表：CSV 已在「技术诊断报错」一步算好（md / xml 两个渲染点共用，⛔ 不各算一遍）
 DIAG_HEAD='平台,版本,签名,设备,用户,前 7 日均值,激增'
-DIAG_NOTE="来源 GA4 app_diagnostic，${DIAG_DAY} 全天（MYT），版本列同本报告其他按版本分列的表（最新 ${VERSION_COUNT} 版 + 主力补充列：iOS $(printf '%s' "$IOS_COLS" | tr '\n' ' ' | sed 's/ *$//') · Android $(printf '%s' "$AND_COLS" | tr '\n' ' ' | sed 's/ *$//')），按受影响设备降序取前 ${DIAG_TOP_N}。接口类 = api_result（物理请求）的 target × code，排除 2xx 与空 code；流程类 = diagnostic_id × reason，只取 tech_fail。设备按 user_pseudo_id 去重，用户按 user_id 去重（访客不计）。「前 7 日均值」是同平台同版本同签名的前 7 天均值。「激增」按签名级（跨平台、跨版本相加）判：≥${DIAG_DAILY_MIN} 台且 ≥${DIAG_DAILY_MULT}× 前 7 天均值；流程类未回测，不判。只给数字，不判断根因。"
+DIAG_NOTE="来源 app_diagnostic：$(diag_ph_note)。${DIAG_DAY} 全天（MYT），版本列同本报告其他按版本分列的表（最新 ${VERSION_COUNT} 版 + 主力补充列：iOS $(printf '%s' "$IOS_COLS" | tr '\n' ' ' | sed 's/ *$//') · Android $(printf '%s' "$AND_COLS" | tr '\n' ' ' | sed 's/ *$//')），按受影响设备降序取前 ${DIAG_TOP_N}。接口类 = api_result（物理请求）的 target × code，排除 2xx 与空 code；流程类 = diagnostic_id × reason，只取 tech_fail。设备按 user_pseudo_id（PostHog 里是同一个值 firebase_id）去重，用户按 user_id 去重（访客不计）。「前 7 日均值」是同平台同版本同签名的前 7 天均值。「激增」按签名级（跨平台、跨版本相加）判：≥${DIAG_DAILY_MIN} 台且 ≥${DIAG_DAILY_MULT}× 前 7 天均值；流程类未回测，不判。只给数字，不判断根因。"
 
 REPORT="$STATE/reports/$DAY-daily.md"
 {
