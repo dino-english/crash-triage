@@ -108,7 +108,10 @@ diag_daily_table() {
 
 # diag_plan <alerted.json 内容> <diag_evaluate 输出> <小时> <当前 epoch 秒> <窗口秒>
 # → {send:[<evaluate 条目> + {first}], state:<新的 alerted.json>}
-#   本轮激增的首个小时：上一小时（或本小时，重跑时）也在激增 → 沿用 first，否则就是本小时。
+#   本轮激增的首个小时：状态里最近一次激增落在 [上一小时, 下一小时]（下一小时 = 先复判、再判本小时时，
+#   或同一小时重跑时状态已前移一小时）→ 沿用 first（取与本小时较早的那个），否则就是本小时。
+#   last 只前移不后退：复判上一小时不能把 last 拉回去、丢掉更早的 first。
+#   状态比本小时新一小时以上（回放旧小时）→ 状态条目原样保留：⛔ 不把不连续的激增并成一段（审查 2026-11-27 #3）。
 #   ⚠️ 这里**不改 sent**：投递成功后才由 diag_mark_sent 写入——未配置目标或投递失败时，
 #      下一小时仍在激增就会再试，不会因为「记成已发」而整整 6 小时没人知道。
 #   状态里 last 早于 7 天的条目清掉，文件不无限增长。
@@ -118,15 +121,18 @@ diag_plan() {
   jq -cn --argjson a "$a" --argjson ev "$2" --arg h "$3" --argjson now "$4" --argjson w "$5" \
     "$_DIAG_JQ_DEFS"'
     hour_shift($h; -1) as $h1
+    | hour_shift($h; 1) as $h2
     | hour_shift($h; -24 * 7) as $old
     | [ $ev[] | select(.verdict == "spike")
         | ($a[.sig] // {}) as $p
-        | . + {first: (if ($p.last == $h1 or $p.last == $h) and $p.first != null then $p.first else $h end),
-               sent_prev: ($p.sent // null),
+        | ($p.last // "") as $pl
+        | (if $pl >= $h1 and $pl <= $h2 and $p.first != null then ([$p.first, $h] | min) else $h end) as $first
+        | . + {first: $first,
+               st: (if $pl > $h2 then $p else {sent: ($p.sent // null), first: $first, last: ([$pl, $h] | max)} end),
                decision: diag_send($p.sent // null; $now; $w)} ] as $sp
-    | { send: [ $sp[] | select(.decision == "send") | del(.decision, .sent_prev) ],
+    | { send: [ $sp[] | select(.decision == "send") | del(.decision, .st) ],
         state: ( ($a | with_entries(select((.value.last // "") >= $old)))
-                 + ( [ $sp[] | {key: .sig, value: {sent: .sent_prev, first: .first, last: $h}} ] | from_entries ) ) }'
+                 + ( [ $sp[] | {key: .sig, value: .st} ] | from_entries ) ) }'
 }
 
 # diag_mark_sent <alerted.json 内容> <签名 JSON 数组> <当前 epoch 秒> → 新的 alerted.json
@@ -196,8 +202,10 @@ diag_missing() {
     | join(" ")'
 }
 
-# diag_card <待发条目 JSON（diag_plan 的 send，每条可带 geo/cfg 分布）> <小时> <ok | 断数来源的显示名，如「GA4」> <下限> <倍数>
+# diag_card <待发条目 JSON（diag_plan 的 send，每条可带 geo/cfg 分布）> <小时> <ok | 断数来源的显示名，如「GA4」> <下限> <倍数> [recheck]
 # → 飞书卡片 JSON（schema 2.0）
+#   第 6 个参数为 recheck = 复判补报卡：<小时> 是上一小时，整点后 5 分钟判定时没到阈值、整点后 1 小时 5 分钟复判才到
+#  （晚到事件）。标题、表头与脚注第一句随之改写，其余版式相同。
 #   geo = [{k1:plat, k2:country, k3:ver, devices, affected}]；cfg = [{k1:source_type, k2:data_id, devices, affected}]
 #   ⛔ 只给分布，不写根因（spec「每小时激增告警」）。「共同点」只是把各签名的分布并起来数，不是结论。
 #   版式（2026-11-27 按读卡顺序重排）：标题带签名数 → 共同点一行 → 一张表（设备 / 账号 / 基线 / 倍数）
@@ -205,8 +213,9 @@ diag_missing() {
 #   ⚠️ 倍数 = 设备 / max(基线, 1)，与判定口径一致（基线不足 1 按 1 计）。
 #   ⚠️ 配置分布写「受影响 M 台里 N 台上报」不写构成比：一台设备同一小时可拿到多份配置，相加会超过 100%。
 diag_card() {
-  jq -cn --argjson s "$1" --arg h "$2" --arg miss "$3" --argjson min "$4" --argjson mult "$5" '
-    def plat: if . == "IOS" then "iOS" elif . == "ANDROID" then "Android" else . end;
+  jq -cn --argjson s "$1" --arg h "$2" --arg miss "$3" --argjson min "$4" --argjson mult "$5" --arg mode "${6:-}" '
+    ($mode == "recheck") as $re
+    | def plat: if . == "IOS" then "iOS" elif . == "ANDROID" then "Android" else . end;
     def ratio: (.devices / ([.baseline, 1] | max)) as $r | if $r >= 10 then ($r | round | tostring) else (($r * 10 | round) / 10 | tostring) end;
     def hm: .[11:13] + ":00";
     def country: if . == "" then "未知" else . end;
@@ -222,7 +231,7 @@ diag_card() {
         "策略配置：受影响 " + ((.cfg[0].affected // .devices) | tostring) + " 台里 "
         + ([.cfg[].devices] | add | tostring) + " 台次上报 · "
         + ([ (.cfg | sort_by(-.devices) | .[:3])[] | .k1 + " " + .k2 + " " + (.devices | tostring) + " 台" ] | join(" · "))
-      elif has("cfg") then "策略配置：受影响设备本小时没有上报"
+      elif has("cfg") then "策略配置：受影响设备" + (if $re then "该小时" else "本小时" end) + "没有上报"
       else "" end;
     # 共同点：多个签名时，把分布并起来看（平台、错误码相同就点出来；设备最多的版本、国家）
     def common:
@@ -240,13 +249,14 @@ diag_card() {
     | {schema: "2.0", config: {width_mode: "fill"},
        header: {template: (if $n > 0 then "red" else "orange" end),
                 title: {tag: "plain_text",
-                        content: (if $n > 0 then "🚨 技术诊断报错激增 · " + $h + ":00（MYT）· " + ($n | tostring) + " 个接口"
+                        content: (if $n > 0 and $re then "🚨 技术诊断报错激增（复判补报）· " + $h + ":00（MYT）· " + ($n | tostring) + " 个接口"
+                                  elif $n > 0 then "🚨 技术诊断报错激增 · " + $h + ":00（MYT）· " + ($n | tostring) + " 个接口"
                                   else "⚠️ 技术诊断数据缺失 · " + $h + ":00（MYT）" end)}},
        body: {elements: (
          (if $n > 0 then
             (common as $cm | if $cm == "" then [] else [{tag: "markdown", content: ("**" + $cm + "**")}] end)
             + [{tag: "markdown", content: (
-                 "| 接口 × 错误码 | 本小时 | 前 7 天同小时 | 倍数 |\n|---|---|---|---|\n"
+                 "| 接口 × 错误码 | " + (if $re then "该小时" else "本小时" end) + " | 前 7 天同小时 | 倍数 |\n|---|---|---|---|\n"
                  + ([ $s[] | "| " + .target + " × " + .code
                       + " | **" + (.devices | tostring) + " 台** · " + (.users | tostring) + " 账号"
                       + " | " + (.baseline | tostring) + " | " + ratio + "×"
@@ -260,7 +270,8 @@ diag_card() {
               [{tag: "markdown", content: ("**数据缺失**：" + $h + ":00 与前一小时 " + $miss + " 一侧没有任何接口类诊断数据，而前 7 天同一小时每天都有——不是「平稳」，可能是上报或导出中断")}]
             else [] end)
          + [{tag: "div", text: {tag: "plain_text", text_size: "notation", text_color: "grey",
-              content: ("「本小时」是整点后 5 分钟判定时已入表的量，晚到事件只会让它更大（实测曾只到完整数据的一半）"
+              content: ((if $re then "复判补报：这一小时在整点后 5 分钟那次没有判成激增（通常是晚到事件还没进表），整点后 1 小时 5 分钟用更完整的数据复判才达到，所以晚报一小时"
+                         else "「本小时」是整点后 5 分钟判定时已入表的量，晚到事件只会让它更大（实测曾只到完整数据的一半）；下一小时会复判一次，补报漏掉的签名" end)
                         + " · 激增 = ≥" + ($min | tostring) + " 台且 ≥" + ($mult | tostring) + "× 前 7 天同小时均值，同一签名 6 小时内只报一次"
                         + (if [ $s[] | select(.users == 0) ] | length > 0 then " · 0 账号 = 这些设备都没登录" else "" end)
                         + " · 来源：app_diagnostic · api_result（物理请求），GA4 与 PostHog Logs 同一版本取设备多的一边（PostHog 只算 production、无国家）"

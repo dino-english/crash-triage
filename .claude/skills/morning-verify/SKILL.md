@@ -24,5 +24,5 @@ bq/hermes 需先 `. $S/path.env; export PATH`。
    - `jq -c . $S/health-diag.json`：`ok:true`，且 `last_run` 在最近 1 小时内。`ok:false` 且 `error` 以「数据缺失」开头时，看写的是哪一侧：GA4 → 查实时表是不是停更了；PostHog → 查摄入和 key（见下面 PostHog 一条）。
    - `sqlite3 "file:$HOME/.hermes/cron/executions.db?immutable=1" "SELECT status,claimed_at FROM executions WHERE job_id='01c4ed7d509e' ORDER BY claimed_at DESC LIMIT 6;"` 应该每小时一条。
    - PostHog 一侧（2026-11-27 起；两边都取，每个平台 × 版本 × 天取设备多的一边（App 从 iOS 2.1.2 / Android 2.1.1 起改发 PostHog，没合入迁移的分支仍发 GA4））：`jq -r 'keys | join(" ")' $S/diag/coverage-posthog.json` 应包含今天的 UTC 日；`ok:false` 且日志里是「PostHog：…」时，先查 `local.env` 有没有 `CRASH_REPORT_POSTHOG_API_KEY`、PostHog 接口回了什么（日志里有 HTTP 码和 detail 原文）。
-   - 命中记录看 `tail $S/diag/hits.jsonl`。日报卡片上出现「L0 … 没有运行 / 最近一次失败」那一行时，从这一项开始查。
+   - 命中记录看 `tail $S/diag/hits.jsonl`（`recheck:true` 是复判上一小时的行，`sent:true` 才是补报发出的）。日报卡片上出现「L0 … 没有运行 / 最近一次失败」那一行时，从这一项开始查。
 6. 失败排查入口：`ls -t $S/logs | head` + `$S/runs/<日期>/L{1,2}/latest/`。

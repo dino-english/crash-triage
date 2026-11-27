@@ -32,7 +32,7 @@ STATE="${CRASH_REPORT_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/crash-tri
 | `diag-hourly`（L0） | `01c4ed7d509e`（2026-11-26 注册） | `5 * * * *` | `~/.hermes/scripts/diag-hourly.sh` |
 
 **L0 每小时诊断告警**（change `crash-tech-diagnostics`）：
-- 注册：`hermes cron create '5 * * * *' --name diag-hourly --no-agent --script diag-hourly.sh`；包装脚本由 `install.sh` 生成（⚠️ `update.sh` 不生成，只在缺失时提示）。整点后 5 分钟跑，判定上一个完整 MYT 小时。
+- 注册：`hermes cron create '5 * * * *' --name diag-hourly --no-agent --script diag-hourly.sh`；包装脚本由 `install.sh` 生成（⚠️ `update.sh` 不生成，只在缺失时提示）。整点后 5 分钟跑，判定上一个完整 MYT 小时，并复判再往前一小时（晚到事件，复判时才达到阈值的签名发「复判补报」卡；`hits.jsonl` / `evals.jsonl` 的复判行带 `recheck:true`，`health-diag.json` 的 `recheck_sent` 是补报数）。
 - 投递目标**只认** `$STATE/local.env` 的 `CRASH_REPORT_DIAG_ALERT_CHAT_ID`，未设置 → 照常计算、不投递、日志写原因，⛔ 不回落日报群。L0 自身失败的告警卡也只发这个目标，且只在「上次成功 → 本次失败」时发一次（标记 `$STATE/diag/.alerted-failure`，下次成功才删）。
 - 回退：`hermes cron pause 01c4ed7d509e` 停 L0；L0 只写 `$STATE/diag/` 里的小时聚合 / 去重状态与 `health-diag.json`，⛔ 不碰 L1 / L2 的基准。停用后这些文件留着无害；彻底撤掉就删 `diag/hourly.jsonl`、`coverage.json`、`coverage-posthog.json`、`alerted.json`、`hits.jsonl`（⚠️ `daily*.json*` 是 L1 / L2 的日聚合，不要一起删）。
 - **数据缺失**（某一侧——GA4 或 PostHog，各判各的——本小时与上一小时都没有接口类数据，而前 7 天同小时**每天**都有）时：发一张橙色「数据缺失」卡（6 小时去重），之后**非零退出**、`health-diag.json` 写 `ok:false`，不再叠加一张泛化的失败卡。spec 对这种情况的要求是「检查失败不冒充平稳」。
@@ -109,7 +109,7 @@ $STATE/                          # ${XDG_STATE_HOME:-~/.local/state}/crash-triag
 ├── logs/                        保留 60 天，**整目录按 mtime 清**（含 bq-stderr-<TS>.log）
 ├── publish/                     每次运行 rm -rf 重建的投递目录
 ├── diag/                        技术诊断（change crash-tech-diagnostics），见下表
-│   ├── hourly.jsonl / coverage.json / alerted.json / hits.jsonl / last-*.json   L0 每小时告警
+│   ├── hourly.jsonl / coverage.json / alerted.json / hits.jsonl / last-*.json（含 last-card-recheck.json）   L0 每小时告警
 │   ├── coverage-posthog.json                                                   L0 的 PostHog 一侧覆盖
 │   └── daily.jsonl / daily-coverage.json / daily-coverage-posthog.json          L1 / L2 的日聚合
 ├── path.env                     setup.sh 探测生成（只有 PATH），install.sh / update.sh 每次覆写

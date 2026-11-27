@@ -6,13 +6,16 @@
 # 与 lark-cli（只记录调用）。零 BigQuery 字节、零 PostHog 请求、零飞书调用。投递目标只能经 $STATE/local.env 给——这正是被测的约束之一。
 #
 # 夹具数据（MYT 2026-11-23 18 点判定，UTC 日 20261123；基线 UTC 日 20261116～20261122）：
-#   /app/v2/onboarding-journey/bootstrap × http_409：前 7 天 18 点每天 2 台 → 当天 18 点 35 台、19 点 40 台（激增）
+#   /app/v2/onboarding-journey/bootstrap × http_409：前 7 天 18 点每天 2 台 → 当天 18 点 35 台、19 点 40 台（激增）；
+#     17 点 13 台（前 7 天 17 点 0 台）→ 判 18 点时复判 17 点也激增，本轮首个小时 = 17 点
 #   /app/v1/shop/purchase × biz_40010：每天 18 点 40 台 → 当天 42 台（平稳）
 # PostHog 一侧（iOS 2.1.2，分界之后的版本，design 决策 8）：
 #   bootstrap × http_409：前 7 天 18 点每天 1 台 → 当天 18 点 10 台 → 签名级 35 + 10 = 45 台 vs 基线 3
 #   GA4 里混进一行 iOS 2.1.2 的 /x/ga4-212 × http_500（2 台，内部包零星数据）：同一天 PostHog 一侧 25 台更多，
 #     读取时只留 PostHog（core diag_pick），⛔ 这行不参与判定
 #   GA4 里 Android 2.2.0（没合入迁移的开发分支，只在 GA4）/x/and-220 × http_500：每天 18 点 14 台 → 当天 15 台（平稳），⛔ 不能丢
+#   /x/late × http_401：只在当天 21 点 12 台（GA4）→ 判 22 点时复判 21 点补报（⑨）
+#   /x/now × http_500：只在当天 22 点 11 台（GA4）→ 判 22 点时本小时激增（⑨：同一轮两张卡、复判一侧失败不连累它）
 ROOT="${CRASH_REPORT_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}"
 . "$ROOT/bin/test/harness.sh"
 
@@ -36,6 +39,8 @@ rows.append({"h": "2026-11-23 18", "plat": "IOS", "ver": "2.1.2", "target": "/x/
 for d in range(16, 23):
     rows.append({"h": f"2026-11-{d} 18", "plat": "ANDROID", "ver": "2.2.0", "target": "/x/and-220", "code": "http_500", "devices": "14", "users": "14", "events": "14"})
 rows.append({"h": "2026-11-23 18", "plat": "ANDROID", "ver": "2.2.0", "target": "/x/and-220", "code": "http_500", "devices": "15", "users": "15", "events": "15"})
+rows.append({"h": "2026-11-23 21", "plat": "IOS", "ver": "2.1.1", "target": "/x/late", "code": "http_401", "devices": "12", "users": "9", "events": "30"})
+rows.append({"h": "2026-11-23 22", "plat": "IOS", "ver": "2.1.1", "target": "/x/now", "code": "http_500", "devices": "11", "users": "11", "events": "20"})
 json.dump(rows, open(sys.argv[1], "w"))
 ph = [{"h": f"2026-11-{d} 18", "plat": "IOS", "ver": "2.1.2", "target": "/app/v2/onboarding-journey/bootstrap", "code": "http_409", "devices": 1, "users": 1, "events": 1} for d in range(16, 23)]
 ph += [{"h": f"2026-11-23 {h}", "plat": "IOS", "ver": "2.1.2", "target": "/app/v2/onboarding-journey/bootstrap", "code": "http_409", "devices": n, "users": n, "events": n} for h, n in (("17", 3), ("18", 10), ("19", 12))]
@@ -107,10 +112,11 @@ rc=0; CRASH_REPORT_DIAG_ALERT_CHAT_ID=oc_should_be_ignored run "2026-11-23 18" |
 h_assert_eq "0" "$rc" "退出码 0"
 h_assert_eq "0" "$(nlark)" "⛔ 没有任何 lark-cli 调用（命令行的 oc_ 目标被忽略）"
 h_assert_contains "$(cat "$T/last.log")" "未设置 CRASH_REPORT_DIAG_ALERT_CHAT_ID" "日志写明跳过原因"
-h_assert_eq "2026-11-23 18	null" "$(st '.["/app/v2/onboarding-journey/bootstrap × http_409"] | [.first, (.sent|tostring)] | @tsv')" \
-  "状态记下本轮激增，但 sent 为空（没投递就不算发过）"
+h_assert_eq "2026-11-23 17	2026-11-23 18	null" "$(st '.["/app/v2/onboarding-journey/bootstrap × http_409"] | [.first, .last, (.sent|tostring)] | @tsv')" \
+  "状态记下本轮激增（复判 17 点也激增 → first 17 点），但 sent 为空（没投递就不算发过）"
 h_assert_eq "false" "$(st 'has("/app/v1/shop/purchase × biz_40010")')" "biz_40010 同小时基线 40 → 平稳，不进状态"
-h_assert_eq "1" "$(grep -c 'onboarding-journey' "$T/state/diag/hits.jsonl" | tr -d ' ')" "命中记录写入 hits.jsonl"
+h_assert_eq "2026-11-23 18	null
+2026-11-23 17	true" "$(grep 'onboarding-journey' "$T/state/diag/hits.jsonl" | jq -r '[.h, (.recheck|tostring)] | @tsv')" "命中记录写入 hits.jsonl：本小时一行、复判上一小时一行（recheck:true）"
 h_assert_eq "true" "$(jq -r .ok "$T/state/health-diag.json")" "health-diag.json ok"
 h_assert_contains "$(cat "$T/last.log")" "回填" "首次运行本地无基线 → 回填（⛔ 不当作基线为 0）"
 h_assert_eq "0" "$(grep -c 'affected AS' "$T/bq.sql" | tr -d ' ')" "没有投递目标 → 不跑分布查询"
@@ -135,7 +141,9 @@ echo 'export CRASH_REPORT_DIAG_ALERT_CHAT_ID="ou_fixture"' > "$T/state/local.env
 : > "$T/bq.calls"; : > "$T/bq.sql"
 rc=0; run "2026-11-23 18" || rc=$?
 h_assert_eq "0" "$rc" "退出码 0"
-h_assert_eq "1" "$(nlark)" "lark-cli 调用 1 次"
+h_assert_eq "1" "$(nlark)" "lark-cli 调用 1 次（两小时都激增的签名只进本小时那张卡，不另发复判卡）"
+h_assert_contains "$(cat "$T/lark.calls")" "从 17:00 起持续" "本小时卡片写明从复判出的 17 点起持续"
+h_assert_absent "$(cat "$T/lark.calls")" "复判补报" "⛔ 不发复判卡"
 h_assert_contains "$(cat "$T/lark.calls")" "--user-id ou_fixture" "ou_ 走 --user-id"
 h_assert_contains "$(cat "$T/lark.calls")" "Saudi Arabia" "卡片带国家分布"
 h_assert_contains "$(cat "$T/lark.calls")" "2124743975533666306" "卡片带策略配置分布"
@@ -155,7 +163,7 @@ h_assert_eq "0" "$(grep -c 'affected AS' "$T/bq.sql" | tr -d ' ')" "不发就不
 echo "── ④ 下一小时仍激增：6 小时内不重复发，本轮首个小时沿用 18 点 ──"
 rc=0; run "2026-11-23 19" || rc=$?
 h_assert_eq "0	1" "$rc	$(nlark)" "退出码 0，不发"
-h_assert_eq "2026-11-23 18	2026-11-23 19" "$(st '.["/app/v2/onboarding-journey/bootstrap × http_409"] | [.first, .last] | @tsv')" "first 沿用、last 前移"
+h_assert_eq "2026-11-23 17	2026-11-23 19" "$(st '.["/app/v2/onboarding-journey/bootstrap × http_409"] | [.first, .last] | @tsv')" "first 沿用、last 前移"
 
 echo "── ⑤ 表不存在：非零退出 + 失败告警只发私聊、只发一次（spec「检查失败不冒充平稳」）──"
 rc=0; FAKE_TABLES="" run "2026-11-23 20" || rc=$?
@@ -202,6 +210,54 @@ jq -c 'del(.["/app/v2/onboarding-journey/bootstrap × http_409"])' "$T/state/dia
 rc=0; FAKE_LARK_FAIL=1 run "2026-11-23 18" || rc=$?
 h_assert_eq "1" "$rc" "非零退出"
 h_assert_eq "true" "$(st '.["/app/v2/onboarding-journey/bootstrap × http_409"] == null')" "状态未写（失败前不落盘），下一小时照发"
+rm -f "$T/state/diag/.alerted-failure"
+
+LATE="/x/late × http_401"; NOWSIG="/x/now × http_500"
+echo "── ⑨a 复判一侧的分布查询失败：本小时卡照发、去重状态落盘，非零退出（审查 2026-11-27 #1）──"
+: > "$T/lark.calls"
+rc=0; FAKE_PH_FAIL_BREAKDOWN_T0="2026-11-23 13:00:00" run "2026-11-23 22" || rc=$?
+h_assert_eq "1	2" "$rc	$(nlark)" "非零退出；本小时卡 + 1 张失败卡"
+h_assert_contains "$(head -1 "$T/lark.calls")" "技术诊断报错激增 · 2026-11-23 22:00" "先发的是本小时（22 点）的卡"
+h_assert_contains "$(tail -1 "$T/lark.calls")" "取 PostHog 分布失败（2026-11-23 21:00）" "失败卡写明是复判 21 点那一侧"
+h_assert_eq "1795446000	null" "$(st "[(.[\"$NOWSIG\"].sent|tostring), (.[\"$LATE\"].sent|tostring)] | @tsv")" "本小时签名 sent 已落盘，复判签名未记发送"
+rm -f "$T/state/diag/.alerted-failure"
+echo "── ⑨b 同一小时重跑：本小时卡不重发，复判卡补上 ──"
+: > "$T/lark.calls"; : > "$T/bq.sql"; : > "$T/ph.bodies"
+rc=0; run "2026-11-23 22" || rc=$?
+h_assert_eq "0	1" "$rc	$(nlark)" "退出码 0，只发 1 张（复判卡）"
+h_assert_contains "$(cat "$T/lark.calls")" "技术诊断报错激增（复判补报）· 2026-11-23 21:00" "复判卡标题写被复判的 21 点"
+h_assert_contains "$(cat "$T/lark.calls")" "$LATE" "复判卡写出补报的签名"
+h_assert_eq "'2026-11-23 21'" "$(awk -v RS='-----' '/affected AS/' "$T/bq.sql" | grep -o "Asia/Kuala_Lumpur')) = '[^']*'" | sed "s/.*= //")" "GA4 分布查询查的是 21 点（只查这一次）"
+h_assert_eq "2026-11-23 13:00:00" "$(tail -1 "$T/ph.bodies" | jq -r .query.values.t0)" "PostHog 分布查询查的是 21 点（UTC 13 点）"
+h_assert_eq "1795446000	2026-11-23 21" "$(st ".[\"$LATE\"] | [(.sent|tostring), .last] | @tsv")" "补报后 sent = 22 点结束时刻，last = 21 点"
+h_assert_eq "true" "$(grep 'x/late' "$T/state/diag/hits.jsonl" | tail -1 | jq -r '.recheck and .sent')" "hits.jsonl 记下复判补报（recheck:true, sent:true）"
+h_assert_eq "1" "$(jq -r .recheck_sent "$T/state/health-diag.json")" "health-diag.json 记下补报数"
+rc=0; run "2026-11-23 22" || rc=$?
+h_assert_eq "0	1" "$rc	$(nlark)" "再重跑：去重，不再发"
+rc=0; run "2026-11-23 21" || rc=$?
+h_assert_eq "0	1" "$rc	$(nlark)" "回放 21 点实时判定：已补报过，6 小时内不重复发"
+echo "── ⑨c 同一轮两张卡：先本小时、后复判 ──"
+jq -c "del(.[\"$LATE\"], .[\"$NOWSIG\"])" "$T/state/diag/alerted.json" > "$T/a" && mv "$T/a" "$T/state/diag/alerted.json"
+: > "$T/lark.calls"
+rc=0; run "2026-11-23 22" || rc=$?
+h_assert_eq "0	2" "$rc	$(nlark)" "退出码 0，发 2 张"
+h_assert_eq "22:00	复判补报" "$(head -1 "$T/lark.calls" | grep -o '2026-11-23 22:00' | head -1 | cut -c12-)	$(tail -1 "$T/lark.calls" | grep -o '复判补报' | head -1)" "第 1 张是 22 点本小时卡，第 2 张是复判卡"
+echo "── ⑨d 实时那轮已判成激增、只被 6 小时去重压下：复判 ⛔ 不借机补发（审查 2026-11-27 #2）──"
+_sent_1630="$(TZ=Asia/Kuala_Lumpur date -j -f '%Y-%m-%d %H:%M:%S' '2026-11-23 16:30:00' +%s)"
+jq -c --argjson t "$_sent_1630" ".[\"$LATE\"] = {sent: \$t, first: \"2026-11-23 21\", last: \"2026-11-23 21\"}" "$T/state/diag/alerted.json" > "$T/a" && mv "$T/a" "$T/state/diag/alerted.json"
+: > "$T/lark.calls"
+rc=0; run "2026-11-23 22" || rc=$?
+h_assert_eq "0	0" "$rc	$(nlark)" "退出码 0，不发（22:00 时距 16:30 投递 5.5 小时被压下；23:00 复判时已过 6 小时，但实时那轮判过）"
+h_assert_contains "$(cat "$T/last.log")" "补报 0 个" "日志写明补报 0 个"
+
+echo "── ⑩ 跨 UTC 日（判定 MYT 08 点）：复判的 07 点在前一个 UTC 日 → 那天重取一次，基线按两个小时的并集补 ──"
+jq -c 'del(.["20261116"])' "$T/state/diag/coverage.json" > "$T/a" && mv "$T/a" "$T/state/diag/coverage.json"
+: > "$T/bq.sql"; : > "$T/ph.bodies"
+rc=0; FAKE_TABLES="$ALL_TABLES events_intraday_20261124" run "2026-11-24 08" || rc=$?
+h_assert_eq "0" "$rc" "退出码 0"
+h_assert_contains "$(grep "_TABLE_SUFFIX IN" "$T/bq.sql")" "IN ('intraday_20261123')" "前一个 UTC 日（20261123）重取一次"
+h_assert_contains "$(cat "$T/last.log")" "缺 UTC 日：20261116" "⛔ 只有复判的 07 点才要的 20261116 也补（只按本小时算会漏，基线当 0）"
+h_assert_eq "2026-11-23 00:00:00	2026-11-25 00:00:00" "$(jq -r '.query.values | [.t0, .t1] | @tsv' "$T/ph.bodies" | head -1)" "PostHog 一条查询覆盖两个 UTC 日"
 rm -f "$T/state/diag/.alerted-failure"
 
 echo "── ⑦ 当天 GA4 整段无数据：卡片写「数据缺失」，不冒充平稳（tasks 4.3）──"

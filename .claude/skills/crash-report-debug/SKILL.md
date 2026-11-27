@@ -57,7 +57,8 @@ FACT_CACHE_BASELINE=<跑批前快照> bash bin/test/assert-fact-cache.sh   # 事
 
 - **回放某个小时**：`CRASH_REPORT_STATE_DIR=<临时目录> CRASH_REPORT_DIAG_HOUR="2026-11-23 18" bash bin/diag-hourly.sh`。
   - 投递目标只认临时目录里 `local.env` 的 `CRASH_REPORT_DIAG_ALERT_CHAT_ID`，没有这个文件就不投递。⛔ 不要在生产机的 `$STATE` 上回放，会写坏去重状态。
-  - 判定结果看 `diag/last-eval.json`，渲染出的卡片看 `last-card.json`。
+  - 判定结果看 `diag/last-eval.json`，渲染出的卡片看 `last-card.json`；复判补报卡看 `last-card-recheck.json`（回放某小时会同时复判它的上一小时）。
+  - 实发后读回：`lark-cli api GET /open-apis/im/v1/messages/<日志里的 message_id> --params '{"card_msg_content_type":"raw_card_content"}' --as bot`，取 `.data.items[0].body.content | fromjson | .json_card | fromjson` 的全部字符串，与 `last-card*.json` 逐项比对。⛔ 不要说「卡片读不回、要人看」（docs/CLAUDE-lark-cli勘误.md）。同一小时重跑幂等键不变，飞书返回旧消息、不真发——验新版式要换键。
 - **零字节、零投递的夹具**：`bash bin/test/fn-diag-hourly.sh`。它桩掉 bq、curl（PostHog，`bin/test/fake-posthog-curl.py`）和 lark-cli，跑真实的脚本。
 - 日报 / 周报那一节回放用 `CRASH_REPORT_DIAG_DAY=<日>`，L1 填前一日，L2 填跑批日。冻结数据照旧用 `CRASH_REPORT_BQ_CACHE`。
 - ⚠️ 大回填（`bin/diag-backfill.sh`）先 `--dry-run` 报字节数。只补 PostHog 一侧用 `--posthog-only`（不扫 GA4、不计费）。

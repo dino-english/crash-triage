@@ -80,6 +80,17 @@ assert_eq "2026-11-23 17" "$(diag_plan "$_d_s1" "$_d_ev1" "2026-11-23 17" $((_D_
   "同一小时重跑：沿用 first，不发（幂等）"
 assert_eq "false" "$(diag_plan '{"/old × http_500":{"sent":1,"first":"2026-11-10 01","last":"2026-11-10 01"}}' '[]' "2026-11-23 17" $_D_T0 21600 | jq -r '.state | has("/old × http_500")')" \
   "状态里 last 早于 7 天的条目清掉"
+# 复判上一小时先于本小时 plan（diag-hourly.sh）：重跑同一小时时状态里 last 已是本小时，复判 17 点 ⛔ 不能把 last 拉回 17、把 first 重置成 17
+_d_s4='{"/x × http_409":{"sent":null,"first":"2026-11-23 15","last":"2026-11-23 18"}}'
+assert_eq "2026-11-23 15	2026-11-23 18" "$(diag_plan "$_d_s4" "$_d_ev1" "2026-11-23 17" $_D_T0 21600 | jq -r '.state["/x × http_409"] | [.first, .last] | @tsv')" \
+  "复判更早的小时：first 沿用、last 只前移不后退"
+assert_eq "2026-11-23 17	2026-11-23 17" "$(diag_plan '{"/x × http_409":{"sent":null,"first":"2026-11-23 18","last":"2026-11-23 18"}}' "$_d_ev1" "2026-11-23 17" $_D_T0 21600 | jq -r '.send[0].first, .state["/x × http_409"].first' | paste -sd '\t' -)" \
+  "复判发现上一小时已在激增：first 取较早的上一小时"
+assert_eq "false" "$(printf '%s' "$_d_p1" | jq -r '.send[0] | has("st")')" "send 条目不带状态字段"
+# 回放更早的小时（状态比它新一小时以上）：⛔ 不把不连续的激增并成一段，状态原样保留（审查 2026-11-27 #3）
+_d_s5='{"/x × http_409":{"sent":null,"first":"2026-11-26 21","last":"2026-11-26 21"}}'
+assert_eq "2026-11-20 10	2026-11-26 21	2026-11-26 21" "$(diag_plan "$_d_s5" "$_d_ev1" "2026-11-20 10" $_D_T0 21600 | jq -r '[.send[0].first, .state["/x × http_409"].first, .state["/x × http_409"].last] | @tsv')" \
+  "回放旧小时：卡片 first = 该小时，状态 first / last 不变"
 
 # ── diag_pick_suffix ──
 assert_eq "20261125" "$(diag_pick_suffix $'events_20261125\nevents_intraday_20261125\nevents_intraday_20261126' 20261125)" "日表与 intraday 并存 → 取日表"
@@ -120,6 +131,14 @@ assert_eq "1" "$(printf '%s' "$_d_txt2" | grep -c '共同点：都是 http_409 �
 assert_eq "1" "$(printf '%s' "$_d_txt2" | grep -c '| 12×' )" "倍数 = 设备 / max(基线, 1)：基线 0.4 按 1 计 → 12×（与判定口径一致）"
 assert_eq "1" "$(printf '%s' "$_d_txt2" | grep -c '0 账号 = 这些设备都没登录')" "有 0 账号的签名才解释"
 assert_eq "0" "$(printf '%s' "$_d_txt2" | grep -c '/y × http_409 | .*起持续')" "首次 = 本小时：不写「起持续」"
+assert_eq "1" "$(printf '%s' "$_d_txt" | grep -c '下一小时会复判一次')" "实时卡脚注写明下一小时会复判"
+_d_rc="$(diag_card "$_d_send" "2026-11-23 18" ok 10 4 recheck)"
+assert_eq "🚨 技术诊断报错激增（复判补报）· 2026-11-23 18:00（MYT）· 1 个接口	red" "$(printf '%s' "$_d_rc" | jq -r '[.header.title.content, .header.template] | @tsv')" "复判卡：标题写「复判补报」与被复判的小时"
+_d_rtxt="$(printf '%s' "$_d_rc" | jq -r '[.. | .content? // empty] | join("\n")')"
+assert_eq "1	1	0" "$(printf '%s' "$_d_rtxt" | grep -c '| 该小时 |')	$(printf '%s' "$_d_rtxt" | grep -c '复判补报：这一小时在整点后 5 分钟')	$(printf '%s' "$_d_rtxt" | grep -c '本小时' || true)" \
+  "复判卡：表头「该小时」、脚注说明晚报一小时的原因，不出现「本小时」"
+assert_eq "1	0" "$(diag_card "$(printf '%s' "$_d_send" | jq -c '.[0].cfg = []')" "2026-11-23 18" ok 10 4 recheck | jq -r '[.. | .content? // empty] | join("\n")' | { t="$(cat)"; printf '%s\t%s' "$(printf '%s' "$t" | grep -c '受影响设备该小时没有上报')" "$(printf '%s' "$t" | grep -c '本小时' || true)"; })" \
+  "复判卡：没有策略配置上报时也写「该小时」（11-27 本机回放实发发现）"
 assert_eq "orange" "$(diag_card '[]' "2026-11-23 18" GA4 10 4 | jq -r .header.template)" "只有数据缺失时卡片为橙色"
 assert_eq "1" "$(diag_card '[]' "2026-11-23 18" GA4 10 4 | jq -r '[.. | .content? // empty] | join(" ")' | grep -c '数据缺失')" "数据缺失卡片写明「数据缺失」"
 assert_eq "1" "$(diag_card '[]' "2026-11-23 18" PostHog 10 4 | jq -r '[.. | .content? // empty] | join(" ")' | grep -c 'PostHog 一侧没有')" "写明是哪个来源断数（另一边可能照常有数据）"

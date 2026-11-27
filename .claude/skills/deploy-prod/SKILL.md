@@ -29,7 +29,7 @@ description: 部署到生产机 Mac mini——合入 main、ssh 执行 update.sh
    - 执行完 `cmp` 两份旧包装，必须未变。✅ 2026-11-26 按这个做法装好。
 4. **注册 cron**：`hermes cron create '5 * * * *' --name diag-hourly --no-agent --script diag-hourly.sh`，然后把 job id 补进 docs/CLAUDE-部署与运维.md 的调度表。✅ 2026-11-26 已注册，job id `01c4ed7d509e`。注册前先 `env -i HOME=$HOME /bin/bash ~/.hermes/scripts/diag-hourly.sh` 手动跑一次首跑，有问题当场就能看到。
 5. **首跑核验**：看 `cat $STATE/health-diag.json`。首跑会自动回填 L0 前 7 天（约 20 GB，按 design 走，不另批）。
-6. **观察项**：2026-12-04 汇总 `diag/hits.jsonl` 与 `diag/evals.jsonl`，再从 `INFORMATION_SCHEMA.JOBS_BY_USER` 取实际费用，一起报维护者。
+6. **观察项**：2026-12-04 汇总 `diag/hits.jsonl` 与 `diag/evals.jsonl`，再从 `INFORMATION_SCHEMA.JOBS_BY_USER` 取实际费用，一起报维护者。⚠️ 2026-11-27 上线复判后，同一小时有实时行和 `recheck:true` 行两组：数命中次数先筛 `.recheck != true`（旧行没有这个字段，⛔ 不能写 `.recheck == false`）；补报次数 = `recheck:true` 且 `sent:true`；同一小时实时与复判的设备数对比，就是晚到事件的实测。`sent` 在投递前写入，表示「计划发送」，投递失败那一轮也是 true，要和日志里的 📣 对照。
 
 ## 启用技术诊断的 PostHog 一侧（2026-11-27 增补，design 决策 8，⛔ 每一步先问维护者）
 

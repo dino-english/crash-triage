@@ -12,6 +12,7 @@
   FAKE_PH_HTTP=400 返回 HTTP 400 + {"type":"validation_error","detail":"fake bad query"}
   FAKE_PH_ROWS=N   返回 N 行单列结果（测 50000 行截断判定）
   FAKE_PH_FAIL_BREAKDOWN=1  只有分布查询（含 "affected AS"）失败，其余照常
+  FAKE_PH_FAIL_BREAKDOWN_T0="YYYY-MM-DD HH:MM:SS"  只有 values.t0 等于它的分布查询失败（复判一侧失败、本小时照常）
   否则按查询文本挑夹具：含 "affected AS" → fx/ph-breakdown.json；含 "AS h," → fx/ph-hourly.json
   （按 values 的 t0 ≤ h 的 UTC 时刻 < t1 过滤）；含 "AS d," → fx/ph-daily.json（按 MYT 日落在 [t0, t1) 过滤）。
   夹具文件是行对象数组；不存在就回空结果。
@@ -34,8 +35,9 @@ body = json.load(open(body_path))
 with open(os.path.join(d, "ph.bodies"), "a") as f:
     f.write(json.dumps(body, ensure_ascii=False) + "\n")
 
-if os.environ.get("FAKE_PH_FAIL") == "1" or (
-        os.environ.get("FAKE_PH_FAIL_BREAKDOWN") == "1" and "affected AS" in body["query"]["query"]):
+_bd = "affected AS" in body["query"]["query"]
+if os.environ.get("FAKE_PH_FAIL") == "1" or (os.environ.get("FAKE_PH_FAIL_BREAKDOWN") == "1" and _bd) or (
+        _bd and os.environ.get("FAKE_PH_FAIL_BREAKDOWN_T0") == body["query"].get("values", {}).get("t0")):
     sys.stderr.write("curl: (7) fake connection failure\n")
     sys.exit(7)
 if os.environ.get("FAKE_PH_HTTP"):

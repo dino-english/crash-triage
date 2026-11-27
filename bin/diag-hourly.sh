@@ -4,9 +4,11 @@
 # 两个数据源（design 决策 8）：GA4 与 PostHog Logs 两边原样取、行带 src、各记各的覆盖；
 # 判定前按「平台 × 版本 × 天」二选一（core diag_pick，取设备多的一边，不相加）；断数按来源各判各的（core diag_missing）。
 #
-# 每次运行判定「上一个完整 MYT 小时」：
-#   取数（该小时所在 UTC 日：GA4 那张表 + PostHog 同一 UTC 日，整天重取、按来源按小时 upsert 进本地聚合）
-#   → 基线不足先回填 → 签名级激增判定 → 去重 → 命中则取分布、发一张卡 → 写去重状态。
+# 每次运行判定「上一个完整 MYT 小时」，并复判再往前一小时（晚到事件：hh:05 实测只到完整数据的一半，2026-11-27）：
+#   取数（该小时所在 UTC 日：GA4 那张表 + PostHog 同一 UTC 日，整天重取、按来源按小时 upsert 进本地聚合；
+#         复判的小时在前一个 UTC 日时（判定 MYT 08 点那次）把那天也重取一次）
+#   → 基线不足先回填 → 签名级激增判定（本小时 + 复判上一小时）→ 去重 → 命中则取分布、发卡
+#  （复判新命中的签名另发一张「复判补报」卡）→ 写去重状态。
 #
 # 运行数据只在 $STATE/diag/（spec：L0 ⛔ 不碰 L1 / L2 的文档、索引页、台账与基准文件）：
 #   hourly.jsonl    小时聚合（diag-hourly.sql 的行，保留 DIAG_KEEP_DAYS 天）
@@ -123,6 +125,10 @@ H_EPOCH="$(TZ=Asia/Kuala_Lumpur date -j -f '%Y-%m-%d %H:%M:%S' "$HOUR:00:00" +%s
 NOW=$((H_EPOCH + 3600))
 utc_day() { date -u -r "$1" +%Y%m%d; }
 H_DAY="$(utc_day "$H_EPOCH")"
+# 复判的小时（上一小时）：它的数据在上一轮 hh:05 只到了一部分，这一轮整天重取后更完整
+P_EPOCH=$((H_EPOCH - 3600))
+P_HOUR="$(TZ=Asia/Kuala_Lumpur date -r "$P_EPOCH" '+%Y-%m-%d %H')"
+P_DAY="$(utc_day "$P_EPOCH")"
 echo "  判定小时 ${HOUR}:00 MYT（UTC 日 ${H_DAY}）· 阈值 ≥${DIAG_MIN} 台且 ≥${DIAG_MULT}× · 投递目标 ${DIAG_TO:-未设置}"
 
 # ── 取数：按 UTC 日整天重取，upsert 进本地聚合 ─────────────────
@@ -204,11 +210,19 @@ write_coverage() {
 
 step "取当前小时所在 UTC 日"
 fetch_days "$DIAG_MAX_BYTES_ONE" "$H_DAY"
-fetch_days_ph "$H_DAY"
+if [ "$P_DAY" != "$H_DAY" ]; then
+  # 判定 MYT 08 点那次（09:05 运行）：复判的 07 点在前一个 UTC 日，那天上次是 08:05 取的、缺晚到事件 → 再取一次
+  #（每天一次，多扫一张日表）
+  fetch_days "$DIAG_MAX_BYTES_ONE" "$P_DAY"
+  fetch_days_ph "$P_DAY" "$H_DAY"
+else
+  fetch_days_ph "$H_DAY"
+fi
 
 step "基线完整性"
-# 前 7 天同一小时分别落在哪个 UTC 日（MYT 与 UTC 差整 8 小时，同一小时的 UTC 日就是往前推 k 天）
-_need_days="$(for k in 1 2 3 4 5 6 7; do utc_day $((H_EPOCH - k * 86400)); done | jq -R . | jq -sc .)"
+# 前 7 天同一小时分别落在哪个 UTC 日（MYT 与 UTC 差整 8 小时，同一小时的 UTC 日就是往前推 k 天）；
+# 复判的小时也要 7 天基线：它跨 UTC 日时多出一天，⛔ 漏了会把那天当基线 0、把复判判松
+_need_days="$(for k in 1 2 3 4 5 6 7; do utc_day $((H_EPOCH - k * 86400)); utc_day $((P_EPOCH - k * 86400)); done | sort -u | jq -R . | jq -sc .)"
 _missing="$(diag_need_dates "$( [ -s "$COVERAGE" ] && cat "$COVERAGE" || true )" "$_need_days")"
 _missing_ph="$(diag_need_dates "$( [ -s "$COVERAGE_PH" ] && cat "$COVERAGE_PH" || true )" "$_need_days")"
 if [ -n "$_missing" ]; then
@@ -229,12 +243,15 @@ else
 fi
 
 step "判定"
-# _win_raw = 两边原样（断数判定用）；_win = 每个平台 × 版本 × 天二选一后（激增判定用）
-_win_raw="$(jq -c --arg h "$HOUR" -s '
-  def ep: (. + ":00" | strptime("%Y-%m-%d %H:%M") | mktime);
-  ($h | ep) as $t
-  | [ .[] | (.h | ep) as $x
-          | select(($t - $x) >= 0 and ($t - $x) <= 7 * 86400 and ((($t - $x) % 86400 == 0) or ($t - $x) == 3600)) ]' "$HOURLY")"
+# win_raw <小时>：该小时、前一小时与前 7 天同小时的本地行，两边原样（断数判定用）；经 diag_pick 二选一后用于激增判定
+win_raw() {
+  jq -c --arg h "$1" -s '
+    def ep: (. + ":00" | strptime("%Y-%m-%d %H:%M") | mktime);
+    ($h | ep) as $t
+    | [ .[] | (.h | ep) as $x
+            | select(($t - $x) >= 0 and ($t - $x) <= 7 * 86400 and ((($t - $x) % 86400 == 0) or ($t - $x) == 3600)) ]' "$HOURLY"
+}
+_win_raw="$(win_raw "$HOUR")"
 _win="$(diag_pick h <<<"$_win_raw")"
 _cur="$(jq -c --arg h "$HOUR" '[ .[] | select(.h == $h) ]' <<<"$_win")"
 _ev="$(diag_evaluate "$_cur" "$_win" "$HOUR" "$DIAG_MIN" "$DIAG_MULT")"
@@ -251,13 +268,28 @@ printf '%s\n' "$_ev" > "$DIAG_DIR/last-eval.json"   # 本小时全部签名的�
 # 达到下限一半以上的签名逐小时追加，首周（2026-12-04）汇总时与次日完整数据对比，量出晚到的影响再决定要不要复判。
 jq -c --arg h "$HOUR" --arg run "$RUN_ID" --argjson half "$((DIAG_MIN / 2))" \
    '.[] | select(.devices >= $half) | {run:$run, h:$h, sig, devices, baseline, verdict}' <<<"$_ev" >> "$DIAG_DIR/evals.jsonl"
+# 复判上一小时：同一套判定与去重。⚠️ 先于本小时做 plan——同一签名两小时都激增时，本小时的 first 才能沿用上一小时；
+# 两小时都待发的签名只进本小时那张卡（卡上写「从 上一小时 起持续」），复判卡只收上一小时独有的。
+_pwin="$(win_raw "$P_HOUR" | diag_pick h)"
+_pev="$(diag_evaluate "$(jq -c --arg h "$P_HOUR" '[ .[] | select(.h == $h) ]' <<<"$_pwin")" "$_pwin" "$P_HOUR" "$DIAG_MIN" "$DIAG_MULT")"
+jq -c --arg h "$P_HOUR" --arg run "$RUN_ID" --argjson half "$((DIAG_MIN / 2))" \
+   '.[] | select(.devices >= $half) | {run:$run, h:$h, sig, devices, baseline, verdict, recheck:true}' <<<"$_pev" >> "$DIAG_DIR/evals.jsonl"
 _state="$( [ -s "$DIAG_STATE_FILE" ] && cat "$DIAG_STATE_FILE" || echo '{}' )"
-_plan="$(diag_plan "$_state" "$_ev" "$HOUR" "$NOW" "$DIAG_WINDOW")"
+# ⚠️ 复判的去重按「被复判那一小时结束的时刻」（= H_EPOCH，也就是它实时判定时的「当前时刻」）算，不按 NOW：
+#    实时那轮被 6 小时去重压下的签名，晚一小时可能刚出窗口——⛔ 不能借复判补发（审查 2026-11-27 #2）。
+#    实时那轮发过的 sent = H_EPOCH，差 0 → 不发；没发出去的（投递失败、复判一侧失败）sent 为空 → 照发。
+_pplan="$(diag_plan "$_state" "$_pev" "$P_HOUR" "$H_EPOCH" "$DIAG_WINDOW")"
+_plan="$(diag_plan "$(jq -c .state <<<"$_pplan")" "$_ev" "$HOUR" "$NOW" "$DIAG_WINDOW")"
 _send="$(jq -c .send <<<"$_plan")"
+# 复判卡只收本小时不待发的签名
+_psend="$(jq -c --argjson m "$_send" '[ .send[] | select(.sig as $k | ($m | map(.sig) | index($k)) == null) ]' <<<"$_pplan")"
 _n_spike="$(jq '[.[] | select(.verdict == "spike")] | length' <<<"$_ev")"
 _n_send="$(jq length <<<"$_send")"
+_n_psend="$(jq length <<<"$_psend")"
 echo "  签名 $(jq length <<<"$_ev") 个 · 激增 ${_n_spike} 个 · 待发 ${_n_send} 个 · 数据 ${_miss}"
 jq -r '.[] | select(.verdict == "spike") | "    🚨 \(.sig)：\(.devices) 台 vs 基线 \(.baseline)"' <<<"$_ev"
+echo "  复判 ${P_HOUR}:00：激增 $(jq '[.[] | select(.verdict == "spike")] | length' <<<"$_pev") 个 · 补报 ${_n_psend} 个"
+jq -r '.[] | "    🔁 \(.sig)：\(.devices) 台 vs 基线 \(.baseline)"' <<<"$_psend"
 _miss_send=skip
 if [ "$_miss" = missing ]; then
   _miss_send="$(diag_dedupe "$_state" "__data_missing__" "$NOW" "$DIAG_WINDOW")"
@@ -269,45 +301,80 @@ jq -c --arg h "$HOUR" --arg run "$RUN_ID" --arg miss "$_miss" --argjson send "$_
       sent: ((.sig as $k | $send | map(.sig) | index($k)) != null)} ]
     + (if $miss == "missing" then [{run:$run, h:$h, sig:"__data_missing__"}] else [] end) | .[]' \
    <<<"$_ev" >> "$HITS"
+# 复判命中另记一行（recheck:true）：实时已命中的签名也会再记一次，汇总时按 recheck 区分，sent 只算这次补报的
+jq -c --arg h "$P_HOUR" --arg run "$RUN_ID" --argjson send "$_psend" \
+   '.[] | select(.verdict == "spike") | {run:$run, h:$h, sig, devices, users, baseline, recheck:true,
+      sent: ((.sig as $k | $send | map(.sig) | index($k)) != null)}' <<<"$_pev" >> "$HITS"
 
 _new_state="$(jq -c .state <<<"$_plan")"
 if [ "$_miss" = missing ]; then
   _new_state="$(jq -c --arg h "$HOUR" '.["__data_missing__"] = ((.["__data_missing__"] // {}) + {last: $h})' <<<"$_new_state")"
 fi
 
-if [ "$_n_send" -gt 0 ] || [ "$_miss_send" = send ]; then
-  step "取分布"
-  # 没有投递目标就不取分布：卡片发不出去，白扫一张表（~3 GB）
-  if [ "$_n_send" -gt 0 ] && [ -z "$DIAG_TO" ]; then
-    echo "  ⏭️ 未设置投递目标，跳过分布查询"
-  elif [ "$_n_send" -gt 0 ]; then
-    # ⚠️ 签名来自数据：用 jq 的 @json 生成双引号字面量（\" \\ \uXXXX 都是 BigQuery 认的转义），不手拼引号
-    _keys="$(jq -r '[ .[].sig | @json ] | join(",")' <<<"$_send")"
-    _suf="$(jq -r --arg d "$H_DAY" 'if .[$d].src == "daily" then $d else "intraday_" + $d end' "$COVERAGE")"
-    _rc=0
-    _bd="$(trap - ERR; BQ_MAX_BYTES="$DIAG_MAX_BYTES_ONE" bqq json "$(q_render diag-breakdown.sql SUFFIXES="'$_suf'" HOUR="$HOUR" SIG_KEYS="$_keys")")" || _rc=$?
-    [ "$_rc" -eq 0 ] || fail "取分布失败（rc=${_rc}）"
-    # PostHog 一侧同一小时同一批签名（签名来自数据，⛔ 只走 values 占位，不拼进查询文本）
-    jq -n --arg a "$(date -u -r "$H_EPOCH" '+%Y-%m-%d %H:%M:%S')" --arg b "$(date -u -r "$NOW" '+%Y-%m-%d %H:%M:%S')" \
-          --argjson s "$(jq -c '[.[].sig]' <<<"$_send")" '{t0: $a, t1: $b, sigs: $s}' > "$DIAG_DIR/.phv.$$.json"
-    ph_query diag-breakdown.hogql "$DIAG_DIR/.phv.$$.json" "$DIAG_DIR/.ph.$$.json" || fail "取 PostHog 分布失败"
-    # 两边合并：affected 是各来源各自的受影响设备数，按签名两边相加（每个版本只在一边，不重复）
-    _bd="$(jq -c --argjson g "${_bd:-[]}" '
-      ([ $g[] | . + {src: "ga4"} ] + [ .[] | . + {src: "posthog"} ])
-      | map(.devices |= tonumber | .affected |= tonumber)
-      | (group_by(.sig) | map({key: .[0].sig, value: (group_by(.src) | map(.[0].affected) | add)}) | from_entries) as $aff
-      | map(.affected = $aff[.sig] | del(.src))' "$DIAG_DIR/.ph.$$.json")"
-    rm -f "$DIAG_DIR/.phv.$$.json" "$DIAG_DIR/.ph.$$.json"
-    _send="$(jq -c --argjson bd "${_bd:-[]}" '
-      ($bd | map(.devices |= tonumber | .affected |= tonumber)) as $b
-      | map(. as $x | . + {geo: [ $b[] | select(.dim == "geo" and .sig == $x.sig) ],
-                           cfg: [ $b[] | select(.dim == "cfg" and .sig == $x.sig) ]})' <<<"$_send")"
-  fi
-  step "投递"
+# attach_breakdown <小时> <小时起 epoch> <待发 JSON>：取该小时这批签名的分布，结果放进全局 _bd_out（带 geo / cfg）。
+# ⚠️ 不写成 $( ) 返回：里面的 fail 在子 shell 里退出，外层赋值失败会再触发 on_err 叠一张泛化失败卡（F72）
+attach_breakdown() {
+  local hour="$1" t0="$2" send="$3" keys suf bd _rc=0
+  # ⚠️ 签名来自数据：用 jq 的 @json 生成双引号字面量（\" \\ \uXXXX 都是 BigQuery 认的转义），不手拼引号
+  keys="$(jq -r '[ .[].sig | @json ] | join(",")' <<<"$send")"
+  suf="$(jq -r --arg d "$(utc_day "$t0")" 'if .[$d].src == "daily" then $d else "intraday_" + $d end' "$COVERAGE")"
+  bd="$(trap - ERR; BQ_MAX_BYTES="$DIAG_MAX_BYTES_ONE" bqq json "$(q_render diag-breakdown.sql SUFFIXES="'$suf'" HOUR="$hour" SIG_KEYS="$keys")")" || _rc=$?
+  [ "$_rc" -eq 0 ] || fail "取分布失败（rc=${_rc}，${hour}:00）"
+  # PostHog 一侧同一小时同一批签名（签名来自数据，⛔ 只走 values 占位，不拼进查询文本）
+  jq -n --arg a "$(date -u -r "$t0" '+%Y-%m-%d %H:%M:%S')" --arg b "$(date -u -r $((t0 + 3600)) '+%Y-%m-%d %H:%M:%S')" \
+        --argjson s "$(jq -c '[.[].sig]' <<<"$send")" '{t0: $a, t1: $b, sigs: $s}' > "$DIAG_DIR/.phv.$$.json"
+  ph_query diag-breakdown.hogql "$DIAG_DIR/.phv.$$.json" "$DIAG_DIR/.ph.$$.json" || fail "取 PostHog 分布失败（${hour}:00）"
+  # 两边合并：affected 是各来源各自的受影响设备数，按签名两边相加（每个版本只在一边，不重复）
+  bd="$(jq -c --argjson g "${bd:-[]}" '
+    ([ $g[] | . + {src: "ga4"} ] + [ .[] | . + {src: "posthog"} ])
+    | map(.devices |= tonumber | .affected |= tonumber)
+    | (group_by(.sig) | map({key: .[0].sig, value: (group_by(.src) | map(.[0].affected) | add)}) | from_entries) as $aff
+    | map(.affected = $aff[.sig] | del(.src))' "$DIAG_DIR/.ph.$$.json")"
+  rm -f "$DIAG_DIR/.phv.$$.json" "$DIAG_DIR/.ph.$$.json"
+  _bd_out="$(jq -c --argjson bd "${bd:-[]}" '
+    ($bd | map(.devices |= tonumber | .affected |= tonumber)) as $b
+    | map(. as $x | . + {geo: [ $b[] | select(.dim == "geo" and .sig == $x.sig) ],
+                         cfg: [ $b[] | select(.dim == "cfg" and .sig == $x.sig) ]})' <<<"$send")"
+}
+
+# deliver_card <卡片 JSON> <幂等键种子>：发一张卡，message_id 放进全局 _mid；失败 fail（同 attach_breakdown，不走 $( )）
+deliver_card() {
+  local key _resp _rc=0
+  key="diag-$(printf '%s' "$2" | shasum -a 256 | cut -c1-32)"
+  _resp="$(trap - ERR; lk im +messages-send "${_recip[@]}" --msg-type interactive --content "$1" \
+             --idempotency-key "$key" --as "$LARK_AS" --format json)" || _rc=$?
+  # ⛔ 只看退出码会打假 ✅（F57）：以回包里有 message_id 为准
+  _mid="$(printf '%s' "$_resp" | jq -r '.. | .message_id? // empty' 2>/dev/null | head -1 || true)"
+  [ "$_rc" -eq 0 ] && [ -n "$_mid" ] || fail "告警卡片发送失败（rc=${_rc}，回包无 message_id）：$(printf '%s' "$_resp" | head -c 300)"
+  echo "  📣 已发送到 ${DIAG_TO}（message_id=${_mid}）"
+}
+
+save_state() {
+  printf '%s\n' "$_new_state" > "$DIAG_STATE_FILE.tmp.$$" && mv "$DIAG_STATE_FILE.tmp.$$" "$DIAG_STATE_FILE"
+}
+
+_card=""; _pcard=""
+render_main() {
   _card="$(diag_card "$_send" "$HOUR" "$( [ "$_miss_send" = send ] && printf '%s' "$_miss_label" || echo ok )" "$DIAG_MIN" "$DIAG_MULT")"
   printf '%s\n' "$_card" > "$DIAG_DIR/last-card.json"
+}
+render_recheck() {
+  _pcard="$(diag_card "$_psend" "$P_HOUR" ok "$DIAG_MIN" "$DIAG_MULT" recheck)"
+  printf '%s\n' "$_pcard" > "$DIAG_DIR/last-card-recheck.json"
+}
+_has_main=0
+if [ "$_n_send" -gt 0 ] || [ "$_miss_send" = send ]; then _has_main=1; fi
+if [ "$_has_main" = 1 ] || [ "$_n_psend" -gt 0 ]; then
   if [ -z "$DIAG_TO" ]; then
-    echo "  ⏭️ 未设置 CRASH_REPORT_DIAG_ALERT_CHAT_ID（\$STATE/local.env），跳过投递；卡片已写 $DIAG_DIR/last-card.json"
+    # 没有投递目标就不取分布：卡片发不出去，白扫一张表（~3 GB）
+    step "投递"
+    _written=""
+    if [ "$_has_main" = 1 ]; then render_main; _written="last-card.json"; fi
+    if [ "$_n_psend" -gt 0 ]; then
+      render_recheck
+      if [ -n "$_written" ]; then _written="${_written} 与 last-card-recheck.json"; else _written="last-card-recheck.json"; fi
+    fi
+    echo "  ⏭️ 未设置 CRASH_REPORT_DIAG_ALERT_CHAT_ID（\$STATE/local.env），跳过分布查询与投递；卡片已写 $DIAG_DIR/ 下的 ${_written}"
     audit deliver.skip "投递" '{"reason":"CRASH_REPORT_DIAG_ALERT_CHAT_ID 未设置"}'
   else
     LARK_AS="${CRASH_REPORT_LARK_AS:-bot}"
@@ -317,25 +384,38 @@ if [ "$_n_send" -gt 0 ] || [ "$_miss_send" = send ]; then
     # shellcheck disable=SC1091
     . "$ROOT/bin/lib/lark.sh"
     case "$DIAG_TO" in (ou_*) _recip=(--user-id "$DIAG_TO") ;; (*) _recip=(--chat-id "$DIAG_TO") ;; esac
-    # 幂等键 = 小时 + 待发签名集合：同一小时重跑不会重复发
-    _key="diag-$(printf '%s|%s|%s' "$HOUR" "$(jq -c '[.[].sig]' <<<"$_send")" "$_miss_send" | shasum -a 256 | cut -c1-32)"
-    _rc=0
-    _resp="$(trap - ERR; lk im +messages-send "${_recip[@]}" --msg-type interactive --content "$_card" \
-               --idempotency-key "$_key" --as "$LARK_AS" --format json)" || _rc=$?
-    # ⛔ 只看退出码会打假 ✅（F57）：以回包里有 message_id 为准
-    _mid="$(printf '%s' "$_resp" | jq -r '.. | .message_id? // empty' 2>/dev/null | head -1 || true)"
-    [ "$_rc" -eq 0 ] && [ -n "$_mid" ] || fail "告警卡片发送失败（rc=${_rc}，回包无 message_id）：$(printf '%s' "$_resp" | head -c 300)"
-    echo "  📣 已发送到 ${DIAG_TO}（message_id=${_mid}）"
-    _new_state="$(diag_mark_sent "$_new_state" "$(jq -c '[.[].sig]' <<<"$_send")" "$NOW")"
-    if [ "$_miss_send" = send ]; then
-      _new_state="$(diag_mark_sent "$_new_state" '["__data_missing__"]' "$NOW")"
+    # ⚠️ 先取分布、发本小时卡并落盘去重状态，再做复判卡：复判一侧（分布查询 / 发送）失败时，
+    #    实时卡已经发出、不会在下一小时重发（审查 2026-11-27 #1）。复判失败照样非零退出、发失败卡（spec「检查失败不冒充平稳」），
+    #    代价是那一小时独有的补报签名不再有第三次判定——失败卡会让维护者知道。
+    if [ "$_has_main" = 1 ]; then
+      if [ "$_n_send" -gt 0 ]; then step "取分布"; attach_breakdown "$HOUR" "$H_EPOCH" "$_send"; _send="$_bd_out"; fi
+      step "投递"
+      render_main
+      # 幂等键 = 小时 + 待发签名集合：同一小时重跑不会重复发
+      deliver_card "$_card" "$(printf '%s|%s|%s' "$HOUR" "$(jq -c '[.[].sig]' <<<"$_send")" "$_miss_send")"
+      _new_state="$(diag_mark_sent "$_new_state" "$(jq -c '[.[].sig]' <<<"$_send")" "$NOW")"
+      if [ "$_miss_send" = send ]; then
+        _new_state="$(diag_mark_sent "$_new_state" '["__data_missing__"]' "$NOW")"
+      fi
+      save_state
+      audit deliver "投递" "$(jq -cn --arg mid "$_mid" --argjson n "$_n_send" --arg miss "$_miss_send" '{message_id:$mid,sigs:$n,missing:$miss}')"
     fi
-    audit deliver "投递" "$(jq -cn --arg mid "$_mid" --argjson n "$_n_send" --arg miss "$_miss_send" '{message_id:$mid,sigs:$n,missing:$miss}')"
+    if [ "$_n_psend" -gt 0 ]; then
+      step "取分布（复判 ${P_HOUR}:00）"
+      attach_breakdown "$P_HOUR" "$P_EPOCH" "$_psend"; _psend="$_bd_out"
+      step "投递（复判补报）"
+      render_recheck
+      # 幂等键 = 复判 + 小时 + 待发签名集合：同一小时重跑不会重复发
+      deliver_card "$_pcard" "recheck|${P_HOUR}|$(jq -c '[.[].sig]' <<<"$_psend")"
+      _new_state="$(diag_mark_sent "$_new_state" "$(jq -c '[.[].sig]' <<<"$_psend")" "$NOW")"
+      save_state
+      audit deliver "投递" "$(jq -cn --arg mid "$_mid" --argjson n "$_n_psend" '{message_id:$mid,sigs:$n,recheck:true}')"
+    fi
   fi
 fi
 
 step "写状态"
-printf '%s\n' "$_new_state" > "$DIAG_STATE_FILE.tmp.$$" && mv "$DIAG_STATE_FILE.tmp.$$" "$DIAG_STATE_FILE"
+save_state
 # 数据缺失 = 检查失败（spec「检查失败不冒充平稳」：数据未更新 → 非零退出并留下失败记录）。
 # 「数据缺失」卡已经发过（或因未配置目标 / 6 小时去重没发），⛔ 不再叠一张泛化失败卡：先置告警标记再 fail，
 # fail 只写 health（ok:false）与审计、非零退出；标记留到下一次成功才删，与其它失败同一套「只报一次」。
@@ -343,9 +423,9 @@ if [ "$_miss" = missing ]; then
   : > "$ALERT_FLAG"
   fail "数据缺失：${HOUR}:00 与前一小时 ${_miss_label} 一侧没有任何接口类诊断数据（前 7 天同小时每天都有）——上报或导出可能中断"
 fi
-jq -n --arg t "$TS" --arg h "$HOUR" --argjson sp "$_n_spike" --argjson se "$_n_send" --arg miss "$_miss" \
-  '{last_run:$t, run_id:$t, ok:true, hour:$h, spikes:$sp, sent:$se, data:$miss}' > "$HEALTH_FILE"
+jq -n --arg t "$TS" --arg h "$HOUR" --argjson sp "$_n_spike" --argjson se "$_n_send" --argjson re "$_n_psend" --arg miss "$_miss" \
+  '{last_run:$t, run_id:$t, ok:true, hour:$h, spikes:$sp, sent:$se, recheck_sent:$re, data:$miss}' > "$HEALTH_FILE"
 rm -f "$ALERT_FLAG"
-audit run.end "写状态" "$(jq -cn --argjson sp "$_n_spike" --argjson se "$_n_send" '{ok:true,spikes:$sp,sent:$se}')"
+audit run.end "写状态" "$(jq -cn --argjson sp "$_n_spike" --argjson se "$_n_send" --argjson re "$_n_psend" '{ok:true,spikes:$sp,sent:$se,recheck_sent:$re}')"
 echo "=== 完成 ==="
 RUN_COMPLETED=1
